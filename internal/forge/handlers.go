@@ -17,6 +17,9 @@ func RegisterAll(b *bridge.Bridge) {
 	b.Register("map.status", handleMapStatus)
 	b.Register("map.info_get", handleMapInfoGet)
 	b.Register("units.list", handleUnitsList)
+	b.Register("selection.get", handleSelectionGet)
+	b.Register("selection.set", handleSelectionSet)
+	b.Register("selection.clear", handleSelectionClear)
 }
 
 type pingResponse struct {
@@ -121,6 +124,29 @@ type unitsListEntity struct {
 type invItem struct {
 	Slot   uint32 `json:"slot"`
 	ItemID string `json:"item_id"`
+}
+
+func handleSelectionGet(_ json.RawMessage) (any, error) {
+	return Current.Selection(), nil
+}
+
+type selectionSetParams struct {
+	Items []SelectionItem `json:"items"`
+}
+
+func handleSelectionSet(params json.RawMessage) (any, error) {
+	var p selectionSetParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	primary := len(p.Items) - 1 // most recently added becomes primary
+	Current.SetSelection(p.Items, primary)
+	return Current.Selection(), nil
+}
+
+func handleSelectionClear(_ json.RawMessage) (any, error) {
+	Current.SetSelection(nil, -1)
+	return Current.Selection(), nil
 }
 
 func handleUnitsList(_ json.RawMessage) (any, error) {

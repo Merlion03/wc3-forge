@@ -8,6 +8,13 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+// Wails event names emitted from Go → JS. Defined as constants so the
+// frontend strings stay in sync with what's actually emitted.
+const (
+	eventSelectionChanged = "wc3-forge:selection-changed"
+	eventMapChanged       = "wc3-forge:map-changed"
+)
+
 // App is the Wails-bindable surface exposed to the frontend. Every method
 // here becomes an awaitable JS function under wailsjs/go/main/App.
 //
@@ -25,6 +32,10 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	// Forward Go-side selection changes to the frontend.
+	forge.Current.OnSelectionChanged(func(s forge.SelectionState) {
+		runtime.EventsEmit(a.ctx, eventSelectionChanged, s)
+	})
 }
 
 // OpenMapDialog presents an OS folder picker and returns the selected
@@ -52,11 +63,13 @@ func (a *App) OpenMap(path string) (MapStatus, error) {
 	if err := forge.Current.Open(path); err != nil {
 		return MapStatus{}, err
 	}
+	runtime.EventsEmit(a.ctx, eventMapChanged, map[string]any{"loaded": true})
 	return a.Status(), nil
 }
 
 func (a *App) CloseMap() MapStatus {
 	forge.Current.Close()
+	runtime.EventsEmit(a.ctx, eventMapChanged, map[string]any{"loaded": false})
 	return a.Status()
 }
 
@@ -113,4 +126,84 @@ func (a *App) ListUnits() []UnitDTO {
 		})
 	}
 	return out
+}
+
+// TerrainDTO is the JS-facing terrain shape. Heights + ground-texture indices
+// as parallel slices for compact transfer (typed arrays on the JS side).
+// Vertex (col, row) is at index row*Width + col, row 0 = bottom.
+type TerrainDTO struct {
+	Width        uint32     `json:"width"`         // vertex count along X
+	Height       uint32     `json:"height"`        // vertex count along Y
+	CenterOffset [2]float32 `json:"center_offset"` // game coords of vertex (0,0); bottom-left
+	Heights      []float32  `json:"heights"`       // length = Width*Height, game-space Z
+	GroundTex    []uint8    `json:"ground_tex"`    // length = Width*Height, palette idx 0..15
+	Tileset      string     `json:"tileset"`       // single letter, e.g. "L" (Lordaeron)
+	Palette      []string   `json:"palette"`       // ground tileset FourCCs (palette key)
+}
+
+// GetTerrain returns the terrain grid for rendering. Empty if no map loaded or
+// the map has no .w3e file (older maps sometimes lack one).
+func (a *App) GetTerrain() (TerrainDTO, error) {
+	t := forge.Current.Terrain()
+	if t == nil {
+		return TerrainDTO{}, fmt.Errorf("no terrain loaded")
+	}
+	n := int(t.Width * t.Height)
+	heights := make([]float32, n)
+	ground := make([]uint8, n)
+	for i := 0; i < n; i++ {
+		heights[i] = t.Tiles[i].Z()
+		ground[i] = t.Tiles[i].GroundTexIdx()
+	}
+	return TerrainDTO{
+		Width:        t.Width,
+		Height:       t.Height,
+		CenterOffset: t.CenterOffset,
+		Heights:      heights,
+		GroundTex:    ground,
+		Tileset:      string([]byte{t.Tileset}),
+		Palette:      t.GroundTilesets,
+	}, nil
+}
+
+// SelectionDTO mirrors forge.SelectionState for JS consumption.
+type SelectionDTO struct {
+	Items   []SelectionItemDTO `json:"items"`
+	Primary int                `json:"primary"`
+}
+
+type SelectionItemDTO struct {
+	Kind string `json:"kind"`
+	ID   uint32 `json:"id"`
+}
+
+func (a *App) GetSelection() SelectionDTO {
+	s := forge.Current.Selection()
+	items := make([]SelectionItemDTO, len(s.Items))
+	for i, it := range s.Items {
+		items[i] = SelectionItemDTO{Kind: it.Kind, ID: it.ID}
+	}
+	return SelectionDTO{Items: items, Primary: s.Primary}
+}
+
+// SetSelection replaces the selection. Empty items clears.
+func (a *App) SetSelection(items []SelectionItemDTO) SelectionDTO {
+	converted := make([]forge.SelectionItem, len(items))
+	for i, it := range items {
+		converted[i] = forge.SelectionItem{Kind: it.Kind, ID: it.ID}
+	}
+	forge.Current.SetSelection(converted, len(converted)-1)
+	return a.GetSelection()
+}
+
+// SelectUnit is a convenience for the common case: select a single unit by
+// creation_number. Replaces any existing selection.
+func (a *App) SelectUnit(creationNumber uint32) SelectionDTO {
+	forge.Current.SetSelection([]forge.SelectionItem{{Kind: "unit", ID: creationNumber}}, 0)
+	return a.GetSelection()
+}
+
+func (a *App) ClearSelection() SelectionDTO {
+	forge.Current.SetSelection(nil, -1)
+	return a.GetSelection()
 }
