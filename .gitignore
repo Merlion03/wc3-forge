@@ -10,6 +10,9 @@
 *.out
 coverage.out
 coverage.html
+# Vendored CASC bindings need to ship with the repo (MIT/zlib licensed).
+!/scripts/casclib/*.dll
+!/scripts/casclib/*.h
 
 # Go workspace
 go.work
@@ -35,6 +38,9 @@ Thumbs.db
 
 # Wails build outputs
 /build/bin/
+
+# Runtime log
+/wc3-forge.log
 
 # Frontend build artifacts (frontend/dist content is rebuilt every time;
 # the directory itself must exist for go:embed to succeed — kept via gitkeep)
