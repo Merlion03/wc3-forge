@@ -34,6 +34,8 @@ export function ListUnits():Promise<Array<main.UnitDTO>>;
 
 export function LogJS(arg1:string):Promise<void>;
 
+export function MoveDoodad(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
+
 export function MoveUnit(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
 export function OpenMap(arg1:string):Promise<main.MapStatus>;

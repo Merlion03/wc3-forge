@@ -129,7 +129,14 @@ type Session struct {
 	// only the dirty files back through the source's write path. Open + Close
 	// reset them. The boolean dirty-changed bus mirrors the map/selection
 	// notification pattern (lock-free copy → invoke listeners).
+	//
+	// The PUBLIC dirty-changed event is a single boolean ("any file dirty");
+	// per-file flags are the internal granularity that lets Save write only
+	// the files that actually changed. Mutator fires dirty=true on the
+	// 0→1 transition of (dirtyUnits || dirtyDoodads), Save fires dirty=false
+	// on the 1→0 transition.
 	dirtyUnits     bool
+	dirtyDoodads   bool
 	dirtyListeners []func(bool)
 
 	// Entity-change bus — fired from any mutator (MoveUnit today; SetRotation,
@@ -329,8 +336,9 @@ func (s *Session) Open(path string) error {
 	s.pathingMap = pathingMap
 	s.strings = wtsStrings
 	s.selection = SelectionState{Items: nil, Primary: -1}
-	wasDirty := s.dirtyUnits
+	wasDirty := s.dirtyUnits || s.dirtyDoodads
 	s.dirtyUnits = false
+	s.dirtyDoodads = false
 	s.mu.Unlock()
 	if prevSource != nil {
 		_ = prevSource.close()
@@ -382,8 +390,9 @@ func (s *Session) Close() {
 	s.pathingMap = nil
 	s.strings = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
-	wasDirty := s.dirtyUnits
+	wasDirty := s.dirtyUnits || s.dirtyDoodads
 	s.dirtyUnits = false
+	s.dirtyDoodads = false
 	s.mu.Unlock()
 	if prevSource != nil {
 		_ = prevSource.close()
@@ -643,13 +652,72 @@ func (s *Session) MoveUnit(creationNumber uint32, x, y, z float32) error {
 	return nil
 }
 
+// MoveDoodad relocates the doodad with the given creation_number to the
+// supplied game coordinates. Fires the dirty-changed event when this is the
+// first pending edit (across all per-file dirty flags). Returns an error if
+// no doodad with that creation_number is loaded.
+//
+// Game-coords contract: x/y/z are already in WC3 game coordinates (centered
+// at 0,0). doodadsdoo stores Position verbatim — no conversion needed here.
+// Mirrors MoveUnit's shape; the only differences are:
+//   - we look up creation_number in s.doodads.Doodads (per-kind id namespace —
+//     a unit and a doodad can share the same numeric creation_number)
+//   - the dirty flag flipped is dirtyDoodads (so Save writes war3map.doo, not
+//     war3mapUnits.doo)
+//   - the EntityChange kind is "doodad" so scene/Properties subscribers can
+//     branch correctly
+func (s *Session) MoveDoodad(creationNumber uint32, x, y, z float32) error {
+	s.mu.Lock()
+	if s.doodads == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	found := -1
+	for i := range s.doodads.Doodads {
+		if s.doodads.Doodads[i].CreationNumber == creationNumber {
+			found = i
+			break
+		}
+	}
+	if found < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no doodad with creation_number %d", creationNumber)
+	}
+	// No-op short-circuit: same rationale as MoveUnit — Properties commits on
+	// blur even when nothing changed, and we don't want every focus-out to
+	// flip the Save pill to amber.
+	cur := s.doodads.Doodads[found].Position
+	if cur[0] == x && cur[1] == y && cur[2] == z {
+		s.mu.Unlock()
+		return nil
+	}
+	s.doodads.Doodads[found].Position = [3]float32{x, y, z}
+	// 0→1 transition of the combined dirty flag (any per-file flag). If the
+	// session was already dirty for another reason (e.g. dirtyUnits), this
+	// edit doesn't re-fire the public dirty event.
+	wasDirty := s.dirtyUnits || s.dirtyDoodads
+	s.dirtyDoodads = true
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	s.notifyEntityChanged(EntityChange{
+		Kind:     "doodad",
+		ID:       creationNumber,
+		Field:    "position",
+		Position: [3]float32{x, y, z},
+	})
+	return nil
+}
+
 // IsDirty reports whether the session holds unsaved edits to any in-memory
-// map file. Today only units are mutable; future entity kinds extend this
-// to a per-file flag check.
+// map file. The flag is the OR of every per-file dirty flag — the UI cares
+// only about "anything to save" granularity. Save itself reads each per-file
+// flag and writes only what's dirty.
 func (s *Session) IsDirty() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.dirtyUnits
+	return s.dirtyUnits || s.dirtyDoodads
 }
 
 // Save flushes every dirty in-memory file back through the source's write
@@ -668,12 +736,15 @@ func (s *Session) Save() error {
 		s.mu.Unlock()
 		return fmt.Errorf("no map loaded")
 	}
-	if !s.dirtyUnits {
+	if !s.dirtyUnits && !s.dirtyDoodads {
 		s.mu.Unlock()
 		return nil // nothing to do
 	}
 	src := s.source
 	units := s.units
+	doodads := s.doodads
+	saveUnits := s.dirtyUnits
+	saveDoodads := s.dirtyDoodads
 	s.mu.Unlock()
 
 	if src == nil {
@@ -682,17 +753,39 @@ func (s *Session) Save() error {
 
 	// Encode dirty files OUTSIDE the lock so the (potentially-slow) write
 	// doesn't block UI reads. Encode is pure over its inputs.
-	data, err := unitsdoo.Encode(units)
-	if err != nil {
-		return fmt.Errorf("encode war3mapUnits.doo: %w", err)
+	//
+	// Partial-write semantics: each file's dirty flag clears independently
+	// only after its successful write. If one file errors, its flag stays
+	// set and the user can retry; previously-written files don't get re-
+	// written on the retry. First error wins.
+	if saveUnits {
+		data, err := unitsdoo.Encode(units)
+		if err != nil {
+			return fmt.Errorf("encode war3mapUnits.doo: %w", err)
+		}
+		if err := src.write("war3mapUnits.doo", data); err != nil {
+			return fmt.Errorf("write war3mapUnits.doo: %w", err)
+		}
+		s.mu.Lock()
+		s.dirtyUnits = false
+		s.mu.Unlock()
 	}
-	if err := src.write("war3mapUnits.doo", data); err != nil {
-		return fmt.Errorf("write war3mapUnits.doo: %w", err)
+	if saveDoodads {
+		data, err := doodadsdoo.Encode(doodads)
+		if err != nil {
+			return fmt.Errorf("encode war3map.doo: %w", err)
+		}
+		if err := src.write("war3map.doo", data); err != nil {
+			return fmt.Errorf("write war3map.doo: %w", err)
+		}
+		s.mu.Lock()
+		s.dirtyDoodads = false
+		s.mu.Unlock()
 	}
 
-	s.mu.Lock()
-	s.dirtyUnits = false
-	s.mu.Unlock()
+	// Fire the public dirty=false event only when everything cleared. (If a
+	// later per-file write fails we'll have returned above with the partial
+	// clear in place; the next Save call clears the rest.)
 	s.notifyDirty(false)
 	return nil
 }

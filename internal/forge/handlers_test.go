@@ -16,6 +16,27 @@ func TestHandleUnitsMove_InvalidParams(t *testing.T) {
 	}
 }
 
+// TestHandleDoodadsMove_InvalidParams mirrors the units variant: malformed
+// JSON should surface a wrapped unmarshal error, not a panic.
+func TestHandleDoodadsMove_InvalidParams(t *testing.T) {
+	if _, err := handleDoodadsMove(json.RawMessage(`{"creation_number":"not-a-number"}`)); err == nil {
+		t.Fatal("expected error for malformed creation_number")
+	}
+}
+
+// TestHandleDoodadsMove_NoMap asserts the "no map loaded" path returns an
+// error rather than silently no-op-ing — keeps the bridge's contract loud
+// about the precondition.
+func TestHandleDoodadsMove_NoMap(t *testing.T) {
+	prev := Current
+	t.Cleanup(func() { Current = prev })
+	Current = &Session{}
+	_, err := handleDoodadsMove(json.RawMessage(`{"creation_number":1,"x":0,"y":0,"z":0}`))
+	if err == nil {
+		t.Fatal("expected error when no map loaded")
+	}
+}
+
 // TestHandleMapSave_MPQSentinelMessage exercises the error-mapping branch:
 // when Session.Save returns ErrMPQWriteNotImplemented (which it does for an
 // MPQ-backed session OR — as covered here — when invoked with no map loaded

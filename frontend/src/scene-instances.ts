@@ -1127,21 +1127,36 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     ;(inst as any).setLocation([x, y, z + moveHeight])
   }
 
+  // Internal helper for re-positioning a placed doodad instance. Parallel
+  // to updateUnitPositionImpl, with one structural difference: doodads have
+  // NO move_height offset (placeDoodad uses d.position verbatim, no SLK Z
+  // adjustment unlike units), so the JS-side Z passes through unchanged.
+  // setLocation (absolute), not move (additive) — same rationale as units.
+  function updateDoodadPositionImpl(cn: number, x: number, y: number, z: number): void {
+    const inst = doodadInstances.get(cn)
+    if (!inst) return
+    ;(inst as any).setLocation([x, y, z])
+  }
+
   // Subscribe to Go-side entity-change events. Any mutation that fires
-  // OnEntityChanged (MoveUnit today; future SetRotation/etc.) flows through
-  // here, regardless of whether the mutator was the JS Properties panel, the
-  // MCP bridge, or any future code path. This is what keeps the 3D scene in
-  // sync with bridge-driven edits without polling.
+  // OnEntityChanged (MoveUnit + MoveDoodad today; future SetRotation/etc.)
+  // flows through here, regardless of whether the mutator was the JS
+  // Properties panel, the MCP bridge, or any future code path. This is what
+  // keeps the 3D scene in sync with bridge-driven edits without polling.
   //
   // Field-aware: ignores changes whose Field isn't one we handle (no-op for
-  // future Field values that don't map to scene state).
+  // future Field values that don't map to scene state). Kind-branched so
+  // unit + doodad position updates take their respective code paths.
   const ENTITY_EVENT = 'wc3-forge:entity-changed'
   EventsOn(ENTITY_EVENT, (payload: { kind: string; id: number; field: string; position: number[] }) => {
-    if (!payload || payload.kind !== 'unit') return
-    if (payload.field === 'position') {
-      const p = payload.position
-      if (!p || p.length < 3) return
+    if (!payload) return
+    if (payload.field !== 'position') return
+    const p = payload.position
+    if (!p || p.length < 3) return
+    if (payload.kind === 'unit') {
       updateUnitPositionImpl(payload.id, p[0], p[1], p[2])
+    } else if (payload.kind === 'doodad') {
+      updateDoodadPositionImpl(payload.id, p[0], p[1], p[2])
     }
   })
 

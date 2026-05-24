@@ -5,7 +5,7 @@
     GetSelection, SetSelection, GetUnit,
     GetReforgedMode, SetReforgedMode,
     GetUnitTypeIndex, GetDoodadTypeIndex,
-    MoveUnit, IsDirty, SaveMap,
+    MoveUnit, MoveDoodad, IsDirty, SaveMap,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
@@ -121,15 +121,31 @@
     // Field values (rotation/type/etc.) work without changes here.
     EventsOn(ENTITY_EVENT, async (payload: { kind: string; id: number; field: string; position: number[] }) => {
       if (!payload) return
-      // Only refresh Properties when the changed entity matches our primary.
-      // Unit-kind today; if/when primaryDoodad becomes mutable, branch on
-      // payload.kind === 'doodad' here too.
-      if (payload.kind !== 'unit') return
-      if (!primaryEntity) return
-      if (primaryEntity.CreationNumber !== payload.id) return
-      try { primaryEntity = await GetUnit(payload.id) } catch { /* ignore — entity may have been removed */ }
-      // posEdit re-syncs automatically via the `$: if (singleUnitSelected && primaryEntity)`
-      // reactive statement further down — reassigning primaryEntity triggers it.
+      // Refresh Properties when the changed entity matches our primary.
+      // Branches by kind because units + doodads share the creation-number
+      // space (per-kind ids in WC3 — a unit and a doodad can have the same
+      // numeric id, so kind disambiguates them).
+      if (payload.kind === 'unit') {
+        if (!primaryEntity || primaryEntity.CreationNumber !== payload.id) return
+        try { primaryEntity = await GetUnit(payload.id) } catch { /* ignore — entity may have been removed */ }
+        // posEdit re-syncs automatically via the reactive seed block below
+        // (primaryEntity reassignment triggers it).
+      } else if (payload.kind === 'doodad') {
+        if (!primaryDoodad || primaryDoodad.creation_number !== payload.id) return
+        // Patch the in-memory DoodadDTO position from the event payload (no
+        // GetDoodad round-trip — the payload IS the new truth). Also patch
+        // the parent `doodads` array's entry so the Explorer pan-to button
+        // (which reads from `doodads`, not `primaryDoodad`) sees the new
+        // location for subsequent pans.
+        const p = payload.position
+        if (!p || p.length < 3) return
+        primaryDoodad = { ...primaryDoodad, position: [p[0], p[1], p[2]] }
+        const idx = doodads.findIndex(d => d.creation_number === payload.id)
+        if (idx >= 0) {
+          doodads[idx] = { ...doodads[idx], position: [p[0], p[1], p[2]] }
+          doodads = doodads // trigger Svelte reactivity on the array
+        }
+      }
     })
     EventsOn(SEL_EVENT, async (s: main.SelectionDTO) => {
       ingestSelection(s)
@@ -490,64 +506,78 @@
     return e.HeroLevel > 0 || (e.TypeID.length > 0 && e.TypeID[0] >= 'A' && e.TypeID[0] <= 'Z')
   }
 
-  // Single-unit selected? Drives the editable X/Y/Z inputs in the Properties
-  // panel. Multi-select OR doodad/sloc selection → read-only static text.
-  $: singleUnitSelected = (
+  // Single entity selected with an editable Position? Drives the X/Y/Z inputs
+  // in the Properties panel. Today both unit AND doodad qualify; multi-select
+  // and sloc selection fall back to read-only static text. The branch in
+  // commitPositionEdit dispatches MoveUnit vs MoveDoodad based on which
+  // primary is non-null.
+  $: singlePositionEditable = (
     selectionItems.length === 1 &&
-    selectionItems[0].kind === 'unit' &&
-    primaryEntity !== null
+    (
+      (selectionItems[0].kind === 'unit' && primaryEntity !== null) ||
+      (selectionItems[0].kind === 'doodad' && primaryDoodad !== null)
+    )
   )
 
   // Local edit buffers so the inputs don't reset on every keystroke as the
   // bound entity object refreshes from selection events. We commit on Enter
-  // or blur, then refresh primaryEntity from Go so on-disk-truth wins on any
-  // failed write.
+  // or blur, then refresh from Go so on-disk-truth wins on any failed write.
   let posEdit: { x: string; y: string; z: string } = { x: '', y: '', z: '' }
-  $: if (singleUnitSelected && primaryEntity) {
-    // Seed buffers when the primary entity changes (new selection).
-    posEdit = {
-      x: fmt(primaryEntity.Position[0]),
-      y: fmt(primaryEntity.Position[1]),
-      z: fmt(primaryEntity.Position[2]),
+  $: if (singlePositionEditable) {
+    // Seed buffers when the primary changes (new selection or refresh).
+    // Reads from whichever primary is populated — unit's PascalCase Position
+    // or doodad's snake_case position; both are [3]float32 in game coords.
+    const pos = primaryEntity ? primaryEntity.Position : (primaryDoodad ? primaryDoodad.position : null)
+    if (pos) {
+      posEdit = {
+        x: fmt(pos[0]),
+        y: fmt(pos[1]),
+        z: fmt(pos[2]),
+      }
     }
   }
 
+  // Reads current truth position from whichever primary is populated. Returns
+  // null when neither is set (caller bails). Centralized so the commit/revert
+  // paths don't duplicate the kind-branch.
+  function primaryPosition(): [number, number, number] | null {
+    if (primaryEntity) return [primaryEntity.Position[0], primaryEntity.Position[1], primaryEntity.Position[2]]
+    if (primaryDoodad) return [primaryDoodad.position[0], primaryDoodad.position[1], primaryDoodad.position[2]]
+    return null
+  }
+
   async function commitPositionEdit(axis: 'x' | 'y' | 'z') {
-    if (!primaryEntity) return
-    const cn = primaryEntity.CreationNumber
+    const primary = selectionItems[0]
+    if (!primary) return
+    const cn = primary.id
     const next = {
       x: parseFloat(posEdit.x),
       y: parseFloat(posEdit.y),
       z: parseFloat(posEdit.z),
     }
-    // If the user typed garbage, revert that field to the entity's value and
-    // bail before issuing the move (don't move the unit to NaN).
+    // If the user typed garbage, revert that field to truth and bail before
+    // issuing the move (don't move the entity to NaN).
     if (!Number.isFinite(next[axis])) {
-      posEdit = {
-        x: fmt(primaryEntity.Position[0]),
-        y: fmt(primaryEntity.Position[1]),
-        z: fmt(primaryEntity.Position[2]),
-      }
+      const truth = primaryPosition()
+      if (truth) posEdit = { x: fmt(truth[0]), y: fmt(truth[1]), z: fmt(truth[2]) }
       return
     }
     try {
-      await MoveUnit(cn, next.x, next.y, next.z)
-      // The Go-side OnEntityChanged event drives both the scene re-paint
-      // (scene-instances.ts subscribes to wc3-forge:entity-changed) AND the
-      // Properties re-fetch (above in onMount). No explicit scene call here:
-      // every mutation path — UI input, MCP bridge, future code — flows
-      // through the same event, so this branch needs no special handling.
-    } catch (e) {
-      // MoveUnit failure → snap the buffer back to the entity's real value.
-      console.error('MoveUnit failed:', e)
-      showToast('move failed: ' + String(e), 'error')
-      if (primaryEntity) {
-        posEdit = {
-          x: fmt(primaryEntity.Position[0]),
-          y: fmt(primaryEntity.Position[1]),
-          z: fmt(primaryEntity.Position[2]),
-        }
+      // Kind-branch on the primary selection's kind: unit → MoveUnit (writes
+      // war3mapUnits.doo), doodad → MoveDoodad (writes war3map.doo). The
+      // Go-side OnEntityChanged event then drives both the scene repaint
+      // and the Properties re-fetch — no explicit refresh needed here.
+      if (primary.kind === 'doodad') {
+        await MoveDoodad(cn, next.x, next.y, next.z)
+      } else {
+        await MoveUnit(cn, next.x, next.y, next.z)
       }
+    } catch (e) {
+      // Move failure → snap the buffer back to truth.
+      console.error('Move failed:', e)
+      showToast('move failed: ' + String(e), 'error')
+      const truth = primaryPosition()
+      if (truth) posEdit = { x: fmt(truth[0]), y: fmt(truth[1]), z: fmt(truth[2]) }
     }
   }
 
@@ -558,11 +588,10 @@
       // Revert just this field to truth and blur (don't propagate so the
       // viewport doesn't also clear selection).
       e.stopPropagation()
-      if (primaryEntity) {
-        posEdit = {
-          ...posEdit,
-          [axis]: fmt(primaryEntity.Position[axis === 'x' ? 0 : axis === 'y' ? 1 : 2]),
-        }
+      const truth = primaryPosition()
+      if (truth) {
+        const idx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2
+        posEdit = { ...posEdit, [axis]: fmt(truth[idx]) }
       }
       ;(e.currentTarget as HTMLInputElement).blur()
     }
@@ -679,7 +708,25 @@
           <dt>Category</dt>           <dd>{doodadCategoryFor(d)}</dd>
 
           <dt class="section">Transform</dt>
-          <dt>Position</dt>           <dd class="mono">{fmtVec3(d.position)}</dd>
+          {#if singlePositionEditable}
+            <dt>Position</dt>
+            <dd class="mono pos-edit">
+              <input type="number" step="1" bind:value={posEdit.x}
+                     on:blur={() => commitPositionEdit('x')}
+                     on:keydown={(e) => onPosKeydown(e, 'x')}
+                     title="X (game coords). Enter to commit, Esc to revert." />
+              <input type="number" step="1" bind:value={posEdit.y}
+                     on:blur={() => commitPositionEdit('y')}
+                     on:keydown={(e) => onPosKeydown(e, 'y')}
+                     title="Y (game coords). Enter to commit, Esc to revert." />
+              <input type="number" step="1" bind:value={posEdit.z}
+                     on:blur={() => commitPositionEdit('z')}
+                     on:keydown={(e) => onPosKeydown(e, 'z')}
+                     title="Z (game coords). Enter to commit, Esc to revert." />
+            </dd>
+          {:else}
+            <dt>Position</dt>         <dd class="mono">{fmtVec3(d.position)}</dd>
+          {/if}
           <dt>Rotation</dt>           <dd class="mono">{fmt(d.rotation, 2)}</dd>
           <dt>Scale</dt>              <dd class="mono">{fmtScale(d.scale)}</dd>
           <dt>Variation</dt>          <dd>{d.variation}</dd>
@@ -708,7 +755,7 @@
           <dt>Player</dt>             <dd>{playerLabel(e.Player)}</dd>
 
           <dt class="section">Transform</dt>
-          {#if singleUnitSelected}
+          {#if singlePositionEditable}
             <dt>Position</dt>
             <dd class="mono pos-edit">
               <input type="number" step="1" bind:value={posEdit.x}

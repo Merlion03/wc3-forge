@@ -62,6 +62,10 @@ export function LogJS(arg1) {
   return window['go']['main']['App']['LogJS'](arg1);
 }
 
+export function MoveDoodad(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['MoveDoodad'](arg1, arg2, arg3, arg4);
+}
+
 export function MoveUnit(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['MoveUnit'](arg1, arg2, arg3, arg4);
 }

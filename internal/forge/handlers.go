@@ -18,6 +18,7 @@ func RegisterAll(b *bridge.Bridge) {
 	b.Register("map.info_get", handleMapInfoGet)
 	b.Register("units.list", handleUnitsList)
 	b.Register("units.move", handleUnitsMove)
+	b.Register("doodads.move", handleDoodadsMove)
 	b.Register("map.save", handleMapSave)
 	b.Register("selection.get", handleSelectionGet)
 	b.Register("selection.set", handleSelectionSet)
@@ -174,6 +175,27 @@ func handleUnitsMove(params json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 	if err := Current.MoveUnit(p.CreationNumber, p.X, p.Y, p.Z); err != nil {
+		return nil, err
+	}
+	return unitsMoveResponse{
+		OK:             true,
+		CreationNumber: p.CreationNumber,
+		Position:       [3]float32{p.X, p.Y, p.Z},
+	}, nil
+}
+
+// handleDoodadsMove is the doodad parallel to handleUnitsMove. The wire
+// shape is identical (creation_number + x/y/z game coords); the difference
+// is purely the dispatch target — Session.MoveDoodad mutates war3map.doo
+// instead of war3mapUnits.doo. Reuses the unitsMoveParams/unitsMoveResponse
+// structs because the shape is byte-for-byte the same; only the method name
+// on the wire (`doodads.move` vs `units.move`) disambiguates kind.
+func handleDoodadsMove(params json.RawMessage) (any, error) {
+	var p unitsMoveParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.MoveDoodad(p.CreationNumber, p.X, p.Y, p.Z); err != nil {
 		return nil, err
 	}
 	return unitsMoveResponse{

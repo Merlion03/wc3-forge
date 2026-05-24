@@ -95,6 +95,28 @@ type Doodad struct {
 	ItemDrops []ItemDrop
 
 	CreationNumber uint32 // stable HiveWE-assigned identity; survives save round-trip
+
+	// --- Round-trip preservation (unexported, set by Parse) ---
+	//
+	// These capture on-disk shape the public fields can't represent so Encode
+	// can reproduce the file byte-for-byte. Mirrors unitsdoo.Entity's
+	// preservation fields. Hand-constructed Doodad values can leave them zero;
+	// Encode falls back to deriving from the public fields.
+
+	// skinIDPresent records whether the on-disk doodad carried a skin_id chunk.
+	// The parser uses a peek heuristic regardless of subversion (see the long
+	// comment in readDoodad — X-Hero-Reborn is subversion 11 with NO skin_id),
+	// so the absence vs presence decision is per-entity. Encode honors this
+	// flag: present → emit SkinID, absent → omit. (For hand-constructed
+	// Doodads, Encode falls back to emitting whenever SkinID is non-empty.)
+	skinIDPresent bool
+
+	// itemDropSetSizes preserves the per-set entry counts so the encoder can
+	// reconstruct the (set_count, [items_in_set_i]*) prefix structure the file
+	// uses. Sum equals len(ItemDrops). If left nil/empty when ItemDrops is
+	// non-empty, Encode emits a single set containing all drops (a defensible
+	// default for hand-constructed doodads). Mirrors the unitsdoo workaround.
+	itemDropSetSizes []uint32
 }
 
 // SpecialDoodad is one entry in the trailing special-doodads array — used for
@@ -254,6 +276,7 @@ func readDoodad(r *reader, version uint32) (Doodad, error) {
 		if d.SkinID, err = r.readFourCC(); err != nil {
 			return d, fmt.Errorf("skin_id: %w", err)
 		}
+		d.skinIDPresent = true
 	}
 
 	if d.Flags, err = r.readU8(); err != nil {
@@ -287,9 +310,14 @@ func readDoodad(r *reader, version uint32) (Doodad, error) {
 		if setCount > maxDropSets {
 			return d, fmt.Errorf("item_drop_set_count %d exceeds sanity cap %d (likely misalignment)", setCount, maxDropSets)
 		}
-		// Flatten all sets into a single []ItemDrop. Same rationale as
-		// unitsdoo: wc3-forge's current use case is read-only inspection;
-		// add a [][]ItemDrop layer only if round-trip writers need it.
+		// Flatten all sets into a single []ItemDrop for convenient downstream
+		// iteration. The per-set boundaries are preserved separately in the
+		// unexported itemDropSetSizes so byte-faithful Encode can reconstruct
+		// the (set_count, [items_in_set_i]*) prefix structure. Same shape of
+		// workaround as unitsdoo.itemDropSetSizes.
+		if setCount > 0 {
+			d.itemDropSetSizes = make([]uint32, 0, setCount)
+		}
 		for s := uint32(0); s < setCount; s++ {
 			itemCount, err := r.readU32()
 			if err != nil {
@@ -298,6 +326,7 @@ func readDoodad(r *reader, version uint32) (Doodad, error) {
 			if itemCount > maxItemsPerSet {
 				return d, fmt.Errorf("drop_set[%d] item_count %d exceeds sanity cap %d (likely misalignment)", s, itemCount, maxItemsPerSet)
 			}
+			d.itemDropSetSizes = append(d.itemDropSetSizes, itemCount)
 			for it := uint32(0); it < itemCount; it++ {
 				var drop ItemDrop
 				if drop.ItemID, err = r.readFourCC(); err != nil {

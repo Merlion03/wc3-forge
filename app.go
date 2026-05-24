@@ -501,6 +501,16 @@ func (a *App) MoveUnit(creationNumber uint32, x, y, z float32) error {
 	return forge.Current.MoveUnit(creationNumber, x, y, z)
 }
 
+// MoveDoodad relocates the doodad with the given creation_number to the
+// supplied game coordinates. Mirrors MoveUnit's wire contract and shape;
+// the kind disambiguation lives in the Properties panel (which branches on
+// the primary selection's kind before calling Move{Unit,Doodad}). The
+// existing dirty-changed + entity-changed startup subscriptions fire for
+// either kind, so no additional Wails wiring is needed here.
+func (a *App) MoveDoodad(creationNumber uint32, x, y, z float32) error {
+	return forge.Current.MoveDoodad(creationNumber, x, y, z)
+}
+
 // IsDirty reports whether the session has unsaved edits. The header Save
 // button's modified-dot indicator polls this on mount; subsequent updates
 // arrive via the dirty-changed Wails event.

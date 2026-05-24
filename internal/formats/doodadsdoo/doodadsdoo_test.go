@@ -1,6 +1,7 @@
 package doodadsdoo
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -454,6 +455,72 @@ func TestParse_invalidMagic(t *testing.T) {
 	if !strings.Contains(err.Error(), "magic") {
 		t.Errorf("error = %q, want magic mention", err.Error())
 	}
+}
+
+// TestRoundTrip asserts that Parse → Encode reproduces the original .doo
+// bytes for every shipped fixture. This is the gate on the save/edit slice:
+// a write path that ISN'T byte-faithful would silently corrupt fields the
+// editor doesn't understand (custom subversion variants, exotic random-set
+// FourCCs, etc.) on every save.
+//
+// All three real-world fixtures exercise different code paths:
+//   - wc3_survival_v1_6.doo: minimal (often 0 doodads), validates the
+//     header + empty special-doodads path
+//   - enfo_ffb_v2_64f.doo: hundreds of doodads with item drops + skin_ids,
+//     exercises the per-set boundary preservation + skin-id presence flag
+//   - x_hero_reborn_1.3.doo: subversion 11 WITHOUT skin_ids (the variant
+//     that originally crashed the parser), validates the peek-decision
+//     preservation flow per-entity
+func TestRoundTrip(t *testing.T) {
+	fixtures := []string{
+		fixturePathV16,
+		fixturePathEnfo,
+		filepath.Join("testdata", "x_hero_reborn_1.3.doo"),
+	}
+	for _, path := range fixtures {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			orig, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			f, err := Parse(orig)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			encoded, err := Encode(f)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			if !bytes.Equal(orig, encoded) {
+				// Pinpoint the first diff so the failure mode is debuggable.
+				// Without this, a 1-byte diff in a 200KB file is a needle
+				// in a haystack.
+				mismatch := -1
+				n := len(orig)
+				if len(encoded) < n {
+					n = len(encoded)
+				}
+				for i := 0; i < n; i++ {
+					if orig[i] != encoded[i] {
+						mismatch = i
+						break
+					}
+				}
+				t.Fatalf("round-trip mismatch: orig=%d encoded=%d first diff at offset %d (orig=0x%02x encoded=0x%02x)",
+					len(orig), len(encoded), mismatch,
+					byteAtOr(orig, mismatch), byteAtOr(encoded, mismatch))
+			}
+		})
+	}
+}
+
+// byteAtOr returns b[i] or 0xEE if i is out of range. Used for round-trip
+// diff diagnostics so a length mismatch (one side shorter) doesn't panic.
+func byteAtOr(b []byte, i int) byte {
+	if i < 0 || i >= len(b) {
+		return 0xEE
+	}
+	return b[i]
 }
 
 func itoa(n int) string {
