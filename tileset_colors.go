@@ -118,6 +118,34 @@ func PaletteColors(palette []string) [][3]uint8 {
 	return out
 }
 
+// PaletteTexturePaths returns the `dir/file` asset path stem (no extension)
+// for each palette FourCC, suitable for `viewer.load(path + ".dds", solver)`
+// on the JS side. Empty string for entries whose Terrain.slk lookup failed.
+// Same lookup path used by sampleTileColor — kept separate so each surface
+// (color stand-in vs real texture) can fail independently.
+func PaletteTexturePaths(palette []string) []string {
+	out := make([]string, len(palette))
+	m, err := loadTerrainSLK()
+	if err != nil || m == nil {
+		return out
+	}
+	for i, fc := range palette {
+		row := m.Row(fc)
+		if row == nil {
+			log.Printf("tileset paths: %s not in Terrain.slk", fc)
+			continue
+		}
+		dir := row.String("dir")
+		file := row.String("file")
+		if dir == "" || file == "" {
+			log.Printf("tileset paths: %s missing dir/file in Terrain.slk", fc)
+			continue
+		}
+		out[i] = dir + "/" + file
+	}
+	return out
+}
+
 // WaterInfo holds the per-tileset water rendering parameters HiveWE pulls
 // from TerrainArt/Water.slk's `<tileset>Sha` row. The JS-side water shader
 // uses these to compute the depth-based blend (shallow_min↔max for water

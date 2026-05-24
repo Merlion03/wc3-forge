@@ -199,9 +199,11 @@ export namespace main {
 	    tileset: string;
 	    palette: string[];
 	    palette_colors: number[][];
+	    palette_textures: string[];
 	    layer_height: number[];
 	    cliff_tex: number[];
 	    cliff_var: number[];
+	    ground_var: number[];
 	    ramp_flags: number[];
 	    cliff_palette: string[];
 	    water_z: number[];
@@ -225,9 +227,11 @@ export namespace main {
 	        this.tileset = source["tileset"];
 	        this.palette = source["palette"];
 	        this.palette_colors = source["palette_colors"];
+	        this.palette_textures = source["palette_textures"];
 	        this.layer_height = source["layer_height"];
 	        this.cliff_tex = source["cliff_tex"];
 	        this.cliff_var = source["cliff_var"];
+	        this.ground_var = source["ground_var"];
 	        this.ramp_flags = source["ramp_flags"];
 	        this.cliff_palette = source["cliff_palette"];
 	        this.water_z = source["water_z"];

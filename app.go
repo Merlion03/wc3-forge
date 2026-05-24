@@ -170,6 +170,12 @@ type TerrainDTO struct {
 	// renderer color tiles by their real texture average without having to
 	// decode BLP/DDS itself. parallel-indexed with Palette.
 	PaletteColors [][3]uint8 `json:"palette_colors"`
+	// PaletteTextures is one `dir/file` asset path stem per palette FourCC
+	// (e.g. `terrainart/icecrown/ice_dirt`). JS appends `.dds` (or `.blp`
+	// fallback via the assetHandler's BLP↔DDS swap) and loads via
+	// viewer.load. Empty string if Terrain.slk lookup failed for that entry.
+	// parallel-indexed with Palette.
+	PaletteTextures []string `json:"palette_textures"`
 	// Per-corner cliff data. LayerHeight is the integer cliff step (0..15),
 	// CliffTex is the index into CliffPalette (0..15; 15 commonly means
 	// "no cliff" at this corner). CliffVar is the high 3 bits of TextureDetails
@@ -181,6 +187,13 @@ type TerrainDTO struct {
 	LayerHeight  []uint32 `json:"layer_height"`
 	CliffTex     []uint32 `json:"cliff_tex"`
 	CliffVar     []uint32 `json:"cliff_var"`
+	// GroundVar is the per-corner ground variation index (0..31, low 5 bits
+	// of TextureDetails). Picks the sub-tile within the palette texture's
+	// 4×4 atlas; for "extended" textures (width = 2×height) the variation
+	// indexes into the variation half (slots 16..31). HiveWE convention:
+	//   non-extended: variation==0 → slot 0, else slot 15
+	//   extended    : variation 0..15 → slot 16+v, 16 → 15, else 0
+	GroundVar    []uint32 `json:"ground_var"`
 	RampFlags    []uint32 `json:"ramp_flags"`
 	CliffPalette []string `json:"cliff_palette"` // cliff tileset FourCCs
 	// Per-corner water data. WaterZ is the per-vertex water surface
@@ -218,6 +231,7 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 	layer := make([]uint32, n)
 	cliffTex := make([]uint32, n)
 	cliffVar := make([]uint32, n)
+	groundVar := make([]uint32, n)
 	rampFlags := make([]uint32, n)
 	waterZ := make([]float32, n)
 	hasWater := make([]uint32, n)
@@ -230,6 +244,7 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		layer[i] = uint32(t.Tiles[i].LayerHeight)
 		cliffTex[i] = uint32(t.Tiles[i].CliffTexIdx())
 		cliffVar[i] = uint32((t.Tiles[i].TextureDetails >> 5) & 0x07)
+		groundVar[i] = uint32(t.Tiles[i].TextureDetails & 0x1F)
 		var rf uint32
 		if t.Tiles[i].HasRamp() {
 			rf |= 0x01
@@ -261,12 +276,14 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		Heights:       heights,
 		GroundTex:     ground,
 		Tileset:       string([]byte{t.Tileset}),
-		Palette:       t.GroundTilesets,
-		PaletteColors: PaletteColors(t.GroundTilesets),
-		LayerHeight:   layer,
-		CliffTex:      cliffTex,
-		CliffVar:      cliffVar,
-		RampFlags:     rampFlags,
+		Palette:         t.GroundTilesets,
+		PaletteColors:   PaletteColors(t.GroundTilesets),
+		PaletteTextures: PaletteTexturePaths(t.GroundTilesets),
+		LayerHeight:     layer,
+		CliffTex:        cliffTex,
+		CliffVar:        cliffVar,
+		GroundVar:       groundVar,
+		RampFlags:       rampFlags,
 		CliffPalette:  t.CliffTilesets,
 		WaterZ:        waterZ,
 		HasWater:      hasWater,

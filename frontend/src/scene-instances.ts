@@ -447,7 +447,7 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
       try {
         const t = await GetTerrain()
         const gl = (viewer as any).gl as WebGLRenderingContext
-        terrain = buildTerrain(gl, t as unknown as any)
+        terrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
         if (terrain) {
           // Frame the map. width/height in w3e are vertex counts; tile size
           // is 128, so playable span is roughly (width-1)*128 in each axis.
