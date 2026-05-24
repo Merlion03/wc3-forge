@@ -162,6 +162,32 @@ export namespace main {
 		}
 	}
 	
+	export class WaterInfo {
+	    ok: boolean;
+	    offset: number;
+	    shallow_min: number[];
+	    shallow_max: number[];
+	    deep_min: number[];
+	    deep_max: number[];
+	    num_textures: number;
+	    texture_rate: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new WaterInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ok = source["ok"];
+	        this.offset = source["offset"];
+	        this.shallow_min = source["shallow_min"];
+	        this.shallow_max = source["shallow_max"];
+	        this.deep_min = source["deep_min"];
+	        this.deep_max = source["deep_max"];
+	        this.num_textures = source["num_textures"];
+	        this.texture_rate = source["texture_rate"];
+	    }
+	}
 	export class TerrainDTO {
 	    width: number;
 	    height: number;
@@ -176,6 +202,9 @@ export namespace main {
 	    cliff_var: number[];
 	    ramp_flags: number[];
 	    cliff_palette: string[];
+	    water_z: number[];
+	    has_water: number[];
+	    water: WaterInfo;
 	
 	    static createFrom(source: any = {}) {
 	        return new TerrainDTO(source);
@@ -196,7 +225,28 @@ export namespace main {
 	        this.cliff_var = source["cliff_var"];
 	        this.ramp_flags = source["ramp_flags"];
 	        this.cliff_palette = source["cliff_palette"];
+	        this.water_z = source["water_z"];
+	        this.has_water = source["has_water"];
+	        this.water = this.convertValues(source["water"], WaterInfo);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class UnitDTO {
 	    creation_number: number;

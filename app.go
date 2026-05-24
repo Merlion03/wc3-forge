@@ -183,6 +183,15 @@ type TerrainDTO struct {
 	CliffVar     []uint32 `json:"cliff_var"`
 	RampFlags    []uint32 `json:"ramp_flags"`
 	CliffPalette []string `json:"cliff_palette"` // cliff tileset FourCCs
+	// Per-corner water data. WaterZ is the per-vertex water surface
+	// elevation in studs (the per-tileset WaterInfo.Offset gets added
+	// JS-side because Offset comes from Water.slk and lives with the
+	// other rendering constants). HasWater is the per-vertex flag bit:
+	// any cell whose 4 corners include at least one HasWater=1 gets a
+	// water quad in the JS water mesh.
+	WaterZ    []float32  `json:"water_z"`
+	HasWater  []uint32   `json:"has_water"`
+	Water     WaterInfo  `json:"water"`
 }
 
 // GetTerrain returns the terrain grid for rendering. Empty if no map loaded or
@@ -199,6 +208,8 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 	cliffTex := make([]uint32, n)
 	cliffVar := make([]uint32, n)
 	rampFlags := make([]uint32, n)
+	waterZ := make([]float32, n)
+	hasWater := make([]uint32, n)
 	for i := 0; i < n; i++ {
 		// FinalZ includes the layer_height contribution; cliffs would otherwise
 		// render as a flat slab. The JS terrain mesh + cliff transition logic
@@ -216,6 +227,10 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			rf |= 0x02
 		}
 		rampFlags[i] = rf
+		waterZ[i] = t.Tiles[i].WaterZ()
+		if t.Tiles[i].HasWater() {
+			hasWater[i] = 1
+		}
 	}
 	return TerrainDTO{
 		Width:         t.Width,
@@ -231,6 +246,9 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		CliffVar:      cliffVar,
 		RampFlags:     rampFlags,
 		CliffPalette:  t.CliffTilesets,
+		WaterZ:        waterZ,
+		HasWater:      hasWater,
+		Water:         WaterColors(t.Tileset),
 	}, nil
 }
 

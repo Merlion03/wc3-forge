@@ -33,6 +33,7 @@ import {
   ListUnits, ListDoodads, GetUnitTypeIndex, GetDoodadTypeIndex, GetTerrain,
 } from '../wailsjs/go/main/App.js'
 import { buildTerrain, type TerrainMesh } from './terrain'
+import { buildWater, type WaterMesh } from './water'
 import { createCamera, type RTSCamera } from './camera'
 import { computeCliffPlacements, renderCliffs, type CliffRendering } from './cliffs'
 
@@ -189,6 +190,7 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
   let crashed = false
   let rafId = 0
   let terrain: TerrainMesh | null = null
+  let water: WaterMesh | null = null
   let cliffs: CliffRendering | null = null
   // Background color (used by our own clear call now that scene.alpha=true).
   const bg = [0.07, 0.07, 0.09]
@@ -219,6 +221,10 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
         if (terrain) terrain.draw(scene.camera.viewProjectionMatrix)
         viewer.render()
+        // Water is translucent — must render LAST so it alpha-blends on top
+        // of terrain + cliffs + opaque model passes. The lib's translucent
+        // pass already ran inside viewer.render(); water sits above that.
+        if (water) water.draw(scene.camera.viewProjectionMatrix)
       } catch (e) {
         crashed = true
         flog('[render-loop crash]', e instanceof Error ? e.stack : String(e))
@@ -352,6 +358,10 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
       terrain.dispose()
       terrain = null
     }
+    if (water) {
+      water.dispose()
+      water = null
+    }
     if (cliffs) {
       cliffs.dispose()
       cliffs = null
@@ -456,6 +466,14 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
         const cliffPlacements = computeCliffPlacements(t as unknown as any)
         if (cliffPlacements.length > 0) {
           cliffs = await renderCliffs(viewer as any, scene, pathSolver, cliffPlacements)
+        }
+        // Water surface. Per-cell quad mesh with HiveWE-style depth-blended
+        // color from Water.slk. Rendered after viewer.render() in the RAF
+        // loop with alpha blending — depth-test ON, depth-write OFF so
+        // multiple translucent pixels at the same Z don't fight.
+        water = buildWater(gl, t as unknown as any)
+        if (water) {
+          flog(`[water] ${water.triCount} triangles`)
         }
       } catch (e) {
         flog('[terrain load]', e instanceof Error ? e.message : String(e))

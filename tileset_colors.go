@@ -117,3 +117,102 @@ func PaletteColors(palette []string) [][3]uint8 {
 	}
 	return out
 }
+
+// WaterInfo holds the per-tileset water rendering parameters HiveWE pulls
+// from TerrainArt/Water.slk's `<tileset>Sha` row. The JS-side water shader
+// uses these to compute the depth-based blend (shallow_min↔max for water
+// thinner than the deep threshold, deep_min↔max for deeper water).
+//
+// All colors are RGBA 0..255, sourced verbatim from the SLK. WaterOffset is
+// the additional Z offset applied per corner — different tilesets have
+// the water surface sitting at slightly different heights above the
+// raw `corner_water_height`. (Lordaeron: -0.5 typical; Icecrown: ice level.)
+type WaterInfo struct {
+	OK           bool      `json:"ok"`            // false if Water.slk lookup failed; JS uses fallback colors
+	Offset       float64   `json:"offset"`        // added to per-vertex water_z (HiveWE units; JS multiplies by 128 for studs)
+	ShallowMin   [4]uint8  `json:"shallow_min"`   // shallow water color at zero depth
+	ShallowMax   [4]uint8  `json:"shallow_max"`   // shallow water color near the deeplevel boundary
+	DeepMin      [4]uint8  `json:"deep_min"`      // deep water color just below deeplevel
+	DeepMax      [4]uint8  `json:"deep_max"`      // deep water color at full saturation
+	NumTextures  int       `json:"num_textures"`  // animation frame count (unused in v1)
+	TextureRate  int       `json:"texture_rate"`  // animation rate (unused in v1)
+}
+
+var (
+	waterSLK     *slk.Mapped
+	waterSLKErr  error
+	waterSLKOnce sync.Once
+)
+
+func loadWaterSLK() (*slk.Mapped, error) {
+	waterSLKOnce.Do(func() {
+		data, ok, err := readBaseAsset("TerrainArt/Water.slk")
+		if err != nil || !ok {
+			waterSLKErr = err
+			log.Printf("tileset: Water.slk read failed (ok=%v err=%v)", ok, err)
+			return
+		}
+		m := slk.New()
+		if err := m.Load(data); err != nil {
+			waterSLKErr = err
+			log.Printf("tileset: Water.slk parse: %v", err)
+			return
+		}
+		waterSLK = m
+		log.Printf("tileset: Water.slk loaded, %d rows", len(m.Rows))
+	})
+	return waterSLK, waterSLKErr
+}
+
+// WaterColors returns the water rendering parameters for the given tileset
+// letter (e.g. 'L' for Lordaeron, 'I' for Icecrown). Falls back to a
+// hardcoded plausible blue if Water.slk isn't accessible or the tileset
+// has no water row — better to show SOME water than crash.
+func WaterColors(tileset byte) WaterInfo {
+	fallback := WaterInfo{
+		OK:         false,
+		Offset:     0,
+		ShallowMin: [4]uint8{135, 170, 200, 100},
+		ShallowMax: [4]uint8{100, 140, 180, 140},
+		DeepMin:    [4]uint8{60, 100, 150, 180},
+		DeepMax:    [4]uint8{30, 60, 110, 210},
+	}
+	m, err := loadWaterSLK()
+	if err != nil || m == nil {
+		return fallback
+	}
+	key := string([]byte{tileset, 'S', 'h', 'a'})
+	row := m.Row(key)
+	if row == nil {
+		log.Printf("tileset: Water.slk has no row for %s", key)
+		return fallback
+	}
+	rgba := func(prefix string) [4]uint8 {
+		return [4]uint8{
+			uint8(clampU8(row.Number(prefix + "_r"))),
+			uint8(clampU8(row.Number(prefix + "_g"))),
+			uint8(clampU8(row.Number(prefix + "_b"))),
+			uint8(clampU8(row.Number(prefix + "_a"))),
+		}
+	}
+	return WaterInfo{
+		OK:          true,
+		Offset:      row.Number("height"),
+		ShallowMin:  rgba("smin"),
+		ShallowMax:  rgba("smax"),
+		DeepMin:     rgba("dmin"),
+		DeepMax:     rgba("dmax"),
+		NumTextures: int(row.Number("numtex")),
+		TextureRate: int(row.Number("texrate")),
+	}
+}
+
+func clampU8(v float64) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return int(v)
+}
