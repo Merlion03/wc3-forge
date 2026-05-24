@@ -6,6 +6,7 @@
 
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { loadMdl, modelToGeometry, PLACEHOLDER_PYRAMID_MDL } from './mdx'
 
 export interface TerrainData {
   width: number
@@ -101,8 +102,21 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
   const unitOriginalColor = new Map<number, number>()
   const selected = new Set<number>()
 
-  // Shared geometries.
-  const unitGeom = new THREE.BoxGeometry(80, 160, 80)
+  // Unit geometry: parsed from a hand-written MDL via war3-model. Falls
+  // back to a BoxGeometry if parse fails for any reason (defensive — the
+  // MDL is hand-tested but a future war3-model version change could break).
+  // The pyramid base sits at WC3 Z=0 with apex at Z=128. We pre-rotate the
+  // geometry to convert WC3's Z-up convention into Three.js's Y-up.
+  let unitGeom: THREE.BufferGeometry
+  try {
+    const placeholderModel = loadMdl(PLACEHOLDER_PYRAMID_MDL)
+    unitGeom = modelToGeometry(placeholderModel)
+    unitGeom.rotateX(-Math.PI / 2) // WC3 Z-up → Three.js Y-up
+  } catch (e) {
+    console.warn('placeholder MDL parse failed; falling back to BoxGeometry:', e)
+    unitGeom = new THREE.BoxGeometry(80, 160, 80)
+  }
+
   // Doodads are decorative — usually MANY per map (enfos: 578). Single
   // InstancedMesh keeps draw-call count to 1.
   const doodadGeom = new THREE.BoxGeometry(48, 96, 48)
@@ -256,7 +270,10 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
         const color = playerColor(u.player)
         const mat = new THREE.MeshLambertMaterial({ color })
         const mesh = new THREE.Mesh(unitGeom, mat)
-        mesh.position.set(u.position[0], u.position[2] + 80, -u.position[1])
+        // Pyramid base sits at the mesh origin's XZ plane (after the Z→Y
+        // rotation), so place the mesh directly at the ground without a
+        // height offset.
+        mesh.position.set(u.position[0], u.position[2], -u.position[1])
         mesh.userData.creation_number = u.creation_number
         scene.add(mesh)
         unitMeshes.set(u.creation_number, mesh)
