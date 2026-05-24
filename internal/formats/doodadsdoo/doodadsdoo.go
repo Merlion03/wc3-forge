@@ -70,10 +70,12 @@ type Doodad struct {
 	// fall back to TypeID).
 	SkinID string
 
-	// Flags is the doodad's "state" byte — HiveWE enum values:
-	//   0 = invisible_non_solid
-	//   1 = visible_non_solid
-	//   2 = visible_solid
+	// Flags is the doodad's "state" byte — a bitmask combining visibility +
+	// solidity. HiveWE names the bits roughly visible(1) | solid(2) (with bit
+	// values composed; e.g. Enfo's FFB observes Flags=6 = visible|solid|??).
+	// Real-world observed values cluster in 0..7. The peek-and-validate
+	// heuristic below relies only on the format-guarantee that any valid
+	// Flags byte stays well below 0x20 (the lowest printable-ASCII byte).
 	Flags uint8
 
 	// Life is the destructible HP percentage (0..100). Decorative doodads still
@@ -234,8 +236,10 @@ func readDoodad(r *reader, version uint32) (Doodad, error) {
 	// disjoint between the two cases:
 	//   - skin_id present  → first byte is a printable FourCC byte (0x20..0x7E);
 	//                        WC3 FourCCs are always ASCII letters/digits.
-	//   - skin_id absent   → first byte is the `flags` field, enumerated as
-	//                        {0, 1, 2} — always below 0x20.
+	//   - skin_id absent   → first byte is the `flags` field, a bitmask
+	//                        (visible|solid|…); observed values cluster in
+	//                        0..7 and the format never produces a Flags byte
+	//                        as high as 0x20 (the lowest printable-ASCII byte).
 	// A printable first byte is conclusive evidence of skin_id presence.
 	//
 	// Historically this heuristic was applied only at subversion 9 (the

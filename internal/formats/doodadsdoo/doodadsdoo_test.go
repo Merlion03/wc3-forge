@@ -15,13 +15,13 @@ import (
 // Fixture 1: wc3-survival's war3map.doo. It's a flat arena map with very
 // few (likely zero) placed doodads — primarily exercises the header + empty
 // trailing special-doodad section path.
-const fixturePathV16 = `C:\Users\4step\projects\wc3-survival-game\map\extracted\war3map.doo`
+var fixturePathV16 = filepath.Join("testdata", "wc3_survival_v1_6.doo")
 
 // Fixture 2: enfos v2.64f's war3map.doo. JASS-era map packed with terrain
 // decoration — should produce hundreds of doodad entries. Exercises the full
 // per-doodad code path including item-drop sets and the subversion-9/11
 // skin_id heuristic.
-const fixturePathEnfo = `C:\Users\4step\maps-extracted\enfo-v2.64f\war3map.doo`
+var fixturePathEnfo = filepath.Join("testdata", "enfo_ffb_v2_64f.doo")
 
 func TestParse_v1_6(t *testing.T) {
 	data, err := os.ReadFile(fixturePathV16)

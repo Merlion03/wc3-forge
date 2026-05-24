@@ -327,6 +327,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // in WC3 — same reason the selected* sets above are split.
   const unitInstances = new Map<number, any>()
   const doodadInstances = new Map<number, any>()
+  // Subset of doodad instances whose model has MORE THAN ONE 'stand' sequence
+  // — only these benefit from per-frame sequenceEnded checks. Most doodads
+  // (trees, rocks, props) have a single stand variation: rolling at placement
+  // sets it, and reroll would just pick the same index. Tracking the subset
+  // avoids iterating ~hundreds of static props every RAF tick.
+  const doodadInstancesToReroll = new Set<any>()
 
   // Sloc-marker renderer. Owns its own shader + box geometry. Failure to
   // build is non-fatal: we just won't have visible markers. Built here
@@ -371,8 +377,8 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
           if (manualAnimCns.has(cn)) continue
           if (inst.sequence === -1 || inst.sequenceEnded) rollSequence(inst, 'stand')
         }
-        for (const inst of doodadInstances.values()) {
-          if (inst.sequence === -1 || inst.sequenceEnded) rollSequence(inst, 'stand')
+        for (const inst of doodadInstancesToReroll) {
+          if (inst.sequenceEnded) rollSequence(inst, 'stand')
         }
         gl.viewport(0, 0, canvas.width, canvas.height)
         gl.depthMask(true)
@@ -504,6 +510,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     inst.uniformScale((d.scale[0] || 1) * (info.model_scale || 1))
     inst.setScene(scene)
     rollSequence(inst, 'stand')
+    // Only doodads with multiple 'stand' variations need the per-frame reroll.
+    // Single-stand and no-stand cases are no-ops — exclude them from the loop.
+    const standCount = filterSequencesByType('stand', model.sequences || []).length
+    if (standCount > 1) doodadInstancesToReroll.add(inst)
     if (selectedDoodadSet.has(d.creation_number)) {
       inst.setVertexColor(SELECT_TINT)
     }
@@ -522,6 +532,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       try { inst.detach() } catch { /* already detached */ }
     }
     doodadInstances.clear()
+    doodadInstancesToReroll.clear()
     // Slocs hold no GL resources of their own — they live in the renderer's
     // marker list. Replace with empty list so the next loadMap re-populates.
     slocRenderer?.setMarkers([])
@@ -853,9 +864,17 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   }
 
   function onWindowKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && pickCallback) {
-      pickCallback([], 'set')
+    if (e.key !== 'Escape' || !pickCallback) return
+    // Don't steal Escape from text inputs / contenteditable / form controls.
+    // Future inline-edit fields, search boxes, or modals need to handle their
+    // own Escape (close themselves) without losing the viewport selection too.
+    const a = document.activeElement as HTMLElement | null
+    if (a) {
+      const tag = a.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      if (a.isContentEditable) return
     }
+    pickCallback([], 'set')
   }
 
   canvas.addEventListener('mousedown', onCanvasMouseDown)
