@@ -217,6 +217,22 @@ export interface SceneAPI {
   /** Move the camera pivot to (x, y) in world XY. Z defaults to 0 (ground plane). */
   panTo(x: number, y: number, z?: number): void
   /**
+   * Re-position an already-placed unit instance to (x, y, z) in game-space
+   * coordinates (the same coords stored in war3map.doo / GetUnit's Position).
+   * Applies the type's move_height Z offset internally to match what placeUnit
+   * does on initial placement, so callers pass in raw game coords.
+   *
+   * No-op when the unit isn't in the unit-instance map — slocs (rendered by
+   * slocRenderer, not unitInstances), doodads, and creation_numbers from a
+   * stale-but-since-removed unit all silently return. The Properties-panel
+   * single-unit position-edit gate already blocks the bad cases on the
+   * caller side; this is defense-in-depth.
+   *
+   * mdx-m3-viewer's render loop is already RAFing — the new position renders
+   * on the next tick without any explicit invalidation call here.
+   */
+  updateUnitPosition(creationNumber: number, x: number, y: number, z: number): void
+  /**
    * Dev-only: pin a unit to a named animation (e.g. 'Walk', 'Death'). Empty
    * string or 'stand' returns the unit to the idle reroll loop. Unknown names
    * are ignored. Returns true if a sequence matching `animName` was found.
@@ -456,6 +472,11 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     inst.rotateLocal(quatZ(unit.rotation))
     inst.uniformScale(unit.scale[0] * (info.model_scale || 1))
     inst.setTeamColor(unit.player)
+    // Stash the unit's type_id on the instance so later position-update calls
+    // (SceneAPI.updateUnitPosition) can resolve the type's move_height without
+    // needing a parallel cn → typeId map. Cheap, non-intrusive — the lib
+    // never touches custom properties on its node objects.
+    ;(inst as any).__wc3ForgeTypeId = unit.type_id
     if (info.red || info.green || info.blue) {
       inst.setVertexColor([info.red / 255, info.green / 255, info.blue / 255, 1])
     }
@@ -1129,6 +1150,29 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     isReforged() { return currentReforged },
     panTo(x: number, y: number, z: number = 0) {
       camera.setPivot(x, y, z)
+    },
+    updateUnitPosition(cn: number, x: number, y: number, z: number) {
+      const inst = unitInstances.get(cn)
+      // Defense-in-depth: silently skip if the cn isn't a placed unit. The
+      // Properties-panel position-edit gate (singleUnitSelected) already
+      // prevents editing slocs / doodads / multi-select, but a stale cn from
+      // a race with map-changed should never crash the renderer.
+      if (!inst) return
+      // Mirror placeUnit's Z-offset. The unitTypeIndexCache is keyed by
+      // FourCC type_id and the lib's instance doesn't carry that, so
+      // placeUnit stashes it onto inst.__wc3ForgeTypeId at placement time
+      // and we read it back here. Missing-cache or missing-info shouldn't
+      // happen in practice (we only edit units that are already placed +
+      // visible, so the cache is warm) but a 0 fallback keeps the call
+      // sound when it does.
+      const typeId = (inst as any).__wc3ForgeTypeId as string | undefined
+      const info = typeId ? unitTypeIndexCache?.[typeId] : undefined
+      const moveHeight = info?.move_height ?? 0
+      // setLocation (not move) — move() is ADDITIVE (vec3.add into
+      // localLocation). It only worked as "set" in placeUnit because the
+      // instance was fresh with localLocation=[0,0,0]. Here localLocation is
+      // already non-zero, so we need an absolute set.
+      ;(inst as any).setLocation([x, y, z + moveHeight])
     },
     setUnitAnimation(cn: number, animName: string): boolean {
       const inst = unitInstances.get(cn)

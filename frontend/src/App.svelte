@@ -508,9 +508,13 @@
     }
     try {
       await MoveUnit(cn, next.x, next.y, next.z)
-      // Refresh the entity so the scene + inventory rows reflect the move
-      // (the scene picks up via map-changed / direct redraw separately;
-      // this just keeps the panel buffers honest).
+      // Move the rendered instance in the viewport too — Go owns disk truth,
+      // the scene owns visual truth, and without this call the model stays
+      // at its old position until the map is re-opened. Done BEFORE the
+      // GetUnit refresh so the scene is in sync before the next render frame.
+      scene?.updateUnitPosition(cn, next.x, next.y, next.z)
+      // Refresh the entity so the inventory rows + edit buffer reflect the
+      // server-side truth after the write.
       try { primaryEntity = await GetUnit(cn) } catch {}
     } catch (e) {
       // MoveUnit failure → snap the buffer back to the entity's real value.
