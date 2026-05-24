@@ -10,6 +10,8 @@
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
   import { createScene, type SceneAPI, type PickHit, type SelectMode } from './scene-instances'
+  import Toast from './Toast.svelte'
+  import { showToast } from './toast'
 
   // Wails drops struct typedefs from models.ts when they appear as map values,
   // so the unit/doodad type-index shapes are declared locally here. Must stay
@@ -38,6 +40,11 @@
   let selectionItems: main.SelectionItemDTO[] = []
   let primaryEntity: unitsdoo.Entity | null = null
   let primaryDoodad: main.DoodadDTO | null = null
+  // Persistent state errors only — currently just the scene-init-failed path
+  // during onMount. Transient operational errors (Save/Open/Move/Reforged
+  // toggle) go through showToast() so they auto-dismiss. The rule:
+  //   - state error that should stick until reload → `error` band
+  //   - transient operational failure → showToast(..., 'error')
   let error: string = ''
   let busy: boolean = false
   let reforged: boolean = false
@@ -64,6 +71,9 @@
       // Devtools / screenshot-automation hook: lets external test drivers
       // pump scene-level operations without needing keyboard simulation.
       ;(window as any).__scene = scene
+      // Same idea for toasts — handy when manually verifying severity styles
+      // or stack behavior. Cheap to leave in; it's just a function ref.
+      ;(window as any).__showToast = showToast
     } catch (e) {
       error = 'scene init failed: ' + (e instanceof Error ? (e.stack || e.message) : String(e))
       console.error(e)
@@ -143,18 +153,22 @@
   async function doSave() {
     if (!status.loaded || saving) return
     saving = true
-    error = ''
     try {
       await SaveMap()
       // dirty event will arrive; refresh defensively in case nothing was dirty.
       try { dirty = await IsDirty() } catch {}
     } catch (e) {
       // MPQ-write rejection is the expected hot path until we ship MPQ writing.
+      // Transient operational error → toast (auto-dismisses), NOT the
+      // persistent error band.
       const msg = String(e)
       if (/MPQ archive writing is not yet implemented/i.test(msg)) {
-        error = 'This map was opened from an MPQ archive. Extract it to a folder to enable saving.'
+        showToast(
+          'This map was opened from an MPQ archive. Extract it to a folder to enable saving.',
+          'error',
+        )
       } else {
-        error = 'save failed: ' + msg
+        showToast('save failed: ' + msg, 'error')
       }
     } finally {
       saving = false
@@ -231,7 +245,6 @@
   })
 
   async function pickAndOpen() {
-    error = ''
     busy = true
     try {
       const path = await OpenMapDialog()
@@ -239,7 +252,9 @@
       status = await OpenMap(path)
       await reloadMap()
     } catch (e) {
-      error = String(e)
+      // Transient: bad path, parse failure on one map shouldn't permanently
+      // wedge the UI.
+      showToast('open failed: ' + String(e), 'error')
     } finally {
       busy = false
     }
@@ -264,7 +279,6 @@
   async function toggleReforged() {
     if (busy) return
     busy = true
-    error = ''
     try {
       const next = !reforged
       // Push to Go first — it owns the canonical state (CASC prefix order,
@@ -280,7 +294,7 @@
         await reloadMap({ keepCamera: true })
       }
     } catch (e) {
-      error = 'toggle reforged failed: ' + String(e)
+      showToast('toggle reforged failed: ' + String(e), 'error')
     } finally {
       busy = false
     }
@@ -501,7 +515,7 @@
     } catch (e) {
       // MoveUnit failure → snap the buffer back to the entity's real value.
       console.error('MoveUnit failed:', e)
-      error = 'move failed: ' + String(e)
+      showToast('move failed: ' + String(e), 'error')
       if (primaryEntity) {
         posEdit = {
           x: fmt(primaryEntity.Position[0]),
@@ -735,6 +749,8 @@
       {/if}
     </aside>
   </div>
+
+  <Toast />
 </main>
 
 <style>
