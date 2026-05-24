@@ -32,3 +32,15 @@ Thumbs.db
 # Local notes that shouldn't ship
 /scratch/
 /notes-local/
+
+# Wails build outputs
+/build/bin/
+
+# Frontend build artifacts (frontend/dist content is rebuilt every time;
+# the directory itself must exist for go:embed to succeed — kept via gitkeep)
+/frontend/node_modules/
+/frontend/dist/*
+!/frontend/dist/.gitkeep
+# Wails-CLI install-cache marker — regenerated on every `wails build`
+/frontend/package.json.md5
+
