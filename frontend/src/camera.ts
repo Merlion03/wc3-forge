@@ -51,7 +51,12 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
   // viewer camera sits on a sphere of radius `distance` centered on pivot.
   const pivot = [0, 0, 0]
   let distance = 6000
-  let pitch = Math.PI / 4
+  // Editor-style "looking down at the work" pitch. ~60° down feels right
+  // for spatial inspection — close to top-down but with enough horizon to
+  // see doodad/unit silhouettes. WC3's in-game cam sits around ~50°; we
+  // tilt slightly steeper for editor work where you're locating things
+  // more than experiencing them.
+  let pitch = Math.PI / 3
   let yaw = 0
   let aspect = 1
 
@@ -192,17 +197,22 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
   applyToViewer() // initial state
 
   return {
-    frame(cx: number, cy: number, span: number) {
+    frame(cx: number, cy: number, mapSpan: number) {
       pivot[0] = cx
       pivot[1] = cy
       pivot[2] = 0
-      // Pick a distance such that the span fits the FOV comfortably with a
-      // small margin. half-span / tan(FOV/2) = head-on fit distance. The
-      // 1/cos(pitch) factor sits in because tilting down compresses how much
-      // ground the FOV covers in screen-Y; we want extra distance so the
-      // ground span still fits.
+      // Editor default: see a portion of the map by default rather than the
+      // whole thing. WC3 maps run from tiny (~6000 studs) to huge (~30000+
+      // studs). Fitting the full span makes everything 2-pixel-sized on
+      // large maps; fitting a fixed slice makes tiny maps fit-to-screen
+      // automatically. Compromise: target a "default view width" that's
+      // a fraction of the map but clamped to a usable minimum.
+      const viewedSpan = Math.max(8000, mapSpan * 0.45)
+      // half-span / tan(FOV/2) = head-on fit distance; 1/cos(pitch) factor
+      // because tilting down compresses ground coverage in screen-Y, so
+      // we need more distance to fit the same ground span vertically.
       distance = Math.max(DIST_MIN, Math.min(DIST_MAX,
-        (span * 0.55) / Math.tan(FOV / 2) / Math.max(0.4, Math.cos(pitch))))
+        (viewedSpan * 0.55) / Math.tan(FOV / 2) / Math.max(0.4, Math.cos(pitch))))
       applyToViewer()
     },
     setPivot(x: number, y: number, z = 0) {

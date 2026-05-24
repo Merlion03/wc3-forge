@@ -62,10 +62,144 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
   // the wraparound TEXTURE, not the mesh selection).
 
   const idx = (i: number, j: number) => j * W + i
+  const ramp = (k: number) => (t.ramp_flags[k] & 1) !== 0
+
+  // `consumedByRamp` is the set of bottom-left-corner indices for cells that
+  // got covered by a ramp `clifftrans` mesh. Those cells must NOT also get a
+  // regular cliff mesh — the clifftrans IS the cliff transition for them.
+  // This mirrors HiveWE's `corner_romp` flag, which is similarly computed
+  // during the ramp pass and consulted in the regular cliff pass.
+  const consumedByRamp = new Set<number>()
+
+  // Filename char for one corner of a clifftrans piece. Non-ramp corners use
+  // a normal 'A'+offset encoding; ramp corners use 'L' + offset * -4. The
+  // letter L is the marker that says "this corner sits on the ramp surface",
+  // and the *-4 scaling spreads ramp-step combinations across distinct chars.
+  function rampChar(isRamp: boolean, layerHeight: number, base: number): number {
+    const baseChar = isRamp ? 76 /* 'L' */ : 65 /* 'A' */
+    const scale = isRamp ? -4 : 1
+    return baseChar + (layerHeight - base) * scale
+  }
+
+  // --- Pass 1: vertical ramps (3 corners tall on each side) ---
+  //
+  // A vertical ramp occupies cells (i, j) and (i, j+1). One column of corners
+  // ramps from one layer to another; the adjacent column either stays flat
+  // (one layer) or ramps the other direction. The pattern HiveWE detects:
+  //
+  //   col_i:    bl(ramp=R) tl(ramp=R) ttl(ramp=R)   // 3 corners agree on ramp
+  //   col_i+1:  br(ramp=S) tr(ramp=S) ttr(ramp=S)   // also agree, but S!=R
+  //   layer_height[tl] == min(lh[bl], lh[ttl])      // middle is the lower end
+  //   layer_height[tr] == min(lh[br], lh[ttr])
+  //
+  // The bl/ttl pair is one ramp-side, the br/ttr pair is the other. The
+  // *layer_height* difference between bl and ttl is what makes the ramp.
+  for (let j = 0; j < H - 2; j++) {
+    for (let i = 0; i < W - 1; i++) {
+      const bl = idx(i, j), br = idx(i + 1, j)
+      const tl = idx(i, j + 1), tr = idx(i + 1, j + 1)
+      const ttl = idx(i, j + 2), ttr = idx(i + 1, j + 2)
+
+      const lhBL = t.layer_height[bl], lhBR = t.layer_height[br]
+      const lhTL = t.layer_height[tl], lhTR = t.layer_height[tr]
+      const lhTTL = t.layer_height[ttl], lhTTR = t.layer_height[ttr]
+
+      const ae = Math.min(lhBL, lhTTL)
+      const cf = Math.min(lhBR, lhTTR)
+      if (lhTL !== ae || lhTR !== cf) continue
+
+      const rBL = ramp(bl), rTL = ramp(tl), rTTL = ramp(ttl)
+      const rBR = ramp(br), rTR = ramp(tr), rTTR = ramp(ttr)
+      if (rBL !== rTL || rBL !== rTTL) continue
+      if (rBR !== rTR || rBR !== rTTR) continue
+      if (rBL === rBR) continue
+
+      // Require an actual layer-height transition across the spanning
+      // corners (BL, TTL, BR, TTR). If all four are at the same layer,
+      // the cells are ramp-flagged but flat — Blizzard doesn't ship a
+      // clifftrans asset for those, and there's nothing to transition.
+      if (lhBL === lhTTL && lhBL === lhBR && lhBL === lhTTR) continue
+
+      const base = Math.min(ae, cf)
+      const name = String.fromCharCode(
+        rampChar(rTTL, lhTTL, base),
+        rampChar(rTTR, lhTTR, base),
+        rampChar(rBR, lhBR, base),
+        rampChar(rBL, lhBL, base),
+      )
+      const path = `doodads/terrain/clifftrans/clifftrans${name}0.mdx`
+      out.push({
+        path,
+        pos: [cx + i * 128, cy + j * 128, (base - 2) * 128],
+      })
+      // The clifftrans piece covers cells (i, j) and (i, j+1) — skip both
+      // in the regular cliff pass.
+      consumedByRamp.add(bl)
+      consumedByRamp.add(tl)
+    }
+  }
+
+  // --- Pass 2: horizontal ramps (symmetric, 3 corners wide on each side) ---
+  for (let j = 0; j < H - 1; j++) {
+    for (let i = 0; i < W - 2; i++) {
+      const bl = idx(i, j), br = idx(i + 1, j), brr = idx(i + 2, j)
+      const tl = idx(i, j + 1), tr = idx(i + 1, j + 1), trr = idx(i + 2, j + 1)
+
+      const lhBL = t.layer_height[bl], lhBR = t.layer_height[br], lhBRR = t.layer_height[brr]
+      const lhTL = t.layer_height[tl], lhTR = t.layer_height[tr], lhTRR = t.layer_height[trr]
+
+      const ae = Math.min(lhBL, lhBRR)
+      const bf = Math.min(lhTL, lhTRR)
+      if (lhBR !== ae || lhTR !== bf) continue
+
+      const rBL = ramp(bl), rBR = ramp(br), rBRR = ramp(brr)
+      const rTL = ramp(tl), rTR = ramp(tr), rTRR = ramp(trr)
+      if (rBL !== rBR || rBL !== rBRR) continue
+      if (rTL !== rTR || rTL !== rTRR) continue
+      if (rBL === rTL) continue
+
+      // Same flat-ramp filter as vertical.
+      if (lhBL === lhBRR && lhBL === lhTL && lhBL === lhTRR) continue
+
+      const base = Math.min(ae, bf)
+      const name = String.fromCharCode(
+        rampChar(rTL, lhTL, base),
+        rampChar(rTRR, lhTRR, base),
+        rampChar(rBRR, lhBRR, base),
+        rampChar(rBL, lhBL, base),
+      )
+      const path = `doodads/terrain/clifftrans/clifftrans${name}0.mdx`
+      out.push({
+        path,
+        pos: [cx + i * 128, cy + j * 128, (base - 2) * 128],
+      })
+      consumedByRamp.add(bl)
+      consumedByRamp.add(br)
+    }
+  }
+
+  // --- Pass 3: regular cliff transitions ---
+  //
+  // is_corner_ramp_entrance: cells where all 4 corners are ramp-flagged AND
+  // the diagonals aren't symmetric. These are the "openings" of a ramp where
+  // it meets level ground — covered by the adjacent ramp clifftrans mesh, so
+  // a regular cliff piece would double up. HiveWE has the same skip.
+  function isRampEntrance(i: number, j: number): boolean {
+    if (i >= W - 1 || j >= H - 1) return false
+    const bl = idx(i, j), br = idx(i + 1, j)
+    const tl = idx(i, j + 1), tr = idx(i + 1, j + 1)
+    if (!ramp(bl) || !ramp(br) || !ramp(tl) || !ramp(tr)) return false
+    const symmetric =
+      t.layer_height[bl] === t.layer_height[tr] &&
+      t.layer_height[tl] === t.layer_height[br]
+    return !symmetric
+  }
 
   for (let j = 0; j < H - 1; j++) {
     for (let i = 0; i < W - 1; i++) {
       const bl = idx(i, j)
+      if (consumedByRamp.has(bl)) continue
+      if (isRampEntrance(i, j)) continue
       const br = idx(i + 1, j)
       const tl = idx(i, j + 1)
       const tr = idx(i + 1, j + 1)
@@ -79,11 +213,6 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
       // transition needed — flat ground).
       if (lh_bl === lh_br && lh_bl === lh_tl && lh_bl === lh_tr) continue
 
-      // Skip ramp cells — those need a separate clifftrans algorithm we
-      // haven't ported yet. For now: silently skip, terrain mesh handles
-      // the slope visually via per-corner Z interpolation.
-      if ((t.ramp_flags[bl] & 1) !== 0) continue
-
       const base = Math.min(lh_tl, lh_tr, lh_br, lh_bl)
       const fileName = String.fromCharCode(
         65 + lh_tl - base, // 'A' + offset
@@ -91,24 +220,15 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
         65 + lh_br - base,
         65 + lh_bl - base,
       )
+      if (fileName === 'AAAA') continue
 
-      if (fileName === 'AAAA') continue // double-check guard
-
-      // Stock cliff models live at: Doodads/Terrain/Cliffs/Cliffs<pattern><var>.mdx
       const variation = t.cliff_var[bl] | 0
       const path = `Doodads/Terrain/Cliffs/Cliffs${fileName}${variation}.mdx`
 
-      // Cell (i, j) in vertex coords means the cell whose bottom-left
-      // corner is vertex (i, j). World position of that corner:
-      const wx = cx + i * 128
-      const wy = cy + j * 128
-      // Base Z: cliff models are authored expecting Z=0 to be the bottom-
-      // (lowest) layer of the cell. WC3 convention: each layer step = 128
-      // studs; layer 2 is "ground level" (FinalZ formula: corner_height +
-      // (layer - 2) * 128). Cliff mesh placed at base layer's nominal Z.
-      const wz = (base - 2) * 128
-
-      out.push({ path, pos: [wx, wy, wz] })
+      out.push({
+        path,
+        pos: [cx + i * 128, cy + j * 128, (base - 2) * 128],
+      })
     }
   }
   return out
@@ -145,7 +265,8 @@ export async function renderCliffs(
     // undefined rather than throwing on missing assets), retry with the
     // variation-0 fallback path. Cliffs only ship variations 0..N where N
     // varies per pattern, and authored maps sometimes reference variations
-    // that no longer exist.
+    // that no longer exist. Without HiveWE's `Cliffs.slk` variation table
+    // we can't pre-clamp, so we fall back at fetch time.
     let model: any
     try { model = await viewer.load(path, pathSolver) } catch { /* fall through */ }
     if (!model || typeof model.addInstance !== 'function') {
@@ -156,6 +277,10 @@ export async function renderCliffs(
     }
     if (!model || typeof model.addInstance !== 'function') {
       failed += group.length
+      // Sample a few unique missing paths so we can spot pattern issues.
+      if (failed === group.length || failed < 10) {
+        flog(`[cliffs miss] ${path} (×${group.length} cells)`)
+      }
       continue
     }
     for (const p of group) {
