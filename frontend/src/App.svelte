@@ -833,17 +833,21 @@
   }
   .explorer li:hover { background: #1f1f23; }
   .explorer li.selected { background: #1e3a8a; color: #e4e4e7; }
+  /* Name + category sit as a tight pair on the left of the row. The name
+     doesn't flex-grow — letting it claim the full width would push the
+     category to the row's far edge and break the visual pairing. The pan
+     button uses margin-left:auto to claim the remaining space. */
   .explorer li .name {
-    color: #e4e4e7; font-weight: 500; flex: 1 1 auto; min-width: 0;
+    color: #e4e4e7; font-weight: 500; flex: 0 1 auto; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .explorer li .cat {
     font-size: 10.5px; flex: 0 1 auto; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    text-align: right;
+    text-align: left;
   }
   .explorer li .pan-btn {
-    flex: 0 0 auto; display: none;
+    flex: 0 0 auto; margin-left: auto; display: none;
     background: transparent; color: #a1a1aa;
     border: 1px solid #3f3f46; border-radius: 3px;
     padding: 1px 6px; font-size: 11px; line-height: 1;
@@ -869,10 +873,16 @@
     color: #71717a; font-size: 11px; padding-top: 2px;
     text-align: left; justify-self: start;
   }
+  /* Section labels wear the same dark bar treatment as .panel-header so they
+     read as subsections rather than loose dividers. Negative horizontal
+     margins (mirroring .props padding) bleed the bar edge-to-edge past the
+     grid's content padding. Bottom-border + background match panel-header. */
   .props dt.section {
-    grid-column: 1 / -1; color: #a1a1aa; font-weight: 600; font-size: 10px;
-    text-transform: uppercase; letter-spacing: 0.06em; margin-top: 8px;
-    border-top: 1px solid #27272a; padding-top: 8px;
+    grid-column: 1 / -1;
+    margin: 10px -16px 0; padding: 6px 16px;
+    color: #a1a1aa; font-weight: 600; font-size: 9.5px;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    background: #1c1c1f; border-bottom: 1px solid #27272a;
   }
   .props dd { margin: 0; color: #e4e4e7; }
   .mono { font-family: 'Cascadia Mono', Consolas, monospace; }
