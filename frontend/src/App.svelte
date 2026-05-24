@@ -899,11 +899,19 @@
     text-align: left; justify-self: start;
   }
   /* Section labels wear the same dark bar treatment as .panel-header so they
-     read as subsections rather than loose dividers. Negative horizontal
-     margins (mirroring .props padding) bleed the bar edge-to-edge past the
-     grid's content padding. Bottom-border + background match panel-header. */
+     read as subsections rather than loose dividers. The bar must reach the
+     panel's outer edges (matching .panel-header). Negative margins alone
+     don't suffice: grid items with `justify-self: stretch` (the default)
+     constrain their margin box to the grid area, so negative inline margins
+     visually shift the box without widening it. The fix: pin `box-sizing:
+     border-box`, set explicit width = grid-area + total side-padding, and
+     pull left by the same amount so the bar extends symmetrically into the
+     panel's gutter. .panel.properties has no horizontal padding, so 16px
+     each side (= .props padding) reaches the panel's outer edge. */
   .props dt.section {
     grid-column: 1 / -1;
+    box-sizing: border-box;
+    width: calc(100% + 32px);
     margin: 10px -16px 0; padding: 6px 16px;
     color: #a1a1aa; font-weight: 600; font-size: 9.5px;
     text-transform: uppercase; letter-spacing: 0.08em;
