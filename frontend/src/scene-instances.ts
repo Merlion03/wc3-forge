@@ -123,8 +123,14 @@ function setStandSequence(instance: any): void {
 }
 
 export interface SceneAPI {
-  /** Re-populate the scene from current Go-side state. Called on map-changed. */
-  loadMap(): Promise<void>
+  /**
+   * Re-populate the scene from current Go-side state. Called on map-changed.
+   * Frames the camera at the loaded map by default; pass `keepCamera: true`
+   * to preserve the current camera position (used when reloading the same
+   * map — e.g. after a graphics-mode toggle — so the user doesn't lose
+   * their viewpoint).
+   */
+  loadMap(opts?: { keepCamera?: boolean }): Promise<void>
   /** Drop every instance we created. Models stay in the viewer cache. */
   clear(): void
   /** Stop the RAF loop and tear down listeners. */
@@ -141,14 +147,6 @@ export interface SceneAPI {
   setReforgedMode(reforged: boolean): void
   /** Current reforged flag — for UI display. */
   isReforged(): boolean
-  /**
-   * Multiply every doodad's uniform scale by this factor on the next loadMap.
-   * Doodads are visually tiny relative to map size (a brazier is ~50 studs in
-   * an 18000-stud map). A 4x boost makes them readable at default zoom; 1x
-   * is the WC3-accurate baseline. The change applies to the NEXT loadMap —
-   * call loadMap() after setting if you want it to take effect immediately.
-   */
-  setDoodadScale(multiplier: number): void
 }
 
 export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {
@@ -218,10 +216,6 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   let water: WaterMesh | null = null
   let cliffs: CliffRendering | null = null
   let slocRenderer: SlocRenderer | null = null
-  // Multiplier applied to each doodad's uniformScale at placeDoodad time.
-  // Default 1 = WC3-accurate; the UI can dial this up to make tiny doodads
-  // visible without having to mouse-wheel-zoom in.
-  let doodadScaleMul = 1
   // Tracks the current selection so we can paint a tint on selected unit
   // instances on every render-applicable state change (selection arrives via
   // setSelected; the tint persists across loadMap since we re-apply on every
@@ -389,7 +383,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const inst = model.addInstance()
     inst.move([d.position[0], d.position[1], d.position[2]])
     inst.rotateLocal(quatZ(d.rotation))
-    inst.uniformScale((d.scale[0] || 1) * (info.model_scale || 1) * doodadScaleMul)
+    inst.uniformScale((d.scale[0] || 1) * (info.model_scale || 1))
     inst.setScene(scene)
     setStandSequence(inst)
     return inst
@@ -538,16 +532,21 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   canvas.addEventListener('mouseup', onCanvasMouseUp)
 
   return {
-    async loadMap() {
+    async loadMap(opts?: { keepCamera?: boolean }) {
+      const keepCamera = !!opts?.keepCamera
       clearInstances()
       // Terrain first so it's visible even while units/doodads stream in.
       try {
         const t = await GetTerrain()
         const gl = (viewer as any).gl as WebGLRenderingContext
         terrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
-        if (terrain) {
+        if (terrain && !keepCamera) {
           // Frame the map. width/height in w3e are vertex counts; tile size
           // is 128, so playable span is roughly (width-1)*128 in each axis.
+          // Skip when keepCamera is true — that's the case for in-place
+          // reloads like a graphics-mode toggle, where re-framing would
+          // throw the user back to the default view they just panned away
+          // from.
           const tw = ((t as any).width - 1) * 128
           const th = ((t as any).height - 1) * 128
           const span = Math.max(tw, th)
@@ -667,7 +666,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
           skipReasons.set(d.type_id, (skipReasons.get(d.type_id) ?? 0) + 1)
         }
       }
-      flog(`[loadMap] units placed=${uPlaced} skipped=${uSkipped}, doodads placed=${dPlaced} skipped=${dSkipped} doodad-bbox=x[${xmin.toFixed(0)},${xmax.toFixed(0)}] y[${ymin.toFixed(0)},${ymax.toFixed(0)}] slocs=${slocMarkers.length} doodadScale=${doodadScaleMul}x`)
+      flog(`[loadMap] units placed=${uPlaced} skipped=${uSkipped}, doodads placed=${dPlaced} skipped=${dSkipped} doodad-bbox=x[${xmin.toFixed(0)},${xmax.toFixed(0)}] y[${ymin.toFixed(0)},${ymax.toFixed(0)}] slocs=${slocMarkers.length}`)
       if (skipReasons.size > 0) {
         // Top 8 most-skipped type IDs so we can spot patterns in missing
         // doodad assets without flooding the log.
@@ -746,9 +745,5 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       }
     },
     isReforged() { return currentReforged },
-    setDoodadScale(multiplier: number) {
-      if (!isFinite(multiplier) || multiplier <= 0) return
-      doodadScaleMul = multiplier
-    },
   }
 }

@@ -21,12 +21,6 @@
   let canvas: HTMLCanvasElement
   let scene: SceneAPI | null = null
 
-  // Doodad scale boost — multiplies every doodad's render scale. Defaults to
-  // 1x (WC3-accurate). Doodads are tiny relative to map size (~50 studs in
-  // an 18000-stud map = ~6 pixels at default camera framing), so a 4x or
-  // 8x boost makes them readable without zooming in.
-  let doodadScale = 1
-
   const SEL_EVENT = 'wc3-forge:selection-changed'
   const MAP_EVENT = 'wc3-forge:map-changed'
 
@@ -102,12 +96,12 @@
     }
   }
 
-  async function reloadMap() {
+  async function reloadMap(opts?: { keepCamera?: boolean }) {
     units = await ListUnits()
     doodads = await ListDoodads()
     // The viewport pulls its own data via App.* methods now; no need to
     // marshal the raw .w3x bytes across the boundary.
-    await scene?.loadMap()
+    await scene?.loadMap(opts)
   }
 
   async function toggleReforged() {
@@ -122,9 +116,11 @@
       reforged = await SetReforgedMode(next)
       scene?.setReforgedMode(reforged)
       // Re-load the current map so all models + team-color textures come
-      // back through the new mode. If no map is loaded, no-op.
+      // back through the new mode, BUT keep the camera where the user
+      // panned it — re-framing on an in-place reload throws them back to
+      // the default view they just left.
       if (status.loaded) {
-        await reloadMap()
+        await reloadMap({ keepCamera: true })
       }
     } catch (e) {
       error = 'toggle reforged failed: ' + String(e)
@@ -150,16 +146,6 @@
   }
 
   async function clickRow(cn: number) { await SelectUnit(cn) }
-
-  // Apply the new doodad scale and reload to re-place doodads with the new
-  // multiplier. Reload is needed because uniformScale was applied at
-  // placeDoodad time — the lib doesn't expose a "rescale all instances"
-  // single call cheaper than that.
-  async function applyDoodadScale(v: number) {
-    doodadScale = v
-    scene?.setDoodadScale(v)
-    if (status.loaded) await scene?.loadMap()
-  }
 
   // ----- Explorer categorization -----
   //
@@ -231,21 +217,10 @@
     <div class="actions">
       <button on:click={toggleReforged} disabled={busy}
               class="mode-toggle"
-              class:hd={reforged}
-              title="Switch between SD (Classic) and HD (Reforged) graphics. Reloads the current map.">
-        {reforged ? 'HD' : 'SD'}
+              class:on={reforged}
+              title="Toggle Reforged graphics. Reloads the current map without resetting the camera.">
+        Reforged Graphics{reforged ? ' ✓' : ''}
       </button>
-      {#if status.loaded}
-        <label class="scale-toggle" title="Visually scale up doodads. They're tiny relative to map size; 4x makes them readable at default zoom.">
-          Doodad scale
-          <select bind:value={doodadScale} on:change={() => applyDoodadScale(doodadScale)} disabled={busy}>
-            <option value={1}>1×</option>
-            <option value={2}>2×</option>
-            <option value={4}>4×</option>
-            <option value={8}>8×</option>
-          </select>
-        </label>
-      {/if}
       <button on:click={pickAndOpen} disabled={busy}>Open Map…</button>
       {#if status.loaded}
         <button on:click={close} disabled={busy} class="secondary">Close</button>
@@ -386,17 +361,6 @@
   .map-count { color: #71717a; }
   .sep { color: #52525b; margin: 0 8px; }
   .actions { display: flex; gap: 6px; align-items: center; }
-  .scale-toggle {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 11px; color: #a1a1aa;
-    padding: 0 8px 0 4px;
-  }
-  .scale-toggle select {
-    background: #27272a; color: #e4e4e7; border: 1px solid #3f3f46;
-    font-size: 12px; padding: 3px 6px; border-radius: 3px;
-    cursor: pointer;
-  }
-  .scale-toggle select:disabled { opacity: 0.5; cursor: not-allowed; }
 
   button {
     background: #2563eb; color: white; border: 0; padding: 5px 12px;
@@ -407,12 +371,11 @@
   button.secondary { background: #3f3f46; }
   button.secondary:hover:not(:disabled) { background: #52525b; }
   button.mode-toggle {
-    background: #3f3f46; min-width: 36px; font-weight: 600;
-    letter-spacing: 0.04em; font-family: 'Cascadia Mono', Consolas, monospace;
+    background: #3f3f46; font-weight: 500;
   }
   button.mode-toggle:hover:not(:disabled) { background: #52525b; }
-  button.mode-toggle.hd { background: #15803d; }
-  button.mode-toggle.hd:hover:not(:disabled) { background: #166534; }
+  button.mode-toggle.on { background: #15803d; }
+  button.mode-toggle.on:hover:not(:disabled) { background: #166534; }
 
   .error { background: #7f1d1d; color: #fecaca; padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; max-height: 200px; overflow: auto; }
   .error pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
