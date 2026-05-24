@@ -36,6 +36,9 @@ import { buildTerrain, type TerrainMesh } from './terrain'
 import { buildWater, type WaterMesh } from './water'
 import { createCamera, type RTSCamera } from './camera'
 import { computeCliffPlacements, renderCliffs, type CliffRendering } from './cliffs'
+import {
+  buildSlocRenderer, type SlocRenderer, type SlocMarker,
+} from './sloc-markers'
 
 const MV: any = (MV_ns as any).default ?? MV_ns
 
@@ -138,6 +141,14 @@ export interface SceneAPI {
   setReforgedMode(reforged: boolean): void
   /** Current reforged flag — for UI display. */
   isReforged(): boolean
+  /**
+   * Multiply every doodad's uniform scale by this factor on the next loadMap.
+   * Doodads are visually tiny relative to map size (a brazier is ~50 studs in
+   * an 18000-stud map). A 4x boost makes them readable at default zoom; 1x
+   * is the WC3-accurate baseline. The change applies to the NEXT loadMap —
+   * call loadMap() after setting if you want it to take effect immediately.
+   */
+  setDoodadScale(multiplier: number): void
 }
 
 export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {
@@ -206,6 +217,28 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   let terrain: TerrainMesh | null = null
   let water: WaterMesh | null = null
   let cliffs: CliffRendering | null = null
+  let slocRenderer: SlocRenderer | null = null
+  // Multiplier applied to each doodad's uniformScale at placeDoodad time.
+  // Default 1 = WC3-accurate; the UI can dial this up to make tiny doodads
+  // visible without having to mouse-wheel-zoom in.
+  let doodadScaleMul = 1
+  // Tracks the current selection so we can paint a tint on selected unit
+  // instances on every render-applicable state change (selection arrives via
+  // setSelected; the tint persists across loadMap since we re-apply on every
+  // placeUnit call when the cn is in this set). Declared here (before the
+  // render loop's first invocation) to satisfy TDZ — the loop closure
+  // captures the binding name and would crash on first invocation otherwise.
+  let selectedSet: Set<number> = new Set()
+
+  // Sloc-marker renderer. Owns its own shader + box geometry. Failure to
+  // build is non-fatal: we just won't have visible markers. Built here
+  // (after `let slocRenderer = null` above) rather than earlier, because
+  // assigning to a `let` before its declaration is a TDZ violation in JS.
+  try {
+    slocRenderer = buildSlocRenderer((viewer as any).gl as WebGLRenderingContext)
+  } catch (e) {
+    flog('[slocs] init failed:', e instanceof Error ? e.message : String(e))
+  }
   // Background color (used by our own clear call now that scene.alpha=true).
   const bg = [0.07, 0.07, 0.09]
   const loop = () => {
@@ -235,6 +268,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
         if (terrain) terrain.draw(scene.camera.viewProjectionMatrix)
         viewer.render()
+        // Sloc markers go AFTER viewer.render() and BEFORE water so they're
+        // opaque-on-top-of-units but still get alpha-blended water in front.
+        // Slocs are small and rare (typically 2-12 per map), so drawing N
+        // pillars per frame is cheap enough that we don't bother with any
+        // visibility culling.
+        if (slocRenderer) slocRenderer.draw(scene.camera.viewProjectionMatrix, selectedSet)
         // Water is translucent — must render LAST so it alpha-blends on top
         // of terrain + cliffs + opaque model passes. The lib's translucent
         // pass already ran inside viewer.render(); water sits above that.
@@ -258,11 +297,8 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   const unitInstances = new Map<number, any>()
   const doodadInstances: any[] = []
   let pickCallback: ((cn: number) => void) | null = null
-  // Tracks the current selection so we can paint a tint on selected unit
-  // instances on every render-applicable state change (selection arrives via
-  // setSelected; the tint persists across loadMap since we re-apply on every
-  // placeUnit call when the cn is in this set).
-  let selectedSet: Set<number> = new Set()
+  // Note: selectedSet is declared earlier in this function (before the
+  // render loop runs) to avoid a TDZ trap; see comment up there.
   const SELECT_TINT: [number, number, number, number] = [1.2, 1.4, 0.6, 1] // warm yellow boost
 
   // Unit type index: stock-only and process-stable (we don't yet apply
@@ -353,7 +389,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const inst = model.addInstance()
     inst.move([d.position[0], d.position[1], d.position[2]])
     inst.rotateLocal(quatZ(d.rotation))
-    inst.uniformScale((d.scale[0] || 1) * (info.model_scale || 1))
+    inst.uniformScale((d.scale[0] || 1) * (info.model_scale || 1) * doodadScaleMul)
     inst.setScene(scene)
     setStandSequence(inst)
     return inst
@@ -368,6 +404,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       try { inst.detach() } catch { /* already detached */ }
     }
     doodadInstances.length = 0
+    // Slocs hold no GL resources of their own — they live in the renderer's
+    // marker list. Replace with empty list so the next loadMap re-populates.
+    slocRenderer?.setMarkers([])
     if (terrain) {
       terrain.dispose()
       terrain = null
@@ -435,6 +474,50 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         bestCn = cn
       }
     }
+
+    // Sloc markers — ray vs AABB (slab method). Slocs have no MDX so they're
+    // not in unitInstances; rays still need to hit them for selection.
+    const slocInfos = slocRenderer?.pickInfos() ?? []
+    for (const s of slocInfos) {
+      // Per-axis slab intersection. Ray dir component near zero gets clamped
+      // to ±Infinity so we don't divide-by-zero and the per-axis interval
+      // collapses to "always inside" iff the ray origin is within the slab.
+      const cx = s.center[0], cy = s.center[1], cz = s.center[2]
+      const hx = s.half[0], hy = s.half[1], hz = s.half[2]
+      const minX = cx - hx, maxX = cx + hx
+      const minY = cy - hy, maxY = cy + hy
+      const minZ = cz - hz, maxZ = cz + hz
+      let tmin = -Infinity, tmax = Infinity
+      const axes: Array<[number, number, number, number]> = [
+        [rx, ox, minX, maxX],
+        [ry, oy, minY, maxY],
+        [rz, oz, minZ, maxZ],
+      ]
+      let skip = false
+      for (const [rd, ro, lo, hi] of axes) {
+        if (Math.abs(rd) < 1e-9) {
+          // Ray parallel to this slab — must be inside it or no hit.
+          if (ro < lo || ro > hi) { skip = true; break }
+          continue
+        }
+        let t1 = (lo - ro) / rd
+        let t2 = (hi - ro) / rd
+        if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp }
+        if (t1 > tmin) tmin = t1
+        if (t2 < tmax) tmax = t2
+        if (tmin > tmax) { skip = true; break }
+      }
+      if (skip) continue
+      // tmin < 0 means the ray origin is inside the box — pick anyway,
+      // using tmax as the exit point. tmax < 0 means the box is entirely
+      // behind the camera, skip.
+      const t = tmin >= 0 ? tmin : tmax
+      if (t < 0) continue
+      if (t < bestT) {
+        bestT = t
+        bestCn = s.creationNumber
+      }
+    }
     return bestCn
   }
 
@@ -496,10 +579,44 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       const [units, doodads, uTypes, dTypes] = await Promise.all([
         ListUnits(), ListDoodads(), getUnitTypes(), getDoodadTypes(),
       ])
+      // Split slocs out of the unit list. Slocs (start-location markers)
+      // have type_id "sloc" and no MDX in stock data — they're rendered as
+      // colored pillars by slocRenderer instead. Filter here so placeUnit
+      // doesn't try to load a non-existent MDX for each one.
+      const slocMarkers: SlocMarker[] = []
+      const realUnits: typeof units = []
+      for (const u of units) {
+        if (u.type_id === 'sloc') {
+          slocMarkers.push({
+            creationNumber: u.creation_number,
+            player: u.player,
+            position: [u.position[0], u.position[1], u.position[2]],
+            rotation: u.rotation,
+          })
+        } else {
+          realUnits.push(u)
+        }
+      }
+      slocRenderer?.setMarkers(slocMarkers)
+      // Quick diagnostic: log a sloc bounding box so we can spot maps where
+      // every sloc is degenerately stacked at the same position (Enfo's FFB
+      // does this — see the doodad-audit notes in the project memory).
+      if (slocMarkers.length > 0) {
+        let sxmin = Infinity, sxmax = -Infinity, symin = Infinity, symax = -Infinity
+        for (const m of slocMarkers) {
+          if (m.position[0] < sxmin) sxmin = m.position[0]
+          if (m.position[0] > sxmax) sxmax = m.position[0]
+          if (m.position[1] < symin) symin = m.position[1]
+          if (m.position[1] > symax) symax = m.position[1]
+        }
+        const stacked = (sxmin === sxmax && symin === symax)
+        flog(`[slocs] n=${slocMarkers.length} bbox=x[${sxmin.toFixed(0)},${sxmax.toFixed(0)}] y[${symin.toFixed(0)},${symax.toFixed(0)}]${stacked ? ' (all stacked at same pos)' : ''}`)
+      }
+
       // Sequential to keep diagnostics legible during bring-up; once stable
       // we'll batch via Promise.allSettled for parallel asset fetching.
       let uPlaced = 0, uSkipped = 0
-      for (const u of units) {
+      for (const u of realUnits) {
         const inst = await placeUnit(u, uTypes)
         if (inst) {
           unitInstances.set(u.creation_number, inst)
@@ -508,8 +625,20 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
           uSkipped++
         }
       }
+      // Doodad placement + audit instrumentation.
+      //
+      // We collect:
+      //   - placed/skipped counters
+      //   - per-typeID skip counts (typeIDs that 404'd or had no MDX entry,
+      //     which lets us spot patterns of missing assets)
+      //   - sample world data for the first few placed instances
+      //     (worldLocation, worldScale, bounds.r) so we can prove they're
+      //     in the right place / right size and decide if "invisible" means
+      //     "broken" or just "tiny relative to map span".
       let dPlaced = 0, dSkipped = 0
       let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity
+      const skipReasons = new Map<string, number>()
+      const sampleAudits: string[] = []
       for (const d of doodads) {
         if (d.position[0] < xmin) xmin = d.position[0]
         if (d.position[0] > xmax) xmax = d.position[0]
@@ -519,11 +648,39 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         if (inst) {
           doodadInstances.push(inst)
           dPlaced++
+          // Sample the first 5 placements + 5 from later in the list to
+          // confirm bounds are sane across the map. The lib's bounds object
+          // is a sphere — center + radius in MODEL-local space. World-space
+          // radius = bounds.r * max(worldScale). We log both for sanity.
+          if (sampleAudits.length < 10 && (dPlaced <= 5 || dPlaced % 100 === 0)) {
+            const b = inst.getBounds?.()
+            const wl = inst.worldLocation
+            const ws = inst.worldScale
+            const biggest = Math.max(ws?.[0] ?? 1, ws?.[1] ?? 1, ws?.[2] ?? 1)
+            const worldR = b ? (b.r * biggest) : NaN
+            sampleAudits.push(
+              `#${dPlaced} ${d.type_id} loc=[${wl?.[0]?.toFixed(0)},${wl?.[1]?.toFixed(0)},${wl?.[2]?.toFixed(0)}] scale=[${ws?.[0]?.toFixed(2)},${ws?.[1]?.toFixed(2)},${ws?.[2]?.toFixed(2)}] boundsR=${b?.r?.toFixed(1)} worldR=${worldR.toFixed(1)}`
+            )
+          }
         } else {
           dSkipped++
+          skipReasons.set(d.type_id, (skipReasons.get(d.type_id) ?? 0) + 1)
         }
       }
-      flog(`[loadMap] units placed=${uPlaced} skipped=${uSkipped}, doodads placed=${dPlaced} skipped=${dSkipped} doodad-bbox=x[${xmin.toFixed(0)},${xmax.toFixed(0)}] y[${ymin.toFixed(0)},${ymax.toFixed(0)}]`)
+      flog(`[loadMap] units placed=${uPlaced} skipped=${uSkipped}, doodads placed=${dPlaced} skipped=${dSkipped} doodad-bbox=x[${xmin.toFixed(0)},${xmax.toFixed(0)}] y[${ymin.toFixed(0)},${ymax.toFixed(0)}] slocs=${slocMarkers.length} doodadScale=${doodadScaleMul}x`)
+      if (skipReasons.size > 0) {
+        // Top 8 most-skipped type IDs so we can spot patterns in missing
+        // doodad assets without flooding the log.
+        const top = [...skipReasons.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 8)
+          .map(([id, n]) => `${id}×${n}`)
+          .join(' ')
+        flog(`[doodad audit] skipped-type-ids: ${top}`)
+      }
+      for (const line of sampleAudits) {
+        flog(`[doodad audit] ${line}`)
+      }
     },
     clear() {
       clearInstances()
@@ -535,6 +692,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       ro.disconnect()
       canvas.removeEventListener('mousedown', onCanvasMouseDown)
       canvas.removeEventListener('mouseup', onCanvasMouseUp)
+      if (slocRenderer) {
+        slocRenderer.dispose()
+        slocRenderer = null
+      }
     },
     setSelected(creationNumbers: Set<number>) {
       // Clear tint on previously-selected, paint tint on newly-selected.
@@ -585,5 +746,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       }
     },
     isReforged() { return currentReforged },
+    setDoodadScale(multiplier: number) {
+      if (!isFinite(multiplier) || multiplier <= 0) return
+      doodadScaleMul = multiplier
+    },
   }
 }

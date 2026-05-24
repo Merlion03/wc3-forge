@@ -21,6 +21,12 @@
   let canvas: HTMLCanvasElement
   let scene: SceneAPI | null = null
 
+  // Doodad scale boost — multiplies every doodad's render scale. Defaults to
+  // 1x (WC3-accurate). Doodads are tiny relative to map size (~50 studs in
+  // an 18000-stud map = ~6 pixels at default camera framing), so a 4x or
+  // 8x boost makes them readable without zooming in.
+  let doodadScale = 1
+
   const SEL_EVENT = 'wc3-forge:selection-changed'
   const MAP_EVENT = 'wc3-forge:map-changed'
 
@@ -31,6 +37,9 @@
       try { reforged = await GetReforgedMode() } catch { reforged = false }
       scene = createScene(canvas, reforged)
       scene.onUnitClicked((cn) => { SelectUnit(cn) })
+      // Devtools / screenshot-automation hook: lets external test drivers
+      // pump scene-level operations without needing keyboard simulation.
+      ;(window as any).__scene = scene
     } catch (e) {
       error = 'scene init failed: ' + (e instanceof Error ? (e.stack || e.message) : String(e))
       console.error(e)
@@ -142,6 +151,16 @@
 
   async function clickRow(cn: number) { await SelectUnit(cn) }
 
+  // Apply the new doodad scale and reload to re-place doodads with the new
+  // multiplier. Reload is needed because uniformScale was applied at
+  // placeDoodad time — the lib doesn't expose a "rescale all instances"
+  // single call cheaper than that.
+  async function applyDoodadScale(v: number) {
+    doodadScale = v
+    scene?.setDoodadScale(v)
+    if (status.loaded) await scene?.loadMap()
+  }
+
   // ----- Explorer categorization -----
   //
   // We don't have SLK lookup yet, so we classify by simple heuristics:
@@ -216,6 +235,17 @@
               title="Switch between SD (Classic) and HD (Reforged) graphics. Reloads the current map.">
         {reforged ? 'HD' : 'SD'}
       </button>
+      {#if status.loaded}
+        <label class="scale-toggle" title="Visually scale up doodads. They're tiny relative to map size; 4x makes them readable at default zoom.">
+          Doodad scale
+          <select bind:value={doodadScale} on:change={() => applyDoodadScale(doodadScale)} disabled={busy}>
+            <option value={1}>1×</option>
+            <option value={2}>2×</option>
+            <option value={4}>4×</option>
+            <option value={8}>8×</option>
+          </select>
+        </label>
+      {/if}
       <button on:click={pickAndOpen} disabled={busy}>Open Map…</button>
       {#if status.loaded}
         <button on:click={close} disabled={busy} class="secondary">Close</button>
@@ -355,7 +385,18 @@
   .map-name { color: #e4e4e7; font-weight: 500; }
   .map-count { color: #71717a; }
   .sep { color: #52525b; margin: 0 8px; }
-  .actions { display: flex; gap: 6px; }
+  .actions { display: flex; gap: 6px; align-items: center; }
+  .scale-toggle {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; color: #a1a1aa;
+    padding: 0 8px 0 4px;
+  }
+  .scale-toggle select {
+    background: #27272a; color: #e4e4e7; border: 1px solid #3f3f46;
+    font-size: 12px; padding: 3px 6px; border-radius: 3px;
+    cursor: pointer;
+  }
+  .scale-toggle select:disabled { opacity: 0.5; cursor: not-allowed; }
 
   button {
     background: #2563eb; color: white; border: 0; padding: 5px 12px;
