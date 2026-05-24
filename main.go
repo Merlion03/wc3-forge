@@ -68,7 +68,8 @@ func main() {
 		Width:  1280,
 		Height: 800,
 		AssetServer: &assetserver.Options{
-			Assets: assets,
+			Assets:  assets,
+			Handler: newAssetHandler(),
 		},
 		BackgroundColour: &options.RGBA{R: 18, G: 18, B: 20, A: 1},
 		OnStartup:        app.startup,

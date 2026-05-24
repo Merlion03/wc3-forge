@@ -69,6 +69,8 @@ type Session struct {
 	mu      sync.RWMutex
 	loaded  bool
 	path    string
+	source  fileSource // kept open for ReadFile (mdx-m3-viewer pathSolver asks for arbitrary files inside the map MPQ)
+	rawMap  []byte     // the raw .w3x bytes if opened from an archive; nil for folder-based opens
 	info    *w3i.Info
 	units   *unitsdoo.File
 	doodads *doodadsdoo.File
@@ -110,16 +112,23 @@ func (s *Session) Open(path string) error {
 	}
 
 	var src fileSource
+	var rawMapBytes []byte
 	if fi.IsDir() {
 		src = folderSource{root: abs}
 	} else {
+		// Read the whole .w3x into memory once. mdx-m3-viewer's
+		// War3MapViewer.loadMap wants the raw bytes, and we also want
+		// the archive open for per-file asset reads via pathSolver.
+		rawMapBytes, err = os.ReadFile(abs)
+		if err != nil {
+			return fmt.Errorf("read %q: %w", abs, err)
+		}
 		archive, err := mpq.Open(abs)
 		if err != nil {
 			return fmt.Errorf("open MPQ %q: %w", abs, err)
 		}
 		src = mpqSource{a: archive}
 	}
-	defer src.close()
 
 	// war3map.w3i — REQUIRED.
 	w3iBytes, ok, err := src.read("war3map.w3i")
@@ -167,15 +176,22 @@ func (s *Session) Open(path string) error {
 		return err
 	}
 
+	// Atomically swap state; close any previously-held source before stomping it.
 	s.mu.Lock()
+	prevSource := s.source
 	s.loaded = true
 	s.path = abs
+	s.source = src
+	s.rawMap = rawMapBytes
 	s.info = info
 	s.units = units
 	s.doodads = doodads
 	s.terrain = terrain
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
+	if prevSource != nil {
+		_ = prevSource.close()
+	}
 	s.notifySelection()
 	s.notifyMapChanged(true)
 	return nil
@@ -203,16 +219,45 @@ func readOpt[T any](src fileSource, name string, parse func([]byte) (T, error)) 
 // Close discards the loaded map. Safe to call when nothing is loaded.
 func (s *Session) Close() {
 	s.mu.Lock()
+	prevSource := s.source
 	s.loaded = false
 	s.path = ""
+	s.source = nil
+	s.rawMap = nil
 	s.info = nil
 	s.units = nil
 	s.doodads = nil
 	s.terrain = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
+	if prevSource != nil {
+		_ = prevSource.close()
+	}
 	s.notifySelection()
 	s.notifyMapChanged(false)
+}
+
+// RawMapBytes returns the raw .w3x file bytes if the current map was opened
+// from an archive (suitable for War3MapViewer.loadMap). Returns nil for
+// folder-based opens or when no map is loaded.
+func (s *Session) RawMapBytes() []byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.rawMap
+}
+
+// ReadFile fetches one named file from the currently-loaded map's source
+// (the open MPQ or the folder). Returns (nil, false, nil) if the file
+// isn't present. Used by the pathSolver bridge so mdx-m3-viewer can pull
+// custom-imported assets out of the map archive.
+func (s *Session) ReadFile(name string) ([]byte, bool, error) {
+	s.mu.RLock()
+	src := s.source
+	s.mu.RUnlock()
+	if src == nil {
+		return nil, false, nil
+	}
+	return src.read(name)
 }
 
 // OnMapChanged subscribes to load/unload notifications. Called after the

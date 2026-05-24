@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"os"
+	"time"
 
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
@@ -30,6 +33,18 @@ type App struct {
 
 func NewApp() *App {
 	return &App{}
+}
+
+// LogJS writes a JS-side message to wc3-forge.log next to the executable.
+// Crude but reliable: GUI Wails apps have no console, so this is how
+// frontend code surfaces diagnostics during early-bootstrap debugging.
+func (a *App) LogJS(message string) {
+	f, err := os.OpenFile("wc3-forge.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format("15:04:05.000"), message)
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -262,6 +277,23 @@ func (a *App) GetDoodad(creationNumber uint32) (*doodadsdoo.Doodad, error) {
 		}
 	}
 	return nil, fmt.Errorf("no doodad with creation_number %d", creationNumber)
+}
+
+// GetMapBytes returns the raw .w3x bytes for the current map, base64-encoded
+// for safe JSON transport. JS callers decode then pass to War3MapViewer's
+// loadMap. Returns "" if the current map was opened from a folder (no
+// archive bytes available) or no map is loaded.
+//
+// (Wails serializes []byte as base64 strings; the JS side does atob+Uint8Array
+// to recover the buffer. That's intentional — base64 over the JS bridge
+// performs fine at single-megabyte map sizes and avoids exposing raw
+// bytes through the URL space.)
+func (a *App) GetMapBytes() string {
+	b := forge.Current.RawMapBytes()
+	if len(b) == 0 {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 // GetUnit returns the full Entity for one creation_number. Properties panel

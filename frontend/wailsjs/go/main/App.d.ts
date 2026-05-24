@@ -10,6 +10,8 @@ export function CloseMap():Promise<main.MapStatus>;
 
 export function GetDoodad(arg1:number):Promise<doodadsdoo.Doodad>;
 
+export function GetMapBytes():Promise<string>;
+
 export function GetSelection():Promise<main.SelectionDTO>;
 
 export function GetTerrain():Promise<main.TerrainDTO>;
@@ -19,6 +21,8 @@ export function GetUnit(arg1:number):Promise<unitsdoo.Entity>;
 export function ListDoodads():Promise<Array<main.DoodadDTO>>;
 
 export function ListUnits():Promise<Array<main.UnitDTO>>;
+
+export function LogJS(arg1:string):Promise<void>;
 
 export function OpenMap(arg1:string):Promise<main.MapStatus>;
 

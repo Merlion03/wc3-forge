@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
   import {
-    OpenMapDialog, OpenMap, CloseMap, ListUnits, ListDoodads, Status, GetTerrain,
-    GetSelection, SelectUnit, ClearSelection, GetUnit,
+    OpenMapDialog, OpenMap, CloseMap, ListUnits, ListDoodads, Status,
+    GetSelection, SelectUnit, ClearSelection, GetUnit, GetMapBytes,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
-  import { createScene, type SceneAPI, type TerrainData, type UnitData, type DoodadData } from './scene'
+  import { createScene, type SceneAPI } from './scene-w3x'
 
   let status: main.MapStatus = { loaded: false, unit_count: 0 }
   let units: main.UnitDTO[] = []
@@ -23,14 +23,14 @@
   const MAP_EVENT = 'wc3-forge:map-changed'
 
   onMount(async () => {
-    scene = createScene(canvas)
-    scene.onPick(cn => {
-      if (cn == null) {
-        ClearSelection()
-      } else {
-        SelectUnit(cn)
-      }
-    })
+    try {
+      scene = createScene(canvas)
+    } catch (e) {
+      error = 'scene init failed: ' + (e instanceof Error ? (e.stack || e.message) : String(e))
+      console.error(e)
+    }
+    // TODO: picking via mdx-m3-viewer ray-AABB. For now Explorer-row click
+    // still drives selection.
     // Map changes from any source (App method, MCP bridge, --open flag).
     EventsOn(MAP_EVENT, async () => {
       status = await Status()
@@ -39,9 +39,6 @@
       } else {
         units = []
         doodads = []
-        scene?.setTerrain(null)
-        scene?.setUnits([])
-        scene?.setDoodads([])
         selectedIds = new Set()
         primaryEntity = null
       }
@@ -52,7 +49,7 @@
         if (item.kind === 'unit' || item.kind === 'item') ids.add(item.id)
       }
       selectedIds = ids
-      scene?.setSelection(Array.from(ids))
+      // TODO: viewport highlight via mdx-m3-viewer once picking is wired.
       // Fetch full entity for the primary selection (or first item).
       const primaryCn = (s.items && s.items.length > 0)
         ? s.items[Math.max(0, Math.min(s.primary, s.items.length - 1))].id
@@ -69,7 +66,6 @@
     if (s.loaded) await reloadMap()
     const sel = await GetSelection()
     selectedIds = new Set((sel.items || []).map(i => i.id))
-    scene?.setSelection(Array.from(selectedIds))
   })
 
   onDestroy(() => {
@@ -96,26 +92,19 @@
   async function reloadMap() {
     units = await ListUnits()
     doodads = await ListDoodads()
-    try {
-      const terrain = await GetTerrain() as TerrainData
-      scene?.setTerrain(terrain)
-    } catch {
-      scene?.setTerrain(null)
+    // mdx-m3-viewer renders directly from .w3x bytes (it has its own MPQ
+    // parser). For folder-based opens we have no archive bytes to hand it,
+    // so the viewport stays empty — log it and rely on the Explorer/
+    // Properties panels for that case.
+    const b64 = await GetMapBytes()
+    if (!b64) {
+      console.info('No .w3x bytes (folder-based open?) — viewport empty.')
+      return
     }
-    scene?.setUnits(units.map(u => ({
-      creation_number: u.creation_number,
-      type_id: u.type_id,
-      player: u.player,
-      position: u.position,
-      scale: u.scale,
-    } as UnitData)))
-    scene?.setDoodads(doodads.map(d => ({
-      creation_number: d.creation_number,
-      type_id: d.type_id,
-      position: d.position,
-      rotation: d.rotation,
-      scale: d.scale,
-    } as DoodadData)))
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    scene?.loadMap(bytes)
   }
 
   async function close() {
@@ -124,11 +113,11 @@
       status = await CloseMap()
       units = []
       doodads = []
-      scene?.setTerrain(null)
-      scene?.setUnits([])
-      scene?.setDoodads([])
       selectedIds = new Set()
       primaryEntity = null
+      // No clean "unload map" in mdx-m3-viewer; we'd recreate the viewer
+      // on close. For now the canvas just keeps the last-loaded map until
+      // a new one is opened.
     } finally {
       busy = false
     }
@@ -211,7 +200,7 @@
     </div>
   </header>
 
-  {#if error}<div class="error">{error}</div>{/if}
+  {#if error}<div class="error"><pre>{error}</pre></div>{/if}
 
   <div class="split">
     <aside class="panel explorer">
@@ -354,7 +343,8 @@
   button.secondary { background: #3f3f46; }
   button.secondary:hover:not(:disabled) { background: #52525b; }
 
-  .error { background: #7f1d1d; color: #fecaca; padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; }
+  .error { background: #7f1d1d; color: #fecaca; padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; max-height: 200px; overflow: auto; }
+  .error pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 
   .split { flex: 1 1 auto; display: grid; grid-template-columns: 260px 1fr 340px; min-height: 0; }
   .panel { background: #161618; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
