@@ -118,8 +118,12 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
   }
 
   // Doodads are decorative — usually MANY per map (enfos: 578). Single
-  // InstancedMesh keeps draw-call count to 1.
-  const doodadGeom = new THREE.BoxGeometry(48, 96, 48)
+  // InstancedMesh keeps draw-call count to 1. Geometry comes from the same
+  // MDX path as units (cloned + scaled down so doodads don't dominate
+  // visually) — keeps the whole scene visually consistent rather than
+  // pyramids-for-units / cubes-for-doodads.
+  const doodadGeom = unitGeom.clone()
+  doodadGeom.scale(0.4, 0.4, 0.4)
   const doodadMat = new THREE.MeshLambertMaterial({ color: 0x3f5a2a })
   let doodadInstanced: THREE.InstancedMesh | null = null
 
