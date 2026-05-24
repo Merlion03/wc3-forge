@@ -18,14 +18,50 @@
 //     class but no controls; ours are TBD.
 
 import * as MV_ns from 'mdx-m3-viewer'
+import { flog } from './debuglog'
 
-// CJS-via-ESM-interop: when Vite imports a CJS module that uses
-// `exports.default = ...`, the namespace import lands the named exports
-// at the top level AND duplicates them under .default. mdx-m3-viewer's
-// top-level is named exports, so MV_ns.viewer should be there directly.
-// We fall through .default just in case.
 const MV: any = (MV_ns as any).default ?? MV_ns
 const War3MapViewer = MV?.viewer?.handlers?.War3MapViewer
+
+// Monkey-patch the w3u Modification parser. mdx-m3-viewer only knows
+// variable types 0..3 and throws on anything else. Modern Reforged w3u
+// files (and possibly the older custom-edited maps via JassNewGenPack)
+// contain types outside this range; without the patch loadMap aborts on
+// the first such modification and nothing renders. We swallow the
+// exception and treat unknown types as int32 — the bytestream may end
+// up slightly off, but rendering proceeds.
+;(function patchModification() {
+  try {
+    const Modification = MV?.parsers?.w3x?.w3u?.Modification
+      ?? MV?.parsers?.w3u?.Modification
+    if (!Modification?.prototype?.load) {
+      flog('[patch] could not locate w3u.Modification')
+      return
+    }
+    const origLoad = Modification.prototype.load
+    Modification.prototype.load = function (stream: any, useOptionalInts: boolean) {
+      const startPos = stream.index
+      try {
+        origLoad.call(this, stream, useOptionalInts)
+      } catch (e) {
+        // Rewind and treat as a generic int32 modification of the same length.
+        stream.index = startPos
+        this.id = stream.readBinary(4)
+        this.variableType = stream.readInt32()
+        if (useOptionalInts) {
+          this.levelOrVariation = stream.readInt32()
+          this.dataPointer = stream.readInt32()
+        }
+        // Read the value as int32 regardless of declared type.
+        this.value = stream.readInt32()
+        this.u1 = stream.readInt32()
+      }
+    }
+    flog('[patch] w3u.Modification.load is now lenient')
+  } catch (e) {
+    flog('[patch] failed:', e instanceof Error ? e.message : String(e))
+  }
+})()
 
 export interface SceneAPI {
   loadMap(rawW3xBytes: Uint8Array): void
@@ -62,28 +98,43 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
   sizeToBox()
 
   const viewer = new War3MapViewer(canvas, pathSolver, /* isReforged */ false)
+  ;(window as any).__viewer = viewer // for inspection if devtools is open
 
   // mdx-m3-viewer emits 'error' for every missing asset / shader compile failure.
-  // Without CASC, expect a flood here for base-file loads. Logged once per cause.
   const seenErrors = new Set<string>()
   viewer.on('error', (target: unknown, error: unknown) => {
-    const key = String(error)
+    const key = (error instanceof Error ? error.message : String(error)) +
+      ' :: ' + (target as any)?.fetchUrl
     if (seenErrors.has(key)) return
     seenErrors.add(key)
-    console.warn('[mdx-m3-viewer]', error, target)
+    flog('[viewer error]', error, 'target:', JSON.stringify({
+      fetchUrl: (target as any)?.fetchUrl,
+      name: (target as any)?.name,
+    }))
+  })
+  viewer.on('loadend', (target: unknown) => {
+    const t = target as any
+    if (t && t.error) flog('[loadend with error]', t.error, 'url:', t.fetchUrl)
   })
 
-  // Kick off base files load. Without CASC this fails for most files; we
-  // ignore the error so the viewer is at least constructed and the canvas
-  // shows something.
-  viewer.loadBaseFiles().catch((err: unknown) => {
-    console.warn('loadBaseFiles failed (expected until CASC is wired):', err)
-  })
+  viewer.loadBaseFiles()
+    .then(() => flog('[loadBaseFiles] succeeded'))
+    .catch((err: unknown) => {
+      flog('[loadBaseFiles FAILED]', err instanceof Error ? err.stack : String(err))
+    })
 
   let rafId = 0
+  let crashed = false
   const loop = () => {
-    sizeToBox()
-    viewer.updateAndRender()
+    if (!crashed) {
+      try {
+        sizeToBox()
+        viewer.updateAndRender()
+      } catch (e) {
+        crashed = true
+        flog('[render-loop crash]', e instanceof Error ? e.stack : String(e))
+      }
+    }
     rafId = requestAnimationFrame(loop)
   }
   loop()
@@ -93,10 +144,12 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
 
   return {
     loadMap(bytes: Uint8Array) {
+      flog('[loadMap] starting,', bytes.byteLength, 'bytes')
       try {
         viewer.loadMap(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
+        flog('[loadMap] returned normally')
       } catch (e) {
-        console.warn('loadMap threw:', e)
+        flog('[loadMap CRASH]', e instanceof Error ? e.stack : String(e))
       }
     },
     dispose() {
