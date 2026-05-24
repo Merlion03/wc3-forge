@@ -153,7 +153,36 @@ void main() {
   vec4 cBR = texture2D(u_atlas, uvBR);
   vec4 cBL = texture2D(u_atlas, uvBL);
 
-  vec3 col = cTL.rgb * wTL + cTR.rgb * wTR + cBR.rgb * wBR + cBL.rgb * wBL;
+  // Alpha-weighted bilinear blend. WC3 tileset atlases (especially the
+  // extended ones, but also some non-extended sub-tile slots) carry
+  // alpha-edged sub-tiles: the "interior" pixels of a sub-tile are opaque
+  // textured ground, while the edges fade to alpha=0 to support tile-to-tile
+  // blending. In those transparent border pixels the source DDS stores
+  // rgb ≈ (0, 0, 0), so a straight RGB-weighted-sum (rgb * weight) pulls
+  // those zero RGB values into the result weighted by the bilinear corner
+  // weight — producing the visible dark patches clustered at cell corners.
+  //
+  // The fix: weight each corner's contribution by (its alpha × its bilinear
+  // weight) and normalize by the total alpha-weight. Fully-opaque corners
+  // (alpha=1, the common case for cell interiors) cancel the alpha factor
+  // out and the formula reduces to the original straight bilinear blend —
+  // so this fix is a no-op everywhere the source isn't alpha-edged.
+  float aTL = cTL.a * wTL;
+  float aTR = cTR.a * wTR;
+  float aBR = cBR.a * wBR;
+  float aBL = cBL.a * wBL;
+  float totalA = aTL + aTR + aBR + aBL;
+
+  vec3 col;
+  if (totalA > 0.001) {
+    col = (cTL.rgb * aTL + cTR.rgb * aTR + cBR.rgb * aBR + cBL.rgb * aBL) / totalA;
+  } else {
+    // All four corners fully transparent. Shouldn't happen on real cells
+    // because at least one corner of a textured cell always lands in a
+    // non-transparent sub-tile, but defensive in case the atlas has a
+    // fully-transparent gutter region.
+    col = cTL.rgb;
+  }
 
   if (u_hasShadow) {
     float shadow = texture2D(u_shadowTex, v_shadowUV).r;
