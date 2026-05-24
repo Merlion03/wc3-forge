@@ -12,11 +12,52 @@ import (
 	"sync"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/mpq"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3e"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wts"
 )
+
+// fileSource abstracts "where does a file's bytes come from" so the same
+// Open code path covers both folder-based extracted maps and MPQ-backed
+// .w3x / .w3m / .mpq files.
+type fileSource interface {
+	// read returns the file's bytes. ok=false + nil error means "the file
+	// isn't present" (the caller decides whether that's fatal). A non-nil
+	// error means a real I/O / format problem.
+	read(name string) (data []byte, ok bool, err error)
+	// close releases any open handles. Safe to call once at end of Open.
+	close() error
+}
+
+type folderSource struct{ root string }
+
+func (f folderSource) read(name string) ([]byte, bool, error) {
+	b, err := os.ReadFile(filepath.Join(f.root, name))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return b, true, nil
+}
+func (f folderSource) close() error { return nil }
+
+type mpqSource struct{ a *mpq.Archive }
+
+func (m mpqSource) read(name string) ([]byte, bool, error) {
+	if !m.a.Has(name) {
+		return nil, false, nil
+	}
+	b, err := m.a.Read(name)
+	if err != nil {
+		return nil, false, err
+	}
+	return b, true, nil
+}
+func (m mpqSource) close() error { return m.a.Close() }
 
 // Session holds the currently-loaded map. Phase 1 only supports folder-based
 // maps (an extracted .w3x). MPQ-backed opening is deferred to a follow-up.
@@ -33,8 +74,9 @@ type Session struct {
 	doodads *doodadsdoo.File
 	terrain *w3e.File
 
-	selection SelectionState
-	listeners []func(SelectionState)
+	selection      SelectionState
+	listeners      []func(SelectionState)
+	mapListeners   []func(bool) // fired after Open/Close; bool = loaded
 }
 
 // SelectionState is the editor's current selection. Items are entity IDs in
@@ -52,12 +94,11 @@ type SelectionItem struct {
 // Current is the process-wide singleton session.
 var Current = &Session{}
 
-// Open replaces the loaded map with the one at path. The path MUST be a
-// directory containing the extracted map files (war3map.w3i etc.). A trailing
-// slash is fine; we resolve to absolute internally.
+// Open replaces the loaded map with the one at path. path may be:
+//   - a directory containing extracted map files (war3map.w3i, etc.), or
+//   - an .w3x / .w3m / .mpq archive (HM3W shunt auto-detected).
 //
-// war3map.w3i is required. war3mapUnits.doo is optional — a map with no
-// preplaced units is valid (units.list returns an empty array).
+// war3map.w3i is required; everything else is best-effort.
 func (s *Session) Open(path string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -67,87 +108,63 @@ func (s *Session) Open(path string) error {
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", abs, err)
 	}
-	if !fi.IsDir() {
-		return fmt.Errorf("%q is not a directory (MPQ-backed .w3x opening is not yet implemented; pass the extracted/ folder instead)", abs)
-	}
 
-	w3iBytes, err := os.ReadFile(filepath.Join(abs, "war3map.w3i"))
+	var src fileSource
+	if fi.IsDir() {
+		src = folderSource{root: abs}
+	} else {
+		archive, err := mpq.Open(abs)
+		if err != nil {
+			return fmt.Errorf("open MPQ %q: %w", abs, err)
+		}
+		src = mpqSource{a: archive}
+	}
+	defer src.close()
+
+	// war3map.w3i — REQUIRED.
+	w3iBytes, ok, err := src.read("war3map.w3i")
 	if err != nil {
 		return fmt.Errorf("read war3map.w3i: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("%q has no war3map.w3i", abs)
 	}
 	info, err := w3i.Parse(w3iBytes)
 	if err != nil {
 		return fmt.Errorf("parse war3map.w3i: %w", err)
 	}
 
-	// war3map.wts (trigger strings) is optional. When present, resolve all
-	// TRIGSTR_<n> references in Info so map name / author / player names
-	// surface as their display values instead of bare reference tokens.
-	var strings wts.Strings
-	wtsBytes, err := os.ReadFile(filepath.Join(abs, "war3map.wts"))
-	switch {
-	case err == nil:
-		strings, err = wts.Parse(wtsBytes)
-		if err != nil {
-			// Don't fail the whole open over a wts parse error — UI just
-			// shows the raw TRIGSTR refs as a fallback.
-			strings = nil
-		}
-	case errors.Is(err, os.ErrNotExist):
-		// No wts — older maps and some protected maps lack one. That's fine.
-	default:
-		return fmt.Errorf("read war3map.wts: %w", err)
+	// war3map.wts — OPTIONAL trigger strings. Resolve TRIGSTR_<n> on Info.
+	wtsStrings, err := readOpt(src, "war3map.wts", wts.Parse)
+	if err != nil {
+		return err
 	}
-	info.ResolveStrings(strings.Display)
-
-	var units *unitsdoo.File
-	udPath := filepath.Join(abs, "war3mapUnits.doo")
-	udBytes, err := os.ReadFile(udPath)
-	switch {
-	case err == nil:
-		units, err = unitsdoo.Parse(udBytes)
-		if err != nil {
-			return fmt.Errorf("parse war3mapUnits.doo: %w", err)
-		}
-	case errors.Is(err, os.ErrNotExist):
-		units = &unitsdoo.File{} // empty but valid
-	default:
-		return fmt.Errorf("read war3mapUnits.doo: %w", err)
+	if wtsStrings != nil {
+		info.ResolveStrings(wtsStrings.Display)
 	}
 
-	// war3map.doo — placed doodads + destructibles. Optional in principle
-	// (some maps have none); modern maps almost always have one.
-	var doodads *doodadsdoo.File
-	ddPath := filepath.Join(abs, "war3map.doo")
-	ddBytes, err := os.ReadFile(ddPath)
-	switch {
-	case err == nil:
-		doodads, err = doodadsdoo.Parse(ddBytes)
-		if err != nil {
-			return fmt.Errorf("parse war3map.doo: %w", err)
-		}
-	case errors.Is(err, os.ErrNotExist):
+	// war3mapUnits.doo — OPTIONAL placed units/items.
+	units, err := readOpt(src, "war3mapUnits.doo", unitsdoo.Parse)
+	if err != nil {
+		return err
+	}
+	if units == nil {
+		units = &unitsdoo.File{}
+	}
+
+	// war3map.doo — OPTIONAL placed doodads/destructibles.
+	doodads, err := readOpt(src, "war3map.doo", doodadsdoo.Parse)
+	if err != nil {
+		return err
+	}
+	if doodads == nil {
 		doodads = &doodadsdoo.File{}
-	default:
-		return fmt.Errorf("read war3map.doo: %w", err)
 	}
 
-	// war3map.w3e — required for 3D viewport rendering, but a map without one
-	// is still openable (we just can't render terrain). Treat missing as
-	// non-fatal; downstream code checks for nil.
-	var terrain *w3e.File
-	w3ePath := filepath.Join(abs, "war3map.w3e")
-	w3eBytes, err := os.ReadFile(w3ePath)
-	switch {
-	case err == nil:
-		terrain, err = w3e.Parse(w3eBytes)
-		if err != nil {
-			return fmt.Errorf("parse war3map.w3e: %w", err)
-		}
-	case errors.Is(err, os.ErrNotExist):
-		terrain = nil
-	default:
-		return fmt.Errorf("read war3map.w3e: %w", err)
+	// war3map.w3e — OPTIONAL terrain. nil downstream means "can't render".
+	terrain, err := readOpt(src, "war3map.w3e", w3e.Parse)
+	if err != nil {
+		return err
 	}
 
 	s.mu.Lock()
@@ -160,7 +177,27 @@ func (s *Session) Open(path string) error {
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
 	s.notifySelection()
+	s.notifyMapChanged(true)
 	return nil
+}
+
+// readOpt fetches one optional file via src and runs its parser. Returns
+// (nil, nil) if the file is absent. Wraps both I/O and parse errors so the
+// caller gets a clear "while loading <name>" trail.
+func readOpt[T any](src fileSource, name string, parse func([]byte) (T, error)) (T, error) {
+	var zero T
+	b, ok, err := src.read(name)
+	if err != nil {
+		return zero, fmt.Errorf("read %s: %w", name, err)
+	}
+	if !ok {
+		return zero, nil
+	}
+	v, err := parse(b)
+	if err != nil {
+		return zero, fmt.Errorf("parse %s: %w", name, err)
+	}
+	return v, nil
 }
 
 // Close discards the loaded map. Safe to call when nothing is loaded.
@@ -175,6 +212,26 @@ func (s *Session) Close() {
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
 	s.notifySelection()
+	s.notifyMapChanged(false)
+}
+
+// OnMapChanged subscribes to load/unload notifications. Called after the
+// Session lock is released, so listeners may safely call back into Session.
+// Fires with loaded=true after Open succeeds, loaded=false after Close.
+func (s *Session) OnMapChanged(fn func(loaded bool)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mapListeners = append(s.mapListeners, fn)
+}
+
+func (s *Session) notifyMapChanged(loaded bool) {
+	s.mu.RLock()
+	listeners := make([]func(bool), len(s.mapListeners))
+	copy(listeners, s.mapListeners)
+	s.mu.RUnlock()
+	for _, fn := range listeners {
+		fn(loaded)
+	}
 }
 
 // IsLoaded reports whether a map is currently open.

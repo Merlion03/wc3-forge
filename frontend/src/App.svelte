@@ -20,6 +20,7 @@
   let scene: SceneAPI | null = null
 
   const SEL_EVENT = 'wc3-forge:selection-changed'
+  const MAP_EVENT = 'wc3-forge:map-changed'
 
   onMount(async () => {
     scene = createScene(canvas)
@@ -28,6 +29,21 @@
         ClearSelection()
       } else {
         SelectUnit(cn)
+      }
+    })
+    // Map changes from any source (App method, MCP bridge, --open flag).
+    EventsOn(MAP_EVENT, async () => {
+      status = await Status()
+      if (status.loaded) {
+        await reloadMap()
+      } else {
+        units = []
+        doodads = []
+        scene?.setTerrain(null)
+        scene?.setUnits([])
+        scene?.setDoodads([])
+        selectedIds = new Set()
+        primaryEntity = null
       }
     })
     EventsOn(SEL_EVENT, async (s: main.SelectionDTO) => {
@@ -58,6 +74,7 @@
 
   onDestroy(() => {
     EventsOff(SEL_EVENT)
+    EventsOff(MAP_EVENT)
     scene?.dispose()
   })
 

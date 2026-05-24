@@ -38,6 +38,11 @@ func (a *App) startup(ctx context.Context) {
 	forge.Current.OnSelectionChanged(func(s forge.SelectionState) {
 		runtime.EventsEmit(a.ctx, eventSelectionChanged, s)
 	})
+	// Forward map open/close from any source (App method OR bridge OR
+	// --open flag at startup) to the frontend so it reloads.
+	forge.Current.OnMapChanged(func(loaded bool) {
+		runtime.EventsEmit(a.ctx, eventMapChanged, map[string]any{"loaded": loaded})
+	})
 }
 
 // OpenMapDialog presents an OS folder picker and returns the selected
@@ -57,7 +62,9 @@ type MapStatus struct {
 }
 
 // OpenMap loads the map at the given path. Returns the post-open status so
-// the UI doesn't need a separate Status() roundtrip.
+// the UI doesn't need a separate Status() roundtrip. The map-changed event
+// fires automatically via the Session listener registered in startup —
+// no explicit emit here.
 func (a *App) OpenMap(path string) (MapStatus, error) {
 	if path == "" {
 		return MapStatus{}, fmt.Errorf("path is required")
@@ -65,13 +72,11 @@ func (a *App) OpenMap(path string) (MapStatus, error) {
 	if err := forge.Current.Open(path); err != nil {
 		return MapStatus{}, err
 	}
-	runtime.EventsEmit(a.ctx, eventMapChanged, map[string]any{"loaded": true})
 	return a.Status(), nil
 }
 
 func (a *App) CloseMap() MapStatus {
 	forge.Current.Close()
-	runtime.EventsEmit(a.ctx, eventMapChanged, map[string]any{"loaded": false})
 	return a.Status()
 }
 
