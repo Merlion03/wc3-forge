@@ -12,16 +12,16 @@
 //     map; π/2 = straight down. WC3's default sits around 45° (≈ 0.78 rad).
 //
 // Input bindings (default; subject to tuning):
-//   - mouse near screen edge → pan in world XY
 //   - mouse wheel             → zoom (change distance)
-//   - middle-mouse drag       → rotate (yaw + pitch)
-//   - right-mouse drag        → also rotate (more discoverable than MMB)
+//   - middle-mouse drag       → pan (drag map under cursor)
+//   - right-mouse drag        → also pan (more discoverable than MMB)
 //   - WASD / arrow keys       → pan (keyboard fallback)
 //
-// Mouse-edge panning is intentionally subtle (50px deadband from canvas
-// edge) so it doesn't fight with hover-pickable units. Pan speed scales
-// with distance so zoomed-out panning feels fast and zoomed-in feels slow,
-// matching WC3's behavior.
+// Camera rotation is intentionally disabled — WC3 doesn't let players
+// rotate the camera in-game, and the editor mirrors that constraint. Pitch
+// and yaw stay at their default values for the lifetime of the camera.
+// Mouse-edge panning is also disabled because the mouse can leave the
+// window mid-pan and strand the camera in motion.
 
 const PITCH_MIN = 0.18  // ~10°, prevents the floor-eye view
 const PITCH_MAX = 1.45  // ~83°, prevents flipping past straight down
@@ -121,9 +121,14 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
       const dy = e.clientY - dragging.lastY
       dragging.lastX = e.clientX
       dragging.lastY = e.clientY
-      // Drag yaw with horizontal motion, pitch with vertical. Negative pitch
-      // sign so dragging "up" tilts camera up — matches Blender / Maya.
-      rotate(-dx * DRAG_YAW_SENS, -dy * DRAG_PITCH_SENS)
+      // Drag-pan: convert screen delta to world delta. Pan speed scales with
+      // distance so dragging the same screen distance moves the world by the
+      // same screen distance at any zoom. dy is flipped because screen Y
+      // grows downward but our world Y grows north (up on screen at yaw=0).
+      // The 0.0015 constant tunes "1 px of drag ≈ this much world movement
+      // per stud of camera distance" — adjusted by feel.
+      const k = -distance * 0.0015
+      pan(dx * k, -dy * k)
     }
   }
   function onMouseLeave() { pointer = null }
@@ -140,7 +145,7 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
     }
   }
   function onContextMenu(e: MouseEvent) {
-    // RMB is a rotate gesture; block the native menu.
+    // RMB is a drag-pan gesture; block the native menu.
     e.preventDefault()
   }
   function onWheel(e: WheelEvent) {
@@ -159,8 +164,9 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
 
-  // Per-frame: apply edge-pan + keyboard pan. Driven by RAF, throttled to
-  // ~16ms by the browser; we compute pan distance in world units per frame.
+  // Per-frame: keyboard pan only (edge pan removed — the cursor leaving the
+  // window would strand the camera mid-pan). Driven by RAF, throttled to
+  // ~16ms by the browser; pan distance in world units per frame.
   let rafId = 0
   let lastTs = performance.now()
   function tick(ts: number) {
@@ -168,26 +174,13 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
     lastTs = ts
     let dx = 0, dy = 0
 
-    if (pointer) {
-      const w = canvas.clientWidth
-      const h = canvas.clientHeight
-      if (pointer.x < EDGE_PAN_DEADBAND) dx -= 1
-      if (pointer.x > w - EDGE_PAN_DEADBAND) dx += 1
-      // Note: screen Y grows downward; our pan dy is screen-up positive, so
-      // top edge = +dy and bottom = -dy.
-      if (pointer.y < EDGE_PAN_DEADBAND) dy += 1
-      if (pointer.y > h - EDGE_PAN_DEADBAND) dy -= 1
-    }
     if (keysDown.has('w') || keysDown.has('arrowup'))    dy += 1
     if (keysDown.has('s') || keysDown.has('arrowdown'))  dy -= 1
     if (keysDown.has('a') || keysDown.has('arrowleft'))  dx -= 1
     if (keysDown.has('d') || keysDown.has('arrowright')) dx += 1
 
     if (dx !== 0 || dy !== 0) {
-      // Speed scales with distance so panning feels constant in screen-space.
-      // Edge pan and keyboard pan share the same speed knob for now; split
-      // if the feel needs to differ.
-      const speed = (keysDown.size > 0 ? KEY_PAN_SPEED : EDGE_PAN_SPEED) * distance
+      const speed = KEY_PAN_SPEED * distance
       pan(dx * speed * dt, dy * speed * dt)
     }
     rafId = requestAnimationFrame(tick)
