@@ -158,9 +158,18 @@ type TerrainDTO struct {
 	Height       uint32     `json:"height"`        // vertex count along Y
 	CenterOffset [2]float32 `json:"center_offset"` // game coords of vertex (0,0); bottom-left
 	Heights      []float32  `json:"heights"`       // length = Width*Height, game-space Z
-	GroundTex    []uint8    `json:"ground_tex"`    // length = Width*Height, palette idx 0..15
-	Tileset      string     `json:"tileset"`       // single letter, e.g. "L" (Lordaeron)
-	Palette      []string   `json:"palette"`       // ground tileset FourCCs (palette key)
+	// GroundTex is uint32 (not uint8/byte) so encoding/json emits a real
+	// JSON array. Go's `encoding/json` special-cases []byte → base64 string,
+	// which would silently turn each tile index into an ASCII character on
+	// the JS side. Wire cost is tiny at these sizes.
+	GroundTex []uint32 `json:"ground_tex"`  // length = Width*Height, palette idx 0..63
+	Tileset   string   `json:"tileset"`     // single letter, e.g. "L" (Lordaeron)
+	Palette   []string `json:"palette"`     // ground tileset FourCCs (palette key)
+	// PaletteColors is one RGB triplet (0..255) per palette entry, sampled
+	// from the actual WC3 tileset BLP/DDS via Terrain.slk. Lets the JS
+	// renderer color tiles by their real texture average without having to
+	// decode BLP/DDS itself. parallel-indexed with Palette.
+	PaletteColors [][3]uint8 `json:"palette_colors"`
 }
 
 // GetTerrain returns the terrain grid for rendering. Empty if no map loaded or
@@ -172,19 +181,20 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 	}
 	n := int(t.Width * t.Height)
 	heights := make([]float32, n)
-	ground := make([]uint8, n)
+	ground := make([]uint32, n)
 	for i := 0; i < n; i++ {
 		heights[i] = t.Tiles[i].Z()
-		ground[i] = t.Tiles[i].GroundTexIdx()
+		ground[i] = uint32(t.Tiles[i].GroundTexIdx())
 	}
 	return TerrainDTO{
-		Width:        t.Width,
-		Height:       t.Height,
-		CenterOffset: t.CenterOffset,
-		Heights:      heights,
-		GroundTex:    ground,
-		Tileset:      string([]byte{t.Tileset}),
-		Palette:      t.GroundTilesets,
+		Width:         t.Width,
+		Height:        t.Height,
+		CenterOffset:  t.CenterOffset,
+		Heights:       heights,
+		GroundTex:     ground,
+		Tileset:       string([]byte{t.Tileset}),
+		Palette:       t.GroundTilesets,
+		PaletteColors: PaletteColors(t.GroundTilesets),
 	}, nil
 }
 

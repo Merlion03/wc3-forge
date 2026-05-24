@@ -2,11 +2,11 @@
   import { onMount, onDestroy } from 'svelte'
   import {
     OpenMapDialog, OpenMap, CloseMap, ListUnits, ListDoodads, Status,
-    GetSelection, SelectUnit, ClearSelection, GetUnit, GetMapBytes,
+    GetSelection, SelectUnit, ClearSelection, GetUnit,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
-  import { createScene, type SceneAPI } from './scene-w3x'
+  import { createScene, type SceneAPI } from './scene-instances'
 
   let status: main.MapStatus = { loaded: false, unit_count: 0 }
   let units: main.UnitDTO[] = []
@@ -25,12 +25,11 @@
   onMount(async () => {
     try {
       scene = createScene(canvas)
+      scene.onUnitClicked((cn) => { SelectUnit(cn) })
     } catch (e) {
       error = 'scene init failed: ' + (e instanceof Error ? (e.stack || e.message) : String(e))
       console.error(e)
     }
-    // TODO: picking via mdx-m3-viewer ray-AABB. For now Explorer-row click
-    // still drives selection.
     // Map changes from any source (App method, MCP bridge, --open flag).
     EventsOn(MAP_EVENT, async () => {
       status = await Status()
@@ -49,7 +48,7 @@
         if (item.kind === 'unit' || item.kind === 'item') ids.add(item.id)
       }
       selectedIds = ids
-      // TODO: viewport highlight via mdx-m3-viewer once picking is wired.
+      scene?.setSelected(ids)
       // Fetch full entity for the primary selection (or first item).
       const primaryCn = (s.items && s.items.length > 0)
         ? s.items[Math.max(0, Math.min(s.primary, s.items.length - 1))].id
@@ -92,19 +91,9 @@
   async function reloadMap() {
     units = await ListUnits()
     doodads = await ListDoodads()
-    // mdx-m3-viewer renders directly from .w3x bytes (it has its own MPQ
-    // parser). For folder-based opens we have no archive bytes to hand it,
-    // so the viewport stays empty — log it and rely on the Explorer/
-    // Properties panels for that case.
-    const b64 = await GetMapBytes()
-    if (!b64) {
-      console.info('No .w3x bytes (folder-based open?) — viewport empty.')
-      return
-    }
-    const bin = atob(b64)
-    const bytes = new Uint8Array(bin.length)
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-    scene?.loadMap(bytes)
+    // The viewport pulls its own data via App.* methods now; no need to
+    // marshal the raw .w3x bytes across the boundary.
+    await scene?.loadMap()
   }
 
   async function close() {

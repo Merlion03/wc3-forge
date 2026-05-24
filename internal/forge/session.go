@@ -16,6 +16,7 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3e"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/w3objmod"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wts"
 )
 
@@ -75,6 +76,13 @@ type Session struct {
 	units   *unitsdoo.File
 	doodads *doodadsdoo.File
 	terrain *w3e.File
+	// Per-map object-modification tables. The renderer merges these on top
+	// of the stock SLK type indices so customs ("D006") and stock-row edits
+	// both resolve to a usable MDX. nil if the map doesn't include them.
+	doodadMods       *w3objmod.File // war3map.w3d
+	destructibleMods *w3objmod.File // war3map.w3b
+	unitMods         *w3objmod.File // war3map.w3u (parsed for future use)
+	itemMods         *w3objmod.File // war3map.w3t
 
 	selection      SelectionState
 	listeners      []func(SelectionState)
@@ -176,6 +184,30 @@ func (s *Session) Open(path string) error {
 		return err
 	}
 
+	// war3map.w3{d,b,u,t} — OPTIONAL object-modification tables. Custom
+	// type IDs ("D006") + stock-row edits ("ATtr scale = 1.5") live here.
+	// The renderer's type indices apply these on top of the base SLK.
+	parseDood := func(b []byte) (*w3objmod.File, error) { return w3objmod.Parse(b, true, nil) }
+	parseDest := func(b []byte) (*w3objmod.File, error) { return w3objmod.Parse(b, false, nil) }
+	parseUnit := func(b []byte) (*w3objmod.File, error) { return w3objmod.Parse(b, false, nil) }
+	parseItem := func(b []byte) (*w3objmod.File, error) { return w3objmod.Parse(b, false, nil) }
+	doodadMods, err := readOpt(src, "war3map.w3d", parseDood)
+	if err != nil {
+		return err
+	}
+	destructibleMods, err := readOpt(src, "war3map.w3b", parseDest)
+	if err != nil {
+		return err
+	}
+	unitMods, err := readOpt(src, "war3map.w3u", parseUnit)
+	if err != nil {
+		return err
+	}
+	itemMods, err := readOpt(src, "war3map.w3t", parseItem)
+	if err != nil {
+		return err
+	}
+
 	// Atomically swap state; close any previously-held source before stomping it.
 	s.mu.Lock()
 	prevSource := s.source
@@ -187,6 +219,10 @@ func (s *Session) Open(path string) error {
 	s.units = units
 	s.doodads = doodads
 	s.terrain = terrain
+	s.doodadMods = doodadMods
+	s.destructibleMods = destructibleMods
+	s.unitMods = unitMods
+	s.itemMods = itemMods
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
 	if prevSource != nil {
@@ -228,6 +264,10 @@ func (s *Session) Close() {
 	s.units = nil
 	s.doodads = nil
 	s.terrain = nil
+	s.doodadMods = nil
+	s.destructibleMods = nil
+	s.unitMods = nil
+	s.itemMods = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
 	if prevSource != nil {
@@ -321,6 +361,21 @@ func (s *Session) Terrain() *w3e.File {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.terrain
+}
+
+// DoodadMods returns the parsed war3map.w3d (per-map doodad modifications +
+// new derived types), or nil if absent.
+func (s *Session) DoodadMods() *w3objmod.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.doodadMods
+}
+
+// DestructibleMods returns the parsed war3map.w3b, or nil if absent.
+func (s *Session) DestructibleMods() *w3objmod.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.destructibleMods
 }
 
 // Selection returns the current selection. Safe to call before a map is loaded

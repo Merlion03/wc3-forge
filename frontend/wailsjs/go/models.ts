@@ -170,6 +170,7 @@ export namespace main {
 	    ground_tex: number[];
 	    tileset: string;
 	    palette: string[];
+	    palette_colors: number[][];
 	
 	    static createFrom(source: any = {}) {
 	        return new TerrainDTO(source);
@@ -184,6 +185,7 @@ export namespace main {
 	        this.ground_tex = source["ground_tex"];
 	        this.tileset = source["tileset"];
 	        this.palette = source["palette"];
+	        this.palette_colors = source["palette_colors"];
 	    }
 	}
 	export class UnitDTO {

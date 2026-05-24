@@ -14,6 +14,10 @@ export function GetDoodad(arg1) {
   return window['go']['main']['App']['GetDoodad'](arg1);
 }
 
+export function GetDoodadTypeIndex() {
+  return window['go']['main']['App']['GetDoodadTypeIndex']();
+}
+
 export function GetMapBytes() {
   return window['go']['main']['App']['GetMapBytes']();
 }
@@ -28,6 +32,10 @@ export function GetTerrain() {
 
 export function GetUnit(arg1) {
   return window['go']['main']['App']['GetUnit'](arg1);
+}
+
+export function GetUnitTypeIndex() {
+  return window['go']['main']['App']['GetUnitTypeIndex']();
 }
 
 export function ListDoodads() {

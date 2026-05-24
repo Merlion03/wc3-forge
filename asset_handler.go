@@ -73,37 +73,77 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// lowercase. Backslash <-> forward-slash interchangeable.
 	requested = strings.ToLower(path.Clean(strings.ReplaceAll(requested, "\\", "/")))
 
-	log.Printf("asset: %s", requested)
-
-	// Try the current map's source first.
-	data, ok, err := forge.Current.ReadFile(requested)
-	if err != nil {
-		http.Error(w, "read error: "+err.Error(), http.StatusInternalServerError)
-		return
+	// Build the candidate path list:
+	//   1. The requested path itself.
+	//   2. If it ends in .blp/.dds/.mdx/.mdl, ALSO try the sibling extension.
+	// Reforged CASC ships textures as DDS only (no BLP), and many custom
+	// maps reference imported models with the "wrong" extension. mdx-m3-viewer's
+	// handlers auto-detect format by magic bytes, so serving DDS through a
+	// .blp URL (or MDX through a .mdl URL) works — the lib picks the right
+	// resource class from the data.
+	candidates := []string{requested}
+	if alt := siblingExtension(requested); alt != "" {
+		candidates = append(candidates, alt)
 	}
-	if ok {
-		log.Printf("asset: %s -> map source (%d bytes)", requested, len(data))
-		serveBytes(w, requested, data)
-		return
-	}
 
-	// CASC fallback for stock WC3 assets.
-	if c, err := getCASC(); err == nil && c != nil {
-		data, ok, err = c.ReadFile(requested)
+	for i, candidate := range candidates {
+		// Try the current map's source first.
+		data, ok, err := forge.Current.ReadFile(candidate)
 		if err != nil {
-			log.Printf("asset: %s -> CASC error: %v", requested, err)
-			http.Error(w, "casc read error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "read error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if ok {
-			log.Printf("asset: %s -> CASC (%d bytes)", requested, len(data))
-			serveBytes(w, requested, data)
+			via := "map source"
+			if i > 0 {
+				via = "map source (sibling-ext)"
+			}
+			log.Printf("asset: %s -> %s as %s (%d bytes)", requested, via, candidate, len(data))
+			serveBytes(w, candidate, data)
 			return
+		}
+
+		// CASC fallback for stock WC3 assets.
+		if c, err := getCASC(); err == nil && c != nil {
+			data, ok, err = c.ReadFile(candidate)
+			if err != nil {
+				log.Printf("asset: %s -> CASC error: %v", candidate, err)
+				http.Error(w, "casc read error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if ok {
+				via := "CASC"
+				if i > 0 {
+					via = "CASC (sibling-ext)"
+				}
+				log.Printf("asset: %s -> %s as %s (%d bytes)", requested, via, candidate, len(data))
+				serveBytes(w, candidate, data)
+				return
+			}
 		}
 	}
 
 	log.Printf("asset: %s -> 404", requested)
 	http.NotFound(w, r)
+}
+
+// siblingExtension returns the same path with the format-pair extension
+// swapped (BLP↔DDS for textures, MDX↔MDL for models). Returns "" if the
+// extension isn't one of those pairs.
+func siblingExtension(p string) string {
+	ext := path.Ext(p)
+	stem := p[:len(p)-len(ext)]
+	switch strings.ToLower(ext) {
+	case ".blp":
+		return stem + ".dds"
+	case ".dds":
+		return stem + ".blp"
+	case ".mdx":
+		return stem + ".mdl"
+	case ".mdl":
+		return stem + ".mdx"
+	}
+	return ""
 }
 
 func serveBytes(w http.ResponseWriter, name string, data []byte) {
