@@ -18,6 +18,10 @@ export function GetTerrain() {
   return window['go']['main']['App']['GetTerrain']();
 }
 
+export function GetUnit(arg1) {
+  return window['go']['main']['App']['GetUnit'](arg1);
+}
+
 export function ListUnits() {
   return window['go']['main']['App']['ListUnits']();
 }

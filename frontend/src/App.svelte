@@ -2,22 +2,22 @@
   import { onMount, onDestroy } from 'svelte'
   import {
     OpenMapDialog, OpenMap, CloseMap, ListUnits, Status, GetTerrain,
-    GetSelection, SelectUnit, ClearSelection,
+    GetSelection, SelectUnit, ClearSelection, GetUnit,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
-  import type { main } from '../wailsjs/go/models'
+  import type { main, unitsdoo } from '../wailsjs/go/models'
   import { createScene, type SceneAPI, type TerrainData, type UnitData } from './scene'
 
   let status: main.MapStatus = { loaded: false, unit_count: 0 }
   let units: main.UnitDTO[] = []
   let selectedIds = new Set<number>()
+  let primaryEntity: unitsdoo.Entity | null = null
   let error: string = ''
   let busy: boolean = false
 
   let canvas: HTMLCanvasElement
   let scene: SceneAPI | null = null
 
-  // Server-side selection events → local store → scene + table.
   const SEL_EVENT = 'wc3-forge:selection-changed'
 
   onMount(async () => {
@@ -29,21 +29,27 @@
         SelectUnit(cn)
       }
     })
-    EventsOn(SEL_EVENT, (s: main.SelectionDTO) => {
+    EventsOn(SEL_EVENT, async (s: main.SelectionDTO) => {
       const ids = new Set<number>()
       for (const item of s.items || []) {
         if (item.kind === 'unit' || item.kind === 'item') ids.add(item.id)
       }
       selectedIds = ids
       scene?.setSelection(Array.from(ids))
+      // Fetch full entity for the primary selection (or first item).
+      const primaryCn = (s.items && s.items.length > 0)
+        ? s.items[Math.max(0, Math.min(s.primary, s.items.length - 1))].id
+        : null
+      if (primaryCn != null) {
+        try { primaryEntity = await GetUnit(primaryCn) } catch { primaryEntity = null }
+      } else {
+        primaryEntity = null
+      }
     })
 
-    // Initial state in case the bridge has a map already (e.g., --open flag).
     const s = await Status()
     status = s
-    if (s.loaded) {
-      await reloadMap()
-    }
+    if (s.loaded) await reloadMap()
     const sel = await GetSelection()
     selectedIds = new Set((sel.items || []).map(i => i.id))
     scene?.setSelection(Array.from(selectedIds))
@@ -75,7 +81,6 @@
       const terrain = await GetTerrain() as TerrainData
       scene?.setTerrain(terrain)
     } catch {
-      // No terrain in this map — that's fine, viewport just stays empty.
       scene?.setTerrain(null)
     }
     scene?.setUnits(units.map(u => ({
@@ -95,17 +100,65 @@
       scene?.setTerrain(null)
       scene?.setUnits([])
       selectedIds = new Set()
+      primaryEntity = null
     } finally {
       busy = false
     }
   }
 
-  async function clickRow(cn: number) {
-    await SelectUnit(cn)
+  async function clickRow(cn: number) { await SelectUnit(cn) }
+
+  // ----- Explorer categorization -----
+  //
+  // We don't have SLK lookup yet, so we classify by simple heuristics:
+  //   "sloc" → Markers
+  //   FourCC starting with an uppercase ASCII letter → Heroes (Hxxx Human,
+  //     Oxxx Orc, Uxxx Undead, Nxxx Night Elf, Exxx Naga) — matches WC3's
+  //     unit-id naming convention closely enough for this view.
+  //   Everything else → Units & Items
+  //
+  // Future Phase-N will replace this with a real SLK class lookup so that
+  // (e.g.) Goblin Merchant lands under Buildings/Shops, not generic Units.
+
+  type Group = { id: string; label: string; entries: main.UnitDTO[] }
+  $: groups = bucket(units)
+  function bucket(us: main.UnitDTO[]): Group[] {
+    const markers: main.UnitDTO[] = []
+    const heroes: main.UnitDTO[] = []
+    const others: main.UnitDTO[] = []
+    for (const u of us) {
+      if (u.type_id === 'sloc') markers.push(u)
+      else if (u.type_id.length > 0 && u.type_id[0] >= 'A' && u.type_id[0] <= 'Z') heroes.push(u)
+      else others.push(u)
+    }
+    const out: Group[] = []
+    if (heroes.length) out.push({ id: 'heroes', label: 'Heroes', entries: heroes })
+    if (others.length) out.push({ id: 'units', label: 'Units & Items', entries: others })
+    if (markers.length) out.push({ id: 'markers', label: 'Markers', entries: markers })
+    return out
   }
 
-  function fmtPos(p: number[]): string {
-    return `(${Math.round(p[0])}, ${Math.round(p[1])}, ${Math.round(p[2])})`
+  // ----- Properties helpers -----
+
+  function fmt(n: number, decimals: number = 0): string {
+    return n.toFixed(decimals)
+  }
+  function fmtVec3(v: number[]): string {
+    return `(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`
+  }
+  function fmtScale(v: number[]): string {
+    return `(${fmt(v[0], 2)}, ${fmt(v[1], 2)}, ${fmt(v[2], 2)})`
+  }
+  function playerLabel(p: number): string {
+    const colors = ['Red', 'Blue', 'Teal', 'Purple', 'Yellow', 'Orange', 'Green',
+                    'Pink', 'Gray', 'LightBlue', 'DarkGreen', 'Brown']
+    if (p === 15) return 'Neutral Passive (15)'
+    if (p === 12) return 'Neutral Aggressive (12)'
+    if (p < colors.length) return `${colors[p]} (${p})`
+    return `Player ${p}`
+  }
+  function isHero(e: unitsdoo.Entity): boolean {
+    return e.HeroLevel > 0 || (e.TypeID.length > 0 && e.TypeID[0] >= 'A' && e.TypeID[0] <= 'Z')
   }
 </script>
 
@@ -127,46 +180,103 @@
     </div>
   </header>
 
-  {#if error}
-    <div class="error">{error}</div>
-  {/if}
+  {#if error}<div class="error">{error}</div>{/if}
 
   <div class="split">
-    <aside class="left">
+    <aside class="panel explorer">
+      <header class="panel-header">Explorer</header>
       {#if !status.loaded}
-        <div class="empty">
-          <p>No map loaded.</p>
-          <p class="hint">Open an extracted <code>.w3x</code> folder<br>(one containing <code>war3map.w3i</code>).</p>
-        </div>
+        <div class="empty">No map loaded.</div>
       {:else}
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Type</th>
-              <th>P</th>
-              <th>Position</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each units as u (u.creation_number)}
-              <tr
-                class:selected={selectedIds.has(u.creation_number)}
-                on:click={() => clickRow(u.creation_number)}
-              >
-                <td class="mono dim">{u.creation_number}</td>
-                <td class="mono">{u.type_id}</td>
-                <td>{u.player}</td>
-                <td class="mono">{fmtPos(u.position)}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+        {#each groups as g (g.id)}
+          <div class="category">
+            <header class="cat-header">{g.label} <span class="count">{g.entries.length}</span></header>
+            <ul>
+              {#each g.entries as u (u.creation_number)}
+                <li class:selected={selectedIds.has(u.creation_number)}
+                    on:click={() => clickRow(u.creation_number)}>
+                  <span class="mono type">{u.type_id}</span>
+                  <span class="dim cn">#{u.creation_number}</span>
+                </li>
+              {/each}
+            </ul>
+          </div>
+        {/each}
       {/if}
     </aside>
+
     <section class="viewport">
       <canvas bind:this={canvas}></canvas>
     </section>
+
+    <aside class="panel properties">
+      <header class="panel-header">Properties</header>
+      {#if !primaryEntity}
+        <div class="empty">
+          {#if selectedIds.size === 0}
+            Select an entity to see its properties.
+          {:else}
+            Loading…
+          {/if}
+        </div>
+      {:else}
+        {@const e = primaryEntity}
+        <dl class="props">
+          <dt>Type ID</dt>            <dd class="mono">{e.TypeID}</dd>
+          {#if e.SkinID && e.SkinID !== e.TypeID}
+            <dt>Skin ID</dt>          <dd class="mono">{e.SkinID}</dd>
+          {/if}
+          <dt>Creation #</dt>         <dd class="mono">{e.CreationNumber}</dd>
+          <dt>Player</dt>             <dd>{playerLabel(e.Player)}</dd>
+
+          <dt class="section">Transform</dt>
+          <dt>Position</dt>           <dd class="mono">{fmtVec3(e.Position)}</dd>
+          <dt>Rotation</dt>           <dd class="mono">{fmt(e.Rotation, 2)}</dd>
+          <dt>Scale</dt>              <dd class="mono">{fmtScale(e.Scale)}</dd>
+          <dt>Variation</dt>          <dd>{e.Variation}</dd>
+
+          <dt class="section">Status</dt>
+          <dt>HP %</dt>               <dd>{e.HitPointsPct < 0 ? 'default' : e.HitPointsPct + '%'}</dd>
+          <dt>Mana %</dt>             <dd>{e.ManaPct < 0 ? 'default' : e.ManaPct + '%'}</dd>
+          {#if e.GoldAmount > 0}
+            <dt>Gold</dt>             <dd>{e.GoldAmount}</dd>
+          {/if}
+          {#if e.TargetAcquisition !== 0}
+            <dt>Acquisition</dt>      <dd class="mono">{fmt(e.TargetAcquisition, 1)}</dd>
+          {/if}
+
+          {#if isHero(e)}
+            <dt class="section">Hero</dt>
+            <dt>Level</dt>            <dd>{e.HeroLevel || 1}</dd>
+            {#if e.HeroStr > 0 || e.HeroAgi > 0 || e.HeroInt > 0}
+              <dt>Stats</dt>          <dd class="mono">STR {e.HeroStr} · AGI {e.HeroAgi} · INT {e.HeroInt}</dd>
+            {/if}
+          {/if}
+
+          {#if e.Inventory && e.Inventory.length > 0}
+            <dt class="section">Inventory</dt>
+            {#each e.Inventory as slot}
+              <dt>Slot {slot.Slot}</dt><dd class="mono">{slot.ItemID}</dd>
+            {/each}
+          {/if}
+
+          {#if e.ItemDrops && e.ItemDrops.length > 0}
+            <dt class="section">Item Drops</dt>
+            {#each e.ItemDrops as drop}
+              <dt class="mono">{drop.ItemID}</dt><dd>{drop.Chance}%</dd>
+            {/each}
+          {/if}
+
+          {#if e.AbilityModifications && e.AbilityModifications.length > 0}
+            <dt class="section">Abilities</dt>
+            {#each e.AbilityModifications as ab}
+              <dt class="mono">{ab.AbilityID}</dt>
+              <dd>lvl {ab.Level}{ab.Autocast ? ' · autocast' : ''}</dd>
+            {/each}
+          {/if}
+        </dl>
+      {/if}
+    </aside>
   </div>
 </main>
 
@@ -186,17 +296,12 @@
     display: flex;
     align-items: center;
     gap: 16px;
-    padding: 10px 20px;
+    padding: 8px 18px;
     border-bottom: 1px solid #2a2a30;
     background: #18181b;
     flex: 0 0 auto;
   }
-  h1 {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 600;
-    color: #e4e4e7;
-  }
+  h1 { margin: 0; font-size: 13px; font-weight: 600; color: #e4e4e7; }
   .status-strip { flex: 1 1 auto; color: #a1a1aa; font-size: 12px; }
   .map-name { color: #e4e4e7; font-weight: 500; }
   .map-count { color: #71717a; }
@@ -204,78 +309,60 @@
   .actions { display: flex; gap: 6px; }
 
   button {
-    background: #2563eb;
-    color: white;
-    border: 0;
-    padding: 6px 14px;
-    font-size: 12px;
-    border-radius: 4px;
-    cursor: pointer;
+    background: #2563eb; color: white; border: 0; padding: 5px 12px;
+    font-size: 12px; border-radius: 4px; cursor: pointer;
   }
   button:hover:not(:disabled) { background: #1d4ed8; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   button.secondary { background: #3f3f46; }
   button.secondary:hover:not(:disabled) { background: #52525b; }
 
-  .error {
-    background: #7f1d1d;
-    color: #fecaca;
-    padding: 6px 14px;
-    font-family: 'Cascadia Mono', Consolas, monospace;
-    font-size: 12px;
+  .error { background: #7f1d1d; color: #fecaca; padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; }
+
+  .split { flex: 1 1 auto; display: grid; grid-template-columns: 260px 1fr 340px; min-height: 0; }
+  .panel { background: #161618; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .explorer { border-right: 1px solid #2a2a30; }
+  .properties { border-left: 1px solid #2a2a30; }
+  .panel-header {
+    padding: 8px 14px; font-size: 10px; font-weight: 600; color: #a1a1aa;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    border-bottom: 1px solid #27272a; background: #1c1c1f;
     flex: 0 0 auto;
   }
+  .empty { padding: 30px 16px; text-align: center; color: #71717a; font-size: 12px; }
+  .viewport { position: relative; min-width: 0; min-height: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
 
-  .split {
-    flex: 1 1 auto;
-    display: grid;
-    grid-template-columns: 360px 1fr;
-    min-height: 0;
+  /* Explorer */
+  .explorer > .category { padding: 8px 0; border-bottom: 1px solid #1f1f23; }
+  .explorer .cat-header {
+    padding: 4px 14px; font-size: 11px; font-weight: 600; color: #d4d4d8;
+    display: flex; justify-content: space-between; align-items: center;
   }
-  .left {
-    border-right: 1px solid #2a2a30;
-    overflow-y: auto;
-    background: #161618;
+  .explorer .cat-header .count { color: #71717a; font-weight: 400; font-size: 11px; }
+  .explorer ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
+  .explorer li {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 4px 14px; cursor: pointer; font-size: 12px;
   }
-  .viewport {
-    position: relative;
-    min-width: 0;
-    min-height: 0;
-  }
-  canvas {
-    display: block;
-    width: 100%;
-    height: 100%;
-  }
+  .explorer li:hover { background: #1f1f23; }
+  .explorer li.selected { background: #1e3a8a; color: #e4e4e7; }
+  .explorer li .type { color: #e4e4e7; }
+  .explorer li .cn { font-size: 11px; }
 
-  .empty { padding: 40px 20px; text-align: center; color: #71717a; }
-  .hint { font-size: 12px; }
-  code {
-    background: #27272a;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-family: 'Cascadia Mono', Consolas, monospace;
+  /* Properties */
+  .properties { overflow-y: auto; }
+  .props {
+    display: grid; grid-template-columns: 100px 1fr;
+    gap: 4px 12px; padding: 10px 16px; margin: 0; font-size: 12px;
   }
-
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  thead { position: sticky; top: 0; background: #161618; }
-  th, td {
-    text-align: left;
-    padding: 5px 10px;
-    border-bottom: 1px solid #27272a;
+  .props dt { color: #71717a; font-size: 11px; padding-top: 2px; }
+  .props dt.section {
+    grid-column: 1 / -1; color: #a1a1aa; font-weight: 600; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.06em; margin-top: 8px;
+    border-top: 1px solid #27272a; padding-top: 8px;
   }
-  th {
-    color: #a1a1aa;
-    font-weight: 500;
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    border-bottom-color: #3f3f46;
-  }
-  tbody tr { cursor: pointer; }
-  tbody tr:hover { background: #1f1f23; }
-  tbody tr.selected { background: #1e3a8a; color: #e4e4e7; }
-  tbody tr.selected td.dim { color: #93c5fd; }
-  td.dim { color: #71717a; }
+  .props dd { margin: 0; color: #e4e4e7; }
   .mono { font-family: 'Cascadia Mono', Consolas, monospace; }
+  .dim { color: #71717a; }
 </style>

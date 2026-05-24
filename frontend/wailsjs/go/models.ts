@@ -124,3 +124,135 @@ export namespace main {
 
 }
 
+export namespace unitsdoo {
+	
+	export class AbilityMod {
+	    AbilityID: string;
+	    Autocast: boolean;
+	    Level: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new AbilityMod(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.AbilityID = source["AbilityID"];
+	        this.Autocast = source["Autocast"];
+	        this.Level = source["Level"];
+	    }
+	}
+	export class InventorySlot {
+	    Slot: number;
+	    ItemID: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new InventorySlot(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Slot = source["Slot"];
+	        this.ItemID = source["ItemID"];
+	    }
+	}
+	export class ItemDrop {
+	    ItemID: string;
+	    Chance: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ItemDrop(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ItemID = source["ItemID"];
+	        this.Chance = source["Chance"];
+	    }
+	}
+	export class Entity {
+	    TypeID: string;
+	    Variation: number;
+	    Position: number[];
+	    Rotation: number;
+	    Scale: number[];
+	    SkinID: string;
+	    Flags: number;
+	    Player: number;
+	    UnknownByte1: number;
+	    UnknownByte2: number;
+	    HitPointsPct: number;
+	    ManaPct: number;
+	    MapItemTable: number;
+	    ItemDrops: ItemDrop[];
+	    GoldAmount: number;
+	    TargetAcquisition: number;
+	    HeroLevel: number;
+	    HeroStr: number;
+	    HeroAgi: number;
+	    HeroInt: number;
+	    Inventory: InventorySlot[];
+	    AbilityModifications: AbilityMod[];
+	    RandomType: number;
+	    RandomData: number[];
+	    CustomColor: number;
+	    WaygateRegion: number;
+	    CreationNumber: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Entity(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.TypeID = source["TypeID"];
+	        this.Variation = source["Variation"];
+	        this.Position = source["Position"];
+	        this.Rotation = source["Rotation"];
+	        this.Scale = source["Scale"];
+	        this.SkinID = source["SkinID"];
+	        this.Flags = source["Flags"];
+	        this.Player = source["Player"];
+	        this.UnknownByte1 = source["UnknownByte1"];
+	        this.UnknownByte2 = source["UnknownByte2"];
+	        this.HitPointsPct = source["HitPointsPct"];
+	        this.ManaPct = source["ManaPct"];
+	        this.MapItemTable = source["MapItemTable"];
+	        this.ItemDrops = this.convertValues(source["ItemDrops"], ItemDrop);
+	        this.GoldAmount = source["GoldAmount"];
+	        this.TargetAcquisition = source["TargetAcquisition"];
+	        this.HeroLevel = source["HeroLevel"];
+	        this.HeroStr = source["HeroStr"];
+	        this.HeroAgi = source["HeroAgi"];
+	        this.HeroInt = source["HeroInt"];
+	        this.Inventory = this.convertValues(source["Inventory"], InventorySlot);
+	        this.AbilityModifications = this.convertValues(source["AbilityModifications"], AbilityMod);
+	        this.RandomType = source["RandomType"];
+	        this.RandomData = source["RandomData"];
+	        this.CustomColor = source["CustomColor"];
+	        this.WaygateRegion = source["WaygateRegion"];
+	        this.CreationNumber = source["CreationNumber"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+
+}
+

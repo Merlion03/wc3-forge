@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -206,4 +207,20 @@ func (a *App) SelectUnit(creationNumber uint32) SelectionDTO {
 func (a *App) ClearSelection() SelectionDTO {
 	forge.Current.SetSelection(nil, -1)
 	return a.GetSelection()
+}
+
+// GetUnit returns the full Entity for one creation_number. Properties panel
+// uses this to render the heavier fields (inventory, ability mods, hero
+// stats, item drops) that aren't included in the lighter ListUnits payload.
+func (a *App) GetUnit(creationNumber uint32) (*unitsdoo.Entity, error) {
+	units := forge.Current.Units()
+	if units == nil {
+		return nil, fmt.Errorf("no map loaded")
+	}
+	for i := range units.Entities {
+		if units.Entities[i].CreationNumber == creationNumber {
+			return &units.Entities[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no entity with creation_number %d", creationNumber)
 }
