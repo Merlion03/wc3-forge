@@ -1,0 +1,43 @@
+# Default: auto-detect text files; store and check out as LF.
+# Prevents working-tree CRLF drift from Wails-generated files,
+# IDE saves, and other Windows tooling.
+* text=auto eol=lf
+
+# Windows-native scripts keep CRLF so PowerShell/cmd parses them
+# correctly regardless of how the file was retrieved.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary formats — never touch line endings.
+*.dll  binary
+*.exe  binary
+*.so   binary
+*.dylib binary
+
+# WC3 file formats (test fixtures + any vendored sample data).
+*.doo  binary
+*.w3x  binary
+*.w3m  binary
+*.w3e  binary
+*.w3i  binary
+*.wpm  binary
+*.shd  binary
+*.mpq  binary
+*.mdx  binary
+*.mdl  binary
+*.blp  binary
+*.dds  binary
+*.tga  binary
+*.slk  binary
+
+# Images / fonts.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.ttf  binary
+*.otf  binary
+*.woff binary
+*.woff2 binary
