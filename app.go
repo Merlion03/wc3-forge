@@ -170,6 +170,19 @@ type TerrainDTO struct {
 	// renderer color tiles by their real texture average without having to
 	// decode BLP/DDS itself. parallel-indexed with Palette.
 	PaletteColors [][3]uint8 `json:"palette_colors"`
+	// Per-corner cliff data. LayerHeight is the integer cliff step (0..15),
+	// CliffTex is the index into CliffPalette (0..15; 15 commonly means
+	// "no cliff" at this corner). CliffVar is the high 3 bits of TextureDetails
+	// (per-corner variation), used in the cliff-mesh filename.
+	// RampFlags packs: bit 0 = ramp, bit 1 = boundary.
+	//
+	// uint32 (not uint8) for the same reason as GroundTex above — Go's
+	// encoding/json base64-encodes []byte/[]uint8.
+	LayerHeight  []uint32 `json:"layer_height"`
+	CliffTex     []uint32 `json:"cliff_tex"`
+	CliffVar     []uint32 `json:"cliff_var"`
+	RampFlags    []uint32 `json:"ramp_flags"`
+	CliffPalette []string `json:"cliff_palette"` // cliff tileset FourCCs
 }
 
 // GetTerrain returns the terrain grid for rendering. Empty if no map loaded or
@@ -182,9 +195,27 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 	n := int(t.Width * t.Height)
 	heights := make([]float32, n)
 	ground := make([]uint32, n)
+	layer := make([]uint32, n)
+	cliffTex := make([]uint32, n)
+	cliffVar := make([]uint32, n)
+	rampFlags := make([]uint32, n)
 	for i := 0; i < n; i++ {
-		heights[i] = t.Tiles[i].Z()
+		// FinalZ includes the layer_height contribution; cliffs would otherwise
+		// render as a flat slab. The JS terrain mesh + cliff transition logic
+		// both depend on this combined Z.
+		heights[i] = t.Tiles[i].FinalZ()
 		ground[i] = uint32(t.Tiles[i].GroundTexIdx())
+		layer[i] = uint32(t.Tiles[i].LayerHeight)
+		cliffTex[i] = uint32(t.Tiles[i].CliffTexIdx())
+		cliffVar[i] = uint32((t.Tiles[i].TextureDetails >> 5) & 0x07)
+		var rf uint32
+		if t.Tiles[i].HasRamp() {
+			rf |= 0x01
+		}
+		if t.Tiles[i].Boundary {
+			rf |= 0x02
+		}
+		rampFlags[i] = rf
 	}
 	return TerrainDTO{
 		Width:         t.Width,
@@ -195,6 +226,11 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		Tileset:       string([]byte{t.Tileset}),
 		Palette:       t.GroundTilesets,
 		PaletteColors: PaletteColors(t.GroundTilesets),
+		LayerHeight:   layer,
+		CliffTex:      cliffTex,
+		CliffVar:      cliffVar,
+		RampFlags:     rampFlags,
+		CliffPalette:  t.CliffTilesets,
 	}, nil
 }
 

@@ -34,6 +34,7 @@ import {
 } from '../wailsjs/go/main/App.js'
 import { buildTerrain, type TerrainMesh } from './terrain'
 import { createCamera, type RTSCamera } from './camera'
+import { computeCliffPlacements, renderCliffs, type CliffRendering } from './cliffs'
 
 const MV: any = (MV_ns as any).default ?? MV_ns
 
@@ -188,6 +189,7 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
   let crashed = false
   let rafId = 0
   let terrain: TerrainMesh | null = null
+  let cliffs: CliffRendering | null = null
   // Background color (used by our own clear call now that scene.alpha=true).
   const bg = [0.07, 0.07, 0.09]
   const loop = () => {
@@ -350,6 +352,10 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
       terrain.dispose()
       terrain = null
     }
+    if (cliffs) {
+      cliffs.dispose()
+      cliffs = null
+    }
   }
 
   // --- Picking: ray vs unit-sphere ---
@@ -443,6 +449,13 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
           const cx = (t as any).center_offset[0] + tw / 2
           const cy = (t as any).center_offset[1] + th / 2
           camera.frame(cx, cy, span)
+        }
+        // Cliff transition meshes. Walks per-corner layer-heights and
+        // selects the appropriate Doodads/Terrain/Cliffs/Cliffs<pattern>N.mdx
+        // for each cell with a layer-height transition.
+        const cliffPlacements = computeCliffPlacements(t as unknown as any)
+        if (cliffPlacements.length > 0) {
+          cliffs = await renderCliffs(viewer as any, scene, pathSolver, cliffPlacements)
         }
       } catch (e) {
         flog('[terrain load]', e instanceof Error ? e.message : String(e))

@@ -126,12 +126,29 @@ type Tilepoint struct {
 	Boundary bool
 }
 
-// Z returns the game-space ground elevation in WC3 world units.
-// The encoding stores (game_z * 4 + 0x2000) as an unsigned-ish int16 so
+// Z returns the game-space ground elevation in WC3 world units, EXCLUDING
+// the cliff layer contribution. This is the "small float" wobble around a
+// layer's nominal Z (range typically ±32 studs from level). For the actual
+// height of a rendered terrain corner you want FinalZ, which adds the
+// cliff-layer offset on top.
+//
+// Encoding: stored as `(game_z * 4 + 0x2000)` in an unsigned-ish int16 so
 // that flat ground (Z = 0) lands on 8192 and the full elevation range
 // (±2 cliff levels of ±128) fits comfortably.
 func (t Tilepoint) Z() float32 {
 	return float32(int32(t.GroundHeight)-0x2000) / 4.0
+}
+
+// FinalZ returns the rendered corner Z: per-corner small float wobble plus
+// the cliff-layer offset. WC3 cliffs are integer LayerHeight steps; each
+// step is 128 studs (one tile width). Layer 2 is the "nominal ground"
+// reference (per HiveWE's `corner_final_ground_height = corner_height +
+// corner_layer_height - 2.0`, then scaled by 128 for our stud space).
+//
+// Without this, terrain renders as a flat slab even on maps with cliffs —
+// the per-corner Z() values alone don't capture the multi-level elevation.
+func (t Tilepoint) FinalZ() float32 {
+	return t.Z() + (float32(t.LayerHeight)-2.0)*128.0
 }
 
 // WaterZ returns the game-space water surface elevation, same encoding
