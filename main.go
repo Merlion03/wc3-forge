@@ -23,10 +23,16 @@ func main() {
 	var headless bool
 	var noBridge bool
 	var openPath string
+	var startReforged bool
 	flag.BoolVar(&headless, "headless", false, "run the bridge only; do not open the GUI window")
 	flag.BoolVar(&noBridge, "no-bridge", false, "skip starting the MCP bridge (for GUI-only dev)")
 	flag.StringVar(&openPath, "open", "", "extracted map folder to load on startup (skips Open Map dialog)")
+	flag.BoolVar(&startReforged, "reforged", false, "start in HD (Reforged) graphics mode; default is SD (Classic)")
 	flag.Parse()
+
+	if startReforged {
+		reforgedMode.Store(true)
+	}
 
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.SetPrefix("wc3-forge: ")
@@ -54,8 +60,13 @@ func main() {
 	// land on a ready storage. Lazy init introduces a race: the viewer's
 	// loadBaseFiles can complete with errors before CASC finishes opening,
 	// and the viewer doesn't retry on its own.
-	if _, err := getCASC(); err != nil {
+	if c, err := getCASC(); err != nil {
 		log.Printf("CASC eager open failed (stock asset paths will 404): %v", err)
+	} else if c != nil {
+		// Sync the just-opened storage to the current reforged-mode atomic
+		// (always false on startup; honored here in case --reforged or
+		// similar persistent state lands later).
+		c.SetReforged(ReforgedMode())
 	}
 
 	if openPath != "" {

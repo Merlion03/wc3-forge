@@ -130,9 +130,17 @@ export interface SceneAPI {
   setSelected(creationNumbers: Set<number>): void
   /** Register a callback fired when the user clicks a unit in the viewport. */
   onUnitClicked(cb: (creationNumber: number) => void): void
+  /**
+   * Flip the MDX handler's reforged flag in-place. Drops cached MDX models +
+   * team-color textures so the next loadMap() reloads them under the new mode.
+   * Caller is responsible for triggering loadMap() after this.
+   */
+  setReforgedMode(reforged: boolean): void
+  /** Current reforged flag — for UI display. */
+  isReforged(): boolean
 }
 
-export function createScene(canvas: HTMLCanvasElement): SceneAPI {
+export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {
   const { ModelViewer, handlers } = getMV()
 
   // mdx-m3-viewer reads canvas.width/height as PIXELS — keep them synced
@@ -147,18 +155,24 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
 
   const viewer = new ModelViewer(canvas)
   ;(window as any).__viewer = viewer // devtools inspection
+  flog(`[scene] init reforged=${reforged}`)
 
   // Handler order matters: BLP/DDS/TGA before MDX so the MDX loader can
   // route texture loads to the right decoder. Texture handlers don't take
-  // pathSolver/options; MDX handler does (pathSolver + isReforged=false for
-  // SD models — Reforged HD support is a follow-up).
+  // pathSolver/options; MDX handler does — its third arg (reforged) toggles
+  //   - 28 team-color textures (vs 16 in SD)
+  //   - .dds team-color URL extension (vs .blp in SD)
+  //   - HD-aware sound + splat lookups in getEventObjectData
+  // The shader variant (sd vs hd) is chosen per-batch at draw time based on
+  // each model's own `solverParams.hd` flag, not this global.
   viewer.addHandler(handlers.blp)
   viewer.addHandler(handlers.dds)
   viewer.addHandler(handlers.tga)
-  viewer.addHandler(handlers.mdx, pathSolver, /* reforged */ false)
+  viewer.addHandler(handlers.mdx, pathSolver, /* reforged */ reforged)
 
   // Team colors aren't loaded automatically when using the lower-level API.
   // Pre-warm them so units have player tint from the first frame they render.
+  let currentReforged = reforged
   try { handlers.mdx.loadTeamTextures(viewer) } catch (e) {
     flog('[loadTeamTextures]', e instanceof Error ? e.message : String(e))
   }
@@ -539,5 +553,37 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
     onUnitClicked(cb: (cn: number) => void) {
       pickCallback = cb
     },
+    setReforgedMode(b: boolean) {
+      if (b === currentReforged) return
+      flog(`[scene] reforged mode: ${currentReforged} -> ${b}`)
+      currentReforged = b
+      // Mutate the MDX handler's shared cache so getEventObjectData and any
+      // future loadTeamTextures call see the new flag. Then drop cached
+      // team colors so the next loadTeamTextures reloads the right texture
+      // set (28 .dds vs 16 .blp). The shader programs themselves stay —
+      // they were all built up front in the handler load() call regardless
+      // of mode, and the shader-picker (getBatchShader) consults each
+      // batch's own `isHd` flag, not the handler-global reforged.
+      const cache: any = (viewer as any).sharedCache?.get?.('mdx')
+      if (cache) {
+        cache.reforged = b
+        cache.teamColors.length = 0
+        cache.teamGlows.length = 0
+      }
+      // Also flush the model + texture resource cache so the next loadMap
+      // re-fetches under the new mode. Without this, units retain the SD
+      // textures + skeletons they were first loaded with.
+      const v: any = viewer
+      if (v.resourceMap && typeof v.resourceMap.clear === 'function') {
+        v.resourceMap.clear()
+      }
+      // Detach all instances so we don't keep stale model refs around.
+      clearInstances()
+      // Re-prime team textures for the new mode.
+      try { handlers.mdx.loadTeamTextures(viewer) } catch (e) {
+        flog('[loadTeamTextures-reload]', e instanceof Error ? e.message : String(e))
+      }
+    },
+    isReforged() { return currentReforged },
   }
 }

@@ -14,6 +14,8 @@ export function GetDoodadTypeIndex():Promise<Record<string, main.DoodadTypeInfo>
 
 export function GetMapBytes():Promise<string>;
 
+export function GetReforgedMode():Promise<boolean>;
+
 export function GetSelection():Promise<main.SelectionDTO>;
 
 export function GetTerrain():Promise<main.TerrainDTO>;
@@ -33,6 +35,8 @@ export function OpenMap(arg1:string):Promise<main.MapStatus>;
 export function OpenMapDialog():Promise<string>;
 
 export function SelectUnit(arg1:number):Promise<main.SelectionDTO>;
+
+export function SetReforgedMode(arg1:boolean):Promise<boolean>;
 
 export function SetSelection(arg1:Array<main.SelectionItemDTO>):Promise<main.SelectionDTO>;
 

@@ -81,12 +81,24 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// handlers auto-detect format by magic bytes, so serving DDS through a
 	// .blp URL (or MDX through a .mdl URL) works — the lib picks the right
 	// resource class from the data.
+	//
+	// In HD mode we flip the preference when the requested texture is .blp:
+	// HD models tend to reference DDS directly, and the SD .blp variant may
+	// not even exist in a Reforged install. So under HD + a requested .blp,
+	// try .dds FIRST. For requested .dds (the HD case) we keep that first.
+	// SD mode always tries the requested extension first. Model extensions
+	// (MDX↔MDL) are never flipped.
 	candidates := []string{requested}
 	if alt := siblingExtension(requested); alt != "" {
-		candidates = append(candidates, alt)
+		ext := strings.ToLower(path.Ext(requested))
+		if ReforgedMode() && ext == ".blp" {
+			candidates = []string{alt, requested}
+		} else {
+			candidates = append(candidates, alt)
+		}
 	}
 
-	for i, candidate := range candidates {
+	for _, candidate := range candidates {
 		// Try the current map's source first.
 		data, ok, err := forge.Current.ReadFile(candidate)
 		if err != nil {
@@ -95,7 +107,7 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if ok {
 			via := "map source"
-			if i > 0 {
+			if candidate != requested {
 				via = "map source (sibling-ext)"
 			}
 			log.Printf("asset: %s -> %s as %s (%d bytes)", requested, via, candidate, len(data))
@@ -113,7 +125,7 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if ok {
 				via := "CASC"
-				if i > 0 {
+				if candidate != requested {
 					via = "CASC (sibling-ext)"
 				}
 				log.Printf("asset: %s -> %s as %s (%d bytes)", requested, via, candidate, len(data))

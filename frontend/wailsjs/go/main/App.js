@@ -22,6 +22,10 @@ export function GetMapBytes() {
   return window['go']['main']['App']['GetMapBytes']();
 }
 
+export function GetReforgedMode() {
+  return window['go']['main']['App']['GetReforgedMode']();
+}
+
 export function GetSelection() {
   return window['go']['main']['App']['GetSelection']();
 }
@@ -60,6 +64,10 @@ export function OpenMapDialog() {
 
 export function SelectUnit(arg1) {
   return window['go']['main']['App']['SelectUnit'](arg1);
+}
+
+export function SetReforgedMode(arg1) {
+  return window['go']['main']['App']['SetReforgedMode'](arg1);
 }
 
 export function SetSelection(arg1) {

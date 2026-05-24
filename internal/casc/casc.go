@@ -108,6 +108,26 @@ func locateDLL() string {
 type Storage struct {
 	handle uintptr
 	mu     sync.Mutex
+	// reforged, when true, reorders the CASC mount-prefix search list so
+	// `_hd.w3mod:` is checked BEFORE `war3.w3mod:`. This matters because the
+	// same logical path (e.g. "units/human/footman/footman.mdx") can resolve
+	// to either the SD or HD asset depending on which mount we hit first.
+	// Default (false) prefers SD assets. Use SetReforged to flip.
+	reforged bool
+}
+
+// SetReforged sets the HD/SD preference. Concurrent-safe.
+func (s *Storage) SetReforged(b bool) {
+	s.mu.Lock()
+	s.reforged = b
+	s.mu.Unlock()
+}
+
+// Reforged returns the current HD/SD preference.
+func (s *Storage) Reforged() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reforged
 }
 
 // Open returns a Storage for the install at the given path. The path
@@ -184,7 +204,11 @@ func (s *Storage) Close() error {
 func (s *Storage) ReadFile(name string) ([]byte, bool, error) {
 	// Normalize to backslash-style; CASC stores paths with `\`.
 	bs := strings.ReplaceAll(name, "/", "\\")
-	for _, prefix := range cascPrefixes {
+	prefixes := sdCascPrefixes
+	if s.Reforged() {
+		prefixes = hdCascPrefixes
+	}
+	for _, prefix := range prefixes {
 		full := prefix + bs
 		data, ok, err := s.openOne(full)
 		if err != nil {
@@ -197,15 +221,33 @@ func (s *Storage) ReadFile(name string) ([]byte, bool, error) {
 	return nil, false, nil
 }
 
-// cascPrefixes are the CASC mount paths we try in order. SD assets first
-// (most stock models live here), then HD, then localized. Add more as
-// needed once we see real misses.
-var cascPrefixes = []string{
+// sdCascPrefixes are the CASC mount paths we try in SD (Classic) mode.
+// `war3.w3mod:` (the main shared SD-asset mount) is tried first; HD is
+// available as a fallback for assets that only exist HD-side (e.g. some
+// Reforged-only TeamColor textures).
+var sdCascPrefixes = []string{
 	"war3.w3mod:",
 	"war3.w3mod:_hd.w3mod:",
 	"war3.w3mod:_locales\\enus.w3mod:",
 	"war3.w3mod:_deprecated.w3mod:",
 }
+
+// hdCascPrefixes are the CASC mount paths we try in HD (Reforged) mode.
+// `_hd.w3mod:` first so HD models, materials and textures are preferred
+// over their SD siblings when both exist under the same logical path.
+var hdCascPrefixes = []string{
+	"war3.w3mod:_hd.w3mod:",
+	"war3.w3mod:",
+	"war3.w3mod:_locales\\enus.w3mod:",
+	"war3.w3mod:_deprecated.w3mod:",
+}
+
+// cascPrefixes is retained as the SD default for back-compat with callers
+// (and the test suite) that referenced the old name. New code should use
+// SetReforged + ReadFile instead of consulting this slice directly.
+//
+// Deprecated: use the Storage's reforged-aware ReadFile.
+var cascPrefixes = sdCascPrefixes
 
 // openOne does the raw open-read-close for a single fully-qualified
 // CASC path. Caller assembles the path.

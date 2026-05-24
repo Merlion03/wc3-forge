@@ -3,6 +3,7 @@
   import {
     OpenMapDialog, OpenMap, CloseMap, ListUnits, ListDoodads, Status,
     GetSelection, SelectUnit, ClearSelection, GetUnit,
+    GetReforgedMode, SetReforgedMode,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
@@ -15,6 +16,7 @@
   let primaryEntity: unitsdoo.Entity | null = null
   let error: string = ''
   let busy: boolean = false
+  let reforged: boolean = false
 
   let canvas: HTMLCanvasElement
   let scene: SceneAPI | null = null
@@ -24,7 +26,10 @@
 
   onMount(async () => {
     try {
-      scene = createScene(canvas)
+      // Pull initial mode from Go so reloads of the UI (HMR, route) honor
+      // any persistent setting once we add one. Currently session-only.
+      try { reforged = await GetReforgedMode() } catch { reforged = false }
+      scene = createScene(canvas, reforged)
       scene.onUnitClicked((cn) => { SelectUnit(cn) })
     } catch (e) {
       error = 'scene init failed: ' + (e instanceof Error ? (e.stack || e.message) : String(e))
@@ -94,6 +99,29 @@
     // The viewport pulls its own data via App.* methods now; no need to
     // marshal the raw .w3x bytes across the boundary.
     await scene?.loadMap()
+  }
+
+  async function toggleReforged() {
+    if (busy) return
+    busy = true
+    error = ''
+    try {
+      const next = !reforged
+      // Push to Go first — it owns the canonical state (CASC prefix order,
+      // asset-handler sibling preference), then flip the scene which will
+      // drop cached models/textures.
+      reforged = await SetReforgedMode(next)
+      scene?.setReforgedMode(reforged)
+      // Re-load the current map so all models + team-color textures come
+      // back through the new mode. If no map is loaded, no-op.
+      if (status.loaded) {
+        await reloadMap()
+      }
+    } catch (e) {
+      error = 'toggle reforged failed: ' + String(e)
+    } finally {
+      busy = false
+    }
   }
 
   async function close() {
@@ -182,6 +210,12 @@
       {/if}
     </div>
     <div class="actions">
+      <button on:click={toggleReforged} disabled={busy}
+              class="mode-toggle"
+              class:hd={reforged}
+              title="Switch between SD (Classic) and HD (Reforged) graphics. Reloads the current map.">
+        {reforged ? 'HD' : 'SD'}
+      </button>
       <button on:click={pickAndOpen} disabled={busy}>Open Map…</button>
       {#if status.loaded}
         <button on:click={close} disabled={busy} class="secondary">Close</button>
@@ -331,6 +365,13 @@
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   button.secondary { background: #3f3f46; }
   button.secondary:hover:not(:disabled) { background: #52525b; }
+  button.mode-toggle {
+    background: #3f3f46; min-width: 36px; font-weight: 600;
+    letter-spacing: 0.04em; font-family: 'Cascadia Mono', Consolas, monospace;
+  }
+  button.mode-toggle:hover:not(:disabled) { background: #52525b; }
+  button.mode-toggle.hd { background: #15803d; }
+  button.mode-toggle.hd:hover:not(:disabled) { background: #166534; }
 
   .error { background: #7f1d1d; color: #fecaca; padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; max-height: 200px; overflow: auto; }
   .error pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
