@@ -161,6 +161,17 @@ function rollSequence(instance: any, type: string): boolean {
   return true
 }
 
+export type PickKind = 'unit' | 'doodad'
+export interface PickHit { kind: PickKind; id: number }
+/**
+ * How a pick result combines with the current selection.
+ *   - 'set'    — replace selection with hits (plain click; empty hits clears)
+ *   - 'add'    — union hits into the current selection (shift+click, rubber-band)
+ *   - 'toggle' — XOR hits with the current selection (ctrl+click)
+ */
+export type SelectMode = 'set' | 'add' | 'toggle'
+export type PickCallback = (hits: PickHit[], mode: SelectMode) => void
+
 export interface SceneAPI {
   /**
    * Re-populate the scene from current Go-side state. Called on map-changed.
@@ -174,10 +185,25 @@ export interface SceneAPI {
   clear(): void
   /** Stop the RAF loop and tear down listeners. */
   dispose(): void
-  /** Tint selected unit instances; pass empty Set to clear highlight. */
-  setSelected(creationNumbers: Set<number>): void
-  /** Register a callback fired when the user clicks a unit in the viewport. */
-  onUnitClicked(cb: (creationNumber: number) => void): void
+  /**
+   * Paint the highlight tint on selected instances. Pass split sets so the
+   * scene can tint units and doodads independently — the underlying instance
+   * maps are kind-separated and a single Set can't disambiguate creation
+   * numbers that happen to collide across kinds.
+   *
+   * Sloc markers piggyback on the unit set (their type_id is "sloc" in the
+   * unit DTO; they're rendered separately but selected as units).
+   */
+  setSelected(units: Set<number>, doodads: Set<number>): void
+  /**
+   * Register the picker callback. Fires for every selection-affecting gesture
+   * in the viewport: plain click, shift/ctrl click, shift-drag rubber-band,
+   * empty-click (hits=[], mode='set' to clear), Escape (same as empty-click).
+   * Modifier-held clicks on empty space are intentionally swallowed — losing
+   * a multi-step selection to a stray click in the void is more annoying than
+   * losing the no-op gesture.
+   */
+  onPick(cb: PickCallback): void
   /**
    * Flip the MDX handler's reforged flag in-place. Drops cached MDX models +
    * team-color textures so the next loadMap() reloads them under the new mode.
@@ -271,6 +297,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // render loop's first invocation) to satisfy TDZ — the loop closure
   // captures the binding name and would crash on first invocation otherwise.
   let selectedSet: Set<number> = new Set()
+  // Doodad-side analogue of selectedSet. Creation_number is per-kind in WC3
+  // (a unit and a doodad can share the same numeric ID), so selection state
+  // for doodads lives in its own set and the renderer mirrors that split.
+  let selectedDoodadSet: Set<number> = new Set()
   // Creation numbers whose animation is being driven manually via the dev
   // SetUnitAnimation hook. The per-frame stand re-roll skips these so a
   // user-pinned 'Walk' or 'Death' doesn't get clobbered on the next idle tick.
@@ -282,8 +312,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // remain cached in viewer.resourceMap across loads — only instances are
   // dropped on re-open. Hoisted here (before the render loop's first
   // invocation) so the per-frame stand-reroll's iteration doesn't trip TDZ.
+  // Units and doodads use separate maps because creation_number is per-kind
+  // in WC3 — same reason the selected* sets above are split.
   const unitInstances = new Map<number, any>()
-  const doodadInstances: any[] = []
+  const doodadInstances = new Map<number, any>()
 
   // Sloc-marker renderer. Owns its own shader + box geometry. Failure to
   // build is non-fatal: we just won't have visible markers. Built here
@@ -328,7 +360,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
           if (manualAnimCns.has(cn)) continue
           if (inst.sequence === -1 || inst.sequenceEnded) rollSequence(inst, 'stand')
         }
-        for (const inst of doodadInstances) {
+        for (const inst of doodadInstances.values()) {
           if (inst.sequence === -1 || inst.sequenceEnded) rollSequence(inst, 'stand')
         }
         gl.viewport(0, 0, canvas.width, canvas.height)
@@ -359,9 +391,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   const ro = new ResizeObserver(sizeToBox)
   ro.observe(canvas)
 
-  let pickCallback: ((cn: number) => void) | null = null
-  // Note: selectedSet, unitInstances, doodadInstances are declared earlier in
-  // this function (before the render loop runs) to avoid a TDZ trap.
+  let pickCallback: PickCallback | null = null
+  // Note: selectedSet, selectedDoodadSet, unitInstances, doodadInstances are
+  // all declared earlier in this function (before the render loop runs) to
+  // avoid a TDZ trap — the loop closure captures them on first invocation.
   const SELECT_TINT: [number, number, number, number] = [1.2, 1.4, 0.6, 1] // warm yellow boost
 
   // Unit type index: stock-only and process-stable (we don't yet apply
@@ -455,6 +488,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     inst.uniformScale((d.scale[0] || 1) * (info.model_scale || 1))
     inst.setScene(scene)
     rollSequence(inst, 'stand')
+    if (selectedDoodadSet.has(d.creation_number)) {
+      inst.setVertexColor(SELECT_TINT)
+    }
     return inst
   }
 
@@ -466,10 +502,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       try { inst.detach() } catch { /* already detached */ }
     }
     unitInstances.clear()
-    for (const inst of doodadInstances) {
+    for (const inst of doodadInstances.values()) {
       try { inst.detach() } catch { /* already detached */ }
     }
-    doodadInstances.length = 0
+    doodadInstances.clear()
     // Slocs hold no GL resources of their own — they live in the renderer's
     // marker list. Replace with empty list so the next loadMap re-populates.
     slocRenderer?.setMarkers([])
@@ -487,19 +523,55 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     }
   }
 
-  // --- Picking: ray vs unit-sphere ---
+  // --- Picking: ray vs instance bounds ---
   //
-  // Each unit instance's mdx-m3-viewer Bounds object is sphere-shaped
-  // (despite the type's name) — center + radius, in model-local space.
-  // We translate to world space using the instance's worldLocation, then
-  // do ray-sphere intersection. Closest hit wins.
+  // Each mdx-m3-viewer Bounds object is sphere-shaped (despite the type name)
+  // — center + radius, in model-local space. We translate to world space
+  // using the instance's worldLocation, then do ray-sphere intersection.
+  // Walking units, doodads, and slocs in one pass lets us report the closest
+  // hit across kinds; the picker callback receives a kind tag so the caller
+  // can route through the kind-aware Go selection API.
   //
   // Click vs drag is detected by tracking mousedown/mouseup pixel distance;
-  // we ignore MMB/RMB (those are camera drag gestures).
+  // MMB/RMB are camera drag gestures and we don't observe them here.
+  // shift+LMB drag past the threshold becomes a rubber-band rectangle, also
+  // handled in this module.
   const CLICK_PIXEL_THRESHOLD = 5
-  let downAt: { x: number; y: number; button: number } | null = null
 
-  function rayPick(px: number, py: number): number | null {
+  // Project a world point through the current view-projection matrix into
+  // canvas-pixel space (DOM-Y, origin top-left). Returns null if the point
+  // is behind the camera (w <= 0). Used by rubber-band hit-testing.
+  function worldToCanvasPx(wx: number, wy: number, wz: number): { x: number; y: number } | null {
+    const m = scene.camera.viewProjectionMatrix as Float32Array
+    const x = m[0]*wx + m[4]*wy + m[8]*wz + m[12]
+    const y = m[1]*wx + m[5]*wy + m[9]*wz + m[13]
+    const w = m[3]*wx + m[7]*wy + m[11]*wz + m[15]
+    if (w <= 0) return null
+    const nx = x / w, ny = y / w
+    const sx = (nx * 0.5 + 0.5) * canvas.clientWidth
+    const syBottom = (ny * 0.5 + 0.5) * canvas.clientHeight
+    return { x: sx, y: canvas.clientHeight - syBottom }
+  }
+
+  // World-space pick-bounds (sphere center + radius) for one unit/doodad
+  // instance. Centralizes the "bounds.r is sphere, scale up by largest axis"
+  // dance so both ray-pick and rubber-band agree on what's hittable.
+  function instanceWorldBounds(inst: any): { cx: number; cy: number; cz: number; r: number } | null {
+    const b = inst.getBounds?.()
+    if (!b || b.r <= 0) return null
+    const sx = inst.worldScale?.[0] ?? 1
+    const sy = inst.worldScale?.[1] ?? 1
+    const sz = inst.worldScale?.[2] ?? 1
+    const biggest = Math.max(sx, sy, sz)
+    return {
+      cx: inst.worldLocation[0] + b.x,
+      cy: inst.worldLocation[1] + b.y,
+      cz: inst.worldLocation[2] + b.z,
+      r: b.r * biggest,
+    }
+  }
+
+  function rayPick(px: number, py: number): PickHit | null {
     // screenToWorldRay outputs near + far points (vec3 + vec3 = 6 floats).
     const out = new Float32Array(6)
     const vp = (scene as any).viewport as Float32Array
@@ -513,36 +585,37 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     if (len < 1e-6) return null
     const rx = dx / len, ry = dy / len, rz = dz / len
 
-    let bestCn: number | null = null
+    let bestHit: PickHit | null = null
     let bestT = Infinity
-    for (const [cn, inst] of unitInstances) {
-      const b = inst.getBounds?.()
-      if (!b || b.r <= 0) continue
-      const sx = inst.worldScale?.[0] ?? 1
-      const sy = inst.worldScale?.[1] ?? 1
-      const sz = inst.worldScale?.[2] ?? 1
-      const biggest = Math.max(sx, sy, sz)
-      const cx = inst.worldLocation[0] + b.x
-      const cy = inst.worldLocation[1] + b.y
-      const cz = inst.worldLocation[2] + b.z
-      const r = b.r * biggest
+    const considerSphere = (cx: number, cy: number, cz: number, r: number, hit: PickHit) => {
       // Ray-sphere intersection. Standard quadratic:
       //   |o + t*d - c|² = r²  →  t² - 2t·(d·(c-o)) + |c-o|²-r² = 0
       const lx = cx - ox, ly = cy - oy, lz = cz - oz
       const tca = lx * rx + ly * ry + lz * rz
-      if (tca < 0) continue // behind the camera
+      if (tca < 0) return // behind the camera
       const d2 = lx * lx + ly * ly + lz * lz - tca * tca
-      if (d2 > r * r) continue // ray misses sphere
+      if (d2 > r * r) return // ray misses sphere
       const thc = Math.sqrt(r * r - d2)
       const t = tca - thc // nearest intersection in front of camera
       if (t < bestT) {
         bestT = t
-        bestCn = cn
+        bestHit = hit
       }
     }
 
+    for (const [cn, inst] of unitInstances) {
+      const wb = instanceWorldBounds(inst)
+      if (wb) considerSphere(wb.cx, wb.cy, wb.cz, wb.r, { kind: 'unit', id: cn })
+    }
+    for (const [cn, inst] of doodadInstances) {
+      const wb = instanceWorldBounds(inst)
+      if (wb) considerSphere(wb.cx, wb.cy, wb.cz, wb.r, { kind: 'doodad', id: cn })
+    }
+
     // Sloc markers — ray vs AABB (slab method). Slocs have no MDX so they're
-    // not in unitInstances; rays still need to hit them for selection.
+    // not in unitInstances; rays still need to hit them for selection. The
+    // Go-side selection routes them as kind="unit" because they're entries
+    // in war3mapUnits.doo.
     const slocInfos = slocRenderer?.pickInfos() ?? []
     for (const s of slocInfos) {
       // Per-axis slab intersection. Ray dir component near zero gets clamped
@@ -581,27 +654,197 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (t < 0) continue
       if (t < bestT) {
         bestT = t
-        bestCn = s.creationNumber
+        bestHit = { kind: 'unit', id: s.creationNumber }
       }
     }
-    return bestCn
+    return bestHit
+  }
+
+  // Rubber-band: collect every instance whose world-space bound-center
+  // projects to a point inside the rectangle. Using the center (not full
+  // sphere extent) matches Blender/Photoshop convention — the gesture asks
+  // "what's in here?", not "what touches the edge?".
+  function rubberBandPick(rect: { x: number; y: number; w: number; h: number }): PickHit[] {
+    const hits: PickHit[] = []
+    const inside = (p: { x: number; y: number } | null) => {
+      if (!p) return false
+      return p.x >= rect.x && p.x <= rect.x + rect.w
+          && p.y >= rect.y && p.y <= rect.y + rect.h
+    }
+    for (const [cn, inst] of unitInstances) {
+      const wb = instanceWorldBounds(inst)
+      if (!wb) continue
+      if (inside(worldToCanvasPx(wb.cx, wb.cy, wb.cz))) {
+        hits.push({ kind: 'unit', id: cn })
+      }
+    }
+    for (const [cn, inst] of doodadInstances) {
+      const wb = instanceWorldBounds(inst)
+      if (!wb) continue
+      if (inside(worldToCanvasPx(wb.cx, wb.cy, wb.cz))) {
+        hits.push({ kind: 'doodad', id: cn })
+      }
+    }
+    const slocInfos = slocRenderer?.pickInfos() ?? []
+    for (const s of slocInfos) {
+      if (inside(worldToCanvasPx(s.center[0], s.center[1], s.center[2]))) {
+        hits.push({ kind: 'unit', id: s.creationNumber })
+      }
+    }
+    return hits
+  }
+
+  // --- Mouse + keyboard gesture handling ---
+  //
+  // State machine for LMB:
+  //   mousedown LMB     → record downAt + modifiers
+  //   mousemove past 5px while shift was held at down → start rubber-band
+  //   mousemove during rubber-band → resize the overlay rectangle
+  //   mouseup LMB       → either commit rubber-band (mode=add)
+  //                     OR treat as click and ray-pick (mode from modifiers)
+  // Modifier-held click on empty space is a no-op (preserves selection);
+  // plain click on empty space clears via mode='set' with hits=[].
+  //
+  // RMB/MMB drag belong to the camera and we don't observe them here.
+
+  interface DownState {
+    x: number; y: number          // canvas-relative px
+    clientX: number; clientY: number // viewport px (for mousemove distance)
+    shift: boolean
+    ctrl: boolean
+    // Did the user start a rubber-band gesture? Lazy-set on the first
+    // mousemove that crosses the click-vs-drag threshold while shift is held.
+    rubberBanding: boolean
+  }
+  let downAt: DownState | null = null
+
+  // The rubber-band rectangle is rendered as a positioned DOM div. WebGL
+  // would be lower-overhead but a one-element DOM overlay is dramatically
+  // simpler and doesn't conflict with any of the render-state assumptions
+  // baked into our terrain/water/sloc passes.
+  const overlay = document.createElement('div')
+  overlay.style.cssText = [
+    'position:absolute',
+    'pointer-events:none',
+    'border:1px solid rgba(120,180,255,0.9)',
+    'background:rgba(60,120,220,0.18)',
+    'display:none',
+    'z-index:10',
+  ].join(';')
+  // The viewport container is position:relative so absolute children anchor
+  // to its box. Fall back to document.body when no parent is available (unit
+  // test contexts) so the listener wiring doesn't crash.
+  const overlayHost = canvas.parentElement ?? document.body
+  overlayHost.appendChild(overlay)
+
+  function modeFromModifiers(shift: boolean, ctrl: boolean): SelectMode {
+    if (ctrl) return 'toggle'
+    if (shift) return 'add'
+    return 'set'
   }
 
   function onCanvasMouseDown(e: MouseEvent) {
-    downAt = { x: e.clientX, y: e.clientY, button: e.button }
+    if (e.button !== 0) return
+    const r = canvas.getBoundingClientRect()
+    downAt = {
+      x: e.clientX - r.left,
+      y: e.clientY - r.top,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      shift: e.shiftKey,
+      ctrl: e.ctrlKey || e.metaKey,
+      rubberBanding: false,
+    }
   }
-  function onCanvasMouseUp(e: MouseEvent) {
+
+  function updateOverlayRect(rect: { x: number; y: number; w: number; h: number }) {
+    overlay.style.left = `${rect.x}px`
+    overlay.style.top = `${rect.y}px`
+    overlay.style.width = `${rect.w}px`
+    overlay.style.height = `${rect.h}px`
+    overlay.style.display = 'block'
+  }
+
+  function currentRubberRect(curClientX: number, curClientY: number): { x: number; y: number; w: number; h: number } | null {
+    if (!downAt) return null
+    const r = canvas.getBoundingClientRect()
+    const cx = curClientX - r.left
+    const cy = curClientY - r.top
+    const x = Math.min(downAt.x, cx)
+    const y = Math.min(downAt.y, cy)
+    const w = Math.abs(cx - downAt.x)
+    const h = Math.abs(cy - downAt.y)
+    return { x, y, w, h }
+  }
+
+  // Document-level so we keep tracking the drag even if the cursor leaves
+  // the canvas mid-gesture (rubber-band should survive a wobble over the
+  // app chrome — matches what every other editor does).
+  function onDocMouseMove(e: MouseEvent) {
+    if (!downAt) return
+    if (!downAt.rubberBanding) {
+      // Promote to rubber-band only if shift was held at mousedown AND the
+      // pointer has actually moved enough to look like a drag, not a click.
+      // (Without the shift gate, a plain LMB drag — which does nothing
+      // useful today — would steal selection on every accidental tiny drag.)
+      if (!downAt.shift) return
+      const dist = Math.hypot(e.clientX - downAt.clientX, e.clientY - downAt.clientY)
+      if (dist <= CLICK_PIXEL_THRESHOLD) return
+      downAt.rubberBanding = true
+    }
+    const rect = currentRubberRect(e.clientX, e.clientY)
+    if (rect) updateOverlayRect(rect)
+  }
+
+  function onDocMouseUp(e: MouseEvent) {
     const d = downAt
     downAt = null
-    if (!d || d.button !== 0 || e.button !== 0) return
-    const dist = Math.hypot(e.clientX - d.x, e.clientY - d.y)
-    if (dist > CLICK_PIXEL_THRESHOLD) return // it was a drag, not a click
-    const r = canvas.getBoundingClientRect()
-    const cn = rayPick(e.clientX - r.left, e.clientY - r.top)
-    if (cn != null && pickCallback) pickCallback(cn)
+    if (!d || e.button !== 0) return
+
+    if (d.rubberBanding) {
+      // Commit the rubber-band: collect everything inside the final rect
+      // and union it into the current selection (mode='add'). Empty boxes
+      // are a no-op (don't clear selection when the user just barely
+      // dragged then released with nothing inside).
+      overlay.style.display = 'none'
+      const rect = currentRubberRect(e.clientX, e.clientY)
+      if (!rect || rect.w < 2 || rect.h < 2) return
+      const hits = rubberBandPick(rect)
+      if (hits.length > 0 && pickCallback) pickCallback(hits, 'add')
+      return
+    }
+
+    // Click vs drag. A non-rubber-banding mouseup whose mousedown was on
+    // the canvas counts as a click iff it ended close to where it started.
+    const dist = Math.hypot(e.clientX - d.clientX, e.clientY - d.clientY)
+    if (dist > CLICK_PIXEL_THRESHOLD) return
+
+    const hit = rayPick(d.x, d.y)
+    if (!pickCallback) return
+
+    if (hit) {
+      pickCallback([hit], modeFromModifiers(d.shift, d.ctrl))
+      return
+    }
+    // Empty click. Modifier-held empty clicks are no-ops so a stray click
+    // in the void doesn't wipe an in-progress multi-select. Plain empty
+    // click clears.
+    if (!d.shift && !d.ctrl) pickCallback([], 'set')
   }
+
+  function onWindowKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Escape' && pickCallback) {
+      pickCallback([], 'set')
+    }
+  }
+
   canvas.addEventListener('mousedown', onCanvasMouseDown)
-  canvas.addEventListener('mouseup', onCanvasMouseUp)
+  // Listen on document for move/up so the rubber-band gesture survives the
+  // cursor leaving the canvas. Mirrors the camera controller's window-level
+  // mouseup listener for the same reason.
+  document.addEventListener('mousemove', onDocMouseMove)
+  document.addEventListener('mouseup', onDocMouseUp)
+  window.addEventListener('keydown', onWindowKeyDown)
 
   return {
     async loadMap(opts?: { keepCamera?: boolean }) {
@@ -717,7 +960,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         if (d.position[1] > ymax) ymax = d.position[1]
         const inst = await placeDoodad(d, dTypes)
         if (inst) {
-          doodadInstances.push(inst)
+          doodadInstances.set(d.creation_number, inst)
           dPlaced++
           // Sample the first 5 placements + 5 from later in the list to
           // confirm bounds are sane across the map. The lib's bounds object
@@ -762,27 +1005,43 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       cancelAnimationFrame(rafId)
       ro.disconnect()
       canvas.removeEventListener('mousedown', onCanvasMouseDown)
-      canvas.removeEventListener('mouseup', onCanvasMouseUp)
+      document.removeEventListener('mousemove', onDocMouseMove)
+      document.removeEventListener('mouseup', onDocMouseUp)
+      window.removeEventListener('keydown', onWindowKeyDown)
+      try { overlay.remove() } catch { /* parent already gone */ }
       if (slocRenderer) {
         slocRenderer.dispose()
         slocRenderer = null
       }
     },
-    setSelected(creationNumbers: Set<number>) {
-      // Clear tint on previously-selected, paint tint on newly-selected.
+    setSelected(units: Set<number>, doodads: Set<number>) {
+      // Units: clear tint on no-longer-selected, paint tint on newly-selected.
+      // Doodads: same dance against the doodad set + map.
       for (const cn of selectedSet) {
-        if (creationNumbers.has(cn)) continue
+        if (units.has(cn)) continue
         const inst = unitInstances.get(cn)
         if (inst) inst.setVertexColor([1, 1, 1, 1])
       }
-      for (const cn of creationNumbers) {
+      for (const cn of units) {
         if (selectedSet.has(cn)) continue
         const inst = unitInstances.get(cn)
         if (inst) inst.setVertexColor(SELECT_TINT)
       }
-      selectedSet = new Set(creationNumbers)
+      selectedSet = new Set(units)
+
+      for (const cn of selectedDoodadSet) {
+        if (doodads.has(cn)) continue
+        const inst = doodadInstances.get(cn)
+        if (inst) inst.setVertexColor([1, 1, 1, 1])
+      }
+      for (const cn of doodads) {
+        if (selectedDoodadSet.has(cn)) continue
+        const inst = doodadInstances.get(cn)
+        if (inst) inst.setVertexColor(SELECT_TINT)
+      }
+      selectedDoodadSet = new Set(doodads)
     },
-    onUnitClicked(cb: (cn: number) => void) {
+    onPick(cb: PickCallback) {
       pickCallback = cb
     },
     setReforgedMode(b: boolean) {

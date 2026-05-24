@@ -2,13 +2,13 @@
   import { onMount, onDestroy } from 'svelte'
   import {
     OpenMapDialog, OpenMap, CloseMap, ListUnits, ListDoodads, Status,
-    GetSelection, SelectUnit, ClearSelection, GetUnit,
+    GetSelection, SetSelection, GetUnit,
     GetReforgedMode, SetReforgedMode,
     GetUnitTypeIndex, GetDoodadTypeIndex,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
-  import { createScene, type SceneAPI } from './scene-instances'
+  import { createScene, type SceneAPI, type PickHit, type SelectMode } from './scene-instances'
 
   // Wails drops struct typedefs from models.ts when they appear as map values,
   // so the unit/doodad type-index shapes are declared locally here. Must stay
@@ -28,8 +28,15 @@
   let doodads: main.DoodadDTO[] = []
   let unitTypes: Record<string, UnitTypeInfo> = {}
   let doodadTypes: Record<string, DoodadTypeInfo> = {}
-  let selectedIds = new Set<number>()
+  // Selection state is split by kind because creation_number is per-kind in
+  // WC3 — a unit and a doodad can share an id, so a single Set can't tell
+  // them apart. The full SelectionItemDTO[] mirror (selectionItems) is what
+  // we use to compose new selections on mode='add'/'toggle' picks.
+  let selectedIds = new Set<number>()           // unit creation numbers
+  let selectedDoodadIds = new Set<number>()     // doodad creation numbers
+  let selectionItems: main.SelectionItemDTO[] = []
   let primaryEntity: unitsdoo.Entity | null = null
+  let primaryDoodad: main.DoodadDTO | null = null
   let error: string = ''
   let busy: boolean = false
   let reforged: boolean = false
@@ -47,7 +54,7 @@
       // any persistent setting once we add one. Currently session-only.
       try { reforged = await GetReforgedMode() } catch { reforged = false }
       scene = createScene(canvas, reforged)
-      scene.onUnitClicked((cn) => { SelectUnit(cn) })
+      scene.onPick(handlePick)
       // Devtools / screenshot-automation hook: lets external test drivers
       // pump scene-level operations without needing keyboard simulation.
       ;(window as any).__scene = scene
@@ -66,7 +73,10 @@
         unitTypes = {}
         doodadTypes = {}
         selectedIds = new Set()
+        selectedDoodadIds = new Set()
+        selectionItems = []
         primaryEntity = null
+        primaryDoodad = null
       }
     })
     // Dev-only animation poke from App.SetUnitAnimation (devtools / MCP).
@@ -75,20 +85,23 @@
       scene?.setUnitAnimation(payload.creation_number, payload.anim_name)
     })
     EventsOn(SEL_EVENT, async (s: main.SelectionDTO) => {
-      const ids = new Set<number>()
-      for (const item of s.items || []) {
-        if (item.kind === 'unit' || item.kind === 'item') ids.add(item.id)
-      }
-      selectedIds = ids
-      scene?.setSelected(ids)
-      // Fetch full entity for the primary selection (or first item).
-      const primaryCn = (s.items && s.items.length > 0)
-        ? s.items[Math.max(0, Math.min(s.primary, s.items.length - 1))].id
-        : null
-      if (primaryCn != null) {
-        try { primaryEntity = await GetUnit(primaryCn) } catch { primaryEntity = null }
-      } else {
+      ingestSelection(s)
+      // Primary entity fetch — kind-aware so doodad primaries don't crash
+      // through GetUnit and stay perma-"Loading…".
+      const items = s.items || []
+      if (items.length === 0) {
         primaryEntity = null
+        primaryDoodad = null
+        return
+      }
+      const idx = Math.max(0, Math.min(s.primary, items.length - 1))
+      const primary = items[idx]
+      if (primary.kind === 'doodad') {
+        primaryEntity = null
+        primaryDoodad = doodads.find(d => d.creation_number === primary.id) ?? null
+      } else {
+        primaryDoodad = null
+        try { primaryEntity = await GetUnit(primary.id) } catch { primaryEntity = null }
       }
     })
 
@@ -96,8 +109,68 @@
     status = s
     if (s.loaded) await reloadMap()
     const sel = await GetSelection()
-    selectedIds = new Set((sel.items || []).map(i => i.id))
+    ingestSelection(sel)
   })
+
+  // Mirror Go-side selection into the local split sets + the scene-side tint.
+  // The scene's tint maps are keyed by kind, so we must hand it units and
+  // doodads separately — see scene-instances.setSelected.
+  function ingestSelection(s: main.SelectionDTO) {
+    const items = s.items || []
+    const u = new Set<number>()
+    const d = new Set<number>()
+    for (const it of items) {
+      if (it.kind === 'doodad') d.add(it.id)
+      else u.add(it.id) // 'unit' | 'item' | any future kind that lives in units.doo
+    }
+    selectedIds = u
+    selectedDoodadIds = d
+    selectionItems = items
+    scene?.setSelected(u, d)
+  }
+
+  // Picker entry point. The scene fires hits + a combine-mode based on
+  // modifier keys (set/add/toggle); we compose against the current Go-side
+  // selection and push the result back through App.SetSelection. The Go
+  // side owns canonical selection state, so we always round-trip through it
+  // rather than mutating local state and hoping the event catches up.
+  async function handlePick(hits: PickHit[], mode: SelectMode) {
+    const next = composeSelection(selectionItems, hits, mode)
+    await SetSelection(next.map(it => ({ kind: it.kind, id: it.id })))
+  }
+
+  // Pure composition: takes the current selection + new hits + mode, returns
+  // the new selection array. Items are de-duplicated by (kind, id).
+  function composeSelection(
+    current: main.SelectionItemDTO[],
+    hits: PickHit[],
+    mode: SelectMode,
+  ): main.SelectionItemDTO[] {
+    const key = (kind: string, id: number) => `${kind}:${id}`
+    if (mode === 'set') {
+      const seen = new Set<string>()
+      const out: main.SelectionItemDTO[] = []
+      for (const h of hits) {
+        const k = key(h.kind, h.id)
+        if (seen.has(k)) continue
+        seen.add(k)
+        out.push({ kind: h.kind, id: h.id })
+      }
+      return out
+    }
+    const map = new Map<string, main.SelectionItemDTO>()
+    for (const it of current) map.set(key(it.kind, it.id), { kind: it.kind, id: it.id })
+    if (mode === 'add') {
+      for (const h of hits) map.set(key(h.kind, h.id), { kind: h.kind, id: h.id })
+    } else { // toggle
+      for (const h of hits) {
+        const k = key(h.kind, h.id)
+        if (map.has(k)) map.delete(k)
+        else map.set(k, { kind: h.kind, id: h.id })
+      }
+    }
+    return [...map.values()]
+  }
 
   onDestroy(() => {
     EventsOff(SEL_EVENT)
@@ -164,7 +237,10 @@
       units = []
       doodads = []
       selectedIds = new Set()
+      selectedDoodadIds = new Set()
+      selectionItems = []
       primaryEntity = null
+      primaryDoodad = null
       // No clean "unload map" in mdx-m3-viewer; we'd recreate the viewer
       // on close. For now the canvas just keeps the last-loaded map until
       // a new one is opened.
@@ -173,12 +249,21 @@
     }
   }
 
-  async function clickRow(cn: number) { await SelectUnit(cn) }
+  // Row click → kind-aware single-select via Go. Mirrors plain-click in the
+  // viewport (mode='set'). Modifier-held row clicks fall through to the same
+  // composer so shift/ctrl in the Explorer behaves like in the viewport.
+  async function clickRow(e: MouseEvent, kind: 'unit' | 'doodad', id: number) {
+    const mode: SelectMode = e.ctrlKey || e.metaKey
+      ? 'toggle'
+      : (e.shiftKey ? 'add' : 'set')
+    const next = composeSelection(selectionItems, [{ kind, id }], mode)
+    await SetSelection(next.map(it => ({ kind: it.kind, id: it.id })))
+  }
 
-  function panToUnit(e: Event, u: main.UnitDTO) {
+  function panToEntity(e: Event, pos: number[]) {
     e.stopPropagation()  // don't trigger row selection
-    if (u.position && u.position.length >= 2) {
-      scene?.panTo(u.position[0], u.position[1])
+    if (pos && pos.length >= 2) {
+      scene?.panTo(pos[0], pos[1])
     }
   }
 
@@ -224,6 +309,69 @@
 
   // Doodad count for Explorer header.
   $: doodadCount = doodads.length
+
+  // ----- Doodad explorer grouping -----
+  //
+  // Doodads bucket by their SLK `category` column, resolved via the WESTRING
+  // table (typeindex.go: doodadCategoryKeys → "Trees/Destructibles",
+  // "Structures", "Cliff/Terrain", etc.). Unknown / empty categories collapse
+  // into a single "Uncategorized" group so derived custom types without a
+  // category override still surface in the list.
+  //
+  // Groups are emitted in a stable curated order — the rest of the buckets
+  // come after, alphabetized, so a map that introduces a novel category via
+  // custom doodads still shows up predictably.
+  type DGroup = { id: string; label: string; entries: main.DoodadDTO[] }
+  $: doodadGroups = bucketDoodads(doodads, doodadTypes)
+  function doodadDisplayName(d: main.DoodadDTO): string {
+    const info = doodadTypes[d.type_id]
+    return info && info.name ? info.name : d.type_id
+  }
+  function doodadCategoryFor(d: main.DoodadDTO): string {
+    const info = doodadTypes[d.type_id]
+    return info ? info.category : ''
+  }
+  const DOODAD_CAT_ORDER = [
+    'Trees/Destructibles',
+    'Structures',
+    'Props',
+    'Bridges/Ramps',
+    'Cliff/Terrain',
+    'Terrain',
+    'Water',
+    'Environment',
+    'Pathing Blockers',
+    'Cinematic',
+  ]
+  function bucketDoodads(ds: main.DoodadDTO[], types: Record<string, DoodadTypeInfo>): DGroup[] {
+    const buckets = new Map<string, main.DoodadDTO[]>()
+    for (const d of ds) {
+      const info = types[d.type_id]
+      const cat = (info && info.category) ? info.category : 'Uncategorized'
+      let arr = buckets.get(cat)
+      if (!arr) { arr = []; buckets.set(cat, arr) }
+      arr.push(d)
+    }
+    const out: DGroup[] = []
+    // Curated order first.
+    for (const label of DOODAD_CAT_ORDER) {
+      const arr = buckets.get(label)
+      if (arr && arr.length) {
+        out.push({ id: 'd:' + label, label, entries: arr })
+        buckets.delete(label)
+      }
+    }
+    // Remaining categories alphabetized; "Uncategorized" pinned last.
+    const rest = [...buckets.keys()].sort((a, b) => {
+      if (a === 'Uncategorized') return 1
+      if (b === 'Uncategorized') return -1
+      return a.localeCompare(b)
+    })
+    for (const label of rest) {
+      out.push({ id: 'd:' + label, label, entries: buckets.get(label)! })
+    }
+    return out
+  }
 
   // ----- Properties helpers -----
 
@@ -287,12 +435,12 @@
             <ul>
               {#each g.entries as u (u.creation_number)}
                 <li class:selected={selectedIds.has(u.creation_number)}
-                    on:click={() => clickRow(u.creation_number)}
+                    on:click={(e) => clickRow(e, 'unit', u.creation_number)}
                     title="{u.type_id} #{u.creation_number}">
                   <span class="name">{unitDisplayName(u)}</span>
                   <span class="cat dim">{unitCategory(u)}</span>
                   <button class="pan-btn"
-                          on:click={(e) => panToUnit(e, u)}
+                          on:click={(e) => panToEntity(e, u.position)}
                           title="Pan camera to this entity">⊕</button>
                 </li>
               {/each}
@@ -302,8 +450,25 @@
         {#if doodadCount > 0}
           <div class="category">
             <header class="cat-header">Doodads <span class="count">{doodadCount}</span></header>
-            <div class="dim doodad-note">Decorative — visible in viewport; clicking not yet wired.</div>
           </div>
+          {#each doodadGroups as g (g.id)}
+            <div class="category subcategory">
+              <header class="cat-header sub">{g.label} <span class="count">{g.entries.length}</span></header>
+              <ul>
+                {#each g.entries as d (d.creation_number)}
+                  <li class:selected={selectedDoodadIds.has(d.creation_number)}
+                      on:click={(e) => clickRow(e, 'doodad', d.creation_number)}
+                      title="{d.type_id} #{d.creation_number}">
+                    <span class="name">{doodadDisplayName(d)}</span>
+                    <span class="cat dim">{doodadCategoryFor(d)}</span>
+                    <button class="pan-btn"
+                            on:click={(e) => panToEntity(e, d.position)}
+                            title="Pan camera to this doodad">⊕</button>
+                  </li>
+                {/each}
+              </ul>
+            </div>
+          {/each}
         {/if}
       {/if}
     </aside>
@@ -314,9 +479,32 @@
 
     <aside class="panel properties">
       <header class="panel-header">Properties</header>
-      {#if !primaryEntity}
+      {#if primaryDoodad}
+        {@const d = primaryDoodad}
+        <dl class="props">
+          <dt>Kind</dt>               <dd>Doodad</dd>
+          <dt>Type ID</dt>            <dd class="mono">{d.type_id}</dd>
+          {#if d.skin_id && d.skin_id !== d.type_id}
+            <dt>Skin ID</dt>          <dd class="mono">{d.skin_id}</dd>
+          {/if}
+          <dt>Creation #</dt>         <dd class="mono">{d.creation_number}</dd>
+          <dt>Name</dt>               <dd>{doodadDisplayName(d)}</dd>
+          <dt>Category</dt>           <dd>{doodadCategoryFor(d)}</dd>
+
+          <dt class="section">Transform</dt>
+          <dt>Position</dt>           <dd class="mono">{fmtVec3(d.position)}</dd>
+          <dt>Rotation</dt>           <dd class="mono">{fmt(d.rotation, 2)}</dd>
+          <dt>Scale</dt>              <dd class="mono">{fmtScale(d.scale)}</dd>
+          <dt>Variation</dt>          <dd>{d.variation}</dd>
+
+          {#if d.life !== 0xFF}
+            <dt class="section">Destructible</dt>
+            <dt>Life %</dt>           <dd>{d.life}%</dd>
+          {/if}
+        </dl>
+      {:else if !primaryEntity}
         <div class="empty">
-          {#if selectedIds.size === 0}
+          {#if selectedIds.size === 0 && selectedDoodadIds.size === 0}
             Select an entity to see its properties.
           {:else}
             Loading…
@@ -476,7 +664,13 @@
   }
   .explorer li:hover .pan-btn { display: inline-flex; }
   .explorer li .pan-btn:hover { background: #3f3f46; color: #e4e4e7; }
-  .doodad-note { padding: 4px 14px 8px; font-size: 11px; color: #71717a; }
+  /* Doodad sub-buckets sit visually under the "Doodads" header with a slight
+     indent on the category label so the hierarchy reads at a glance. */
+  .explorer > .category.subcategory { padding: 2px 0 4px; border-bottom: 0; }
+  .explorer .cat-header.sub {
+    padding-left: 22px; color: #a1a1aa; font-weight: 500; font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
 
   /* Properties */
   .properties { overflow-y: auto; }
