@@ -19,6 +19,7 @@ const (
 	eventSelectionChanged = "wc3-forge:selection-changed"
 	eventMapChanged       = "wc3-forge:map-changed"
 	eventDirtyChanged     = "wc3-forge:dirty-changed"
+	eventEntityChanged    = "wc3-forge:entity-changed"
 	eventDevSetAnim       = "wc3-forge:dev-set-anim"
 )
 
@@ -75,6 +76,17 @@ func (a *App) startup(ctx context.Context) {
 			title = "* wc3-forge"
 		}
 		runtime.WindowSetTitle(a.ctx, title)
+	})
+	// Forward entity-change notifications (MoveUnit, future SetRotation/etc.)
+	// so two stale views can refresh in lockstep:
+	//   - Properties panel re-fetches the primary entity to repaint inputs
+	//   - Scene re-positions/re-rotates/etc. the rendered model
+	// The payload rides the new position (for Field=="position") so the
+	// scene subscriber doesn't need a follow-up fetch — see EntityChange.
+	// Wails marshals the struct via its json tags; the JS side reads
+	// camel-case-not (the tags are lowercase: kind/id/field/position).
+	forge.Current.OnEntityChanged(func(c forge.EntityChange) {
+		runtime.EventsEmit(a.ctx, eventEntityChanged, c)
 	})
 }
 

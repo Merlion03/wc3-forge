@@ -58,6 +58,7 @@
   const SEL_EVENT = 'wc3-forge:selection-changed'
   const MAP_EVENT = 'wc3-forge:map-changed'
   const DIRTY_EVENT = 'wc3-forge:dirty-changed'
+  const ENTITY_EVENT = 'wc3-forge:entity-changed'
   const DEV_ANIM_EVENT = 'wc3-forge:dev-set-anim'
 
   onMount(async () => {
@@ -107,6 +108,28 @@
     // document.title isn't visible to the user.
     EventsOn(DIRTY_EVENT, (payload: { dirty: boolean }) => {
       dirty = !!payload?.dirty
+    })
+    // Entity-changed: a mutation landed on the Go side (MoveUnit from the UI
+    // OR the MCP bridge OR any future code path). If the changed entity is
+    // the one we're currently displaying in the Properties panel, re-fetch
+    // it so the inputs reflect new truth. The scene's own subscription
+    // (scene-instances.ts) handles the 3D-model repaint independently —
+    // both refreshes are driven by this same Go-side event.
+    //
+    // Field-aware: today only "position" fires, but the handler intentionally
+    // re-fetches the whole entity rather than patching one field so future
+    // Field values (rotation/type/etc.) work without changes here.
+    EventsOn(ENTITY_EVENT, async (payload: { kind: string; id: number; field: string; position: number[] }) => {
+      if (!payload) return
+      // Only refresh Properties when the changed entity matches our primary.
+      // Unit-kind today; if/when primaryDoodad becomes mutable, branch on
+      // payload.kind === 'doodad' here too.
+      if (payload.kind !== 'unit') return
+      if (!primaryEntity) return
+      if (primaryEntity.CreationNumber !== payload.id) return
+      try { primaryEntity = await GetUnit(payload.id) } catch { /* ignore — entity may have been removed */ }
+      // posEdit re-syncs automatically via the `$: if (singleUnitSelected && primaryEntity)`
+      // reactive statement further down — reassigning primaryEntity triggers it.
     })
     EventsOn(SEL_EVENT, async (s: main.SelectionDTO) => {
       ingestSelection(s)
@@ -239,6 +262,7 @@
     EventsOff(SEL_EVENT)
     EventsOff(MAP_EVENT)
     EventsOff(DIRTY_EVENT)
+    EventsOff(ENTITY_EVENT)
     EventsOff(DEV_ANIM_EVENT)
     window.removeEventListener('keydown', onGlobalKeyDown)
     scene?.dispose()
@@ -508,14 +532,11 @@
     }
     try {
       await MoveUnit(cn, next.x, next.y, next.z)
-      // Move the rendered instance in the viewport too — Go owns disk truth,
-      // the scene owns visual truth, and without this call the model stays
-      // at its old position until the map is re-opened. Done BEFORE the
-      // GetUnit refresh so the scene is in sync before the next render frame.
-      scene?.updateUnitPosition(cn, next.x, next.y, next.z)
-      // Refresh the entity so the inventory rows + edit buffer reflect the
-      // server-side truth after the write.
-      try { primaryEntity = await GetUnit(cn) } catch {}
+      // The Go-side OnEntityChanged event drives both the scene re-paint
+      // (scene-instances.ts subscribes to wc3-forge:entity-changed) AND the
+      // Properties re-fetch (above in onMount). No explicit scene call here:
+      // every mutation path — UI input, MCP bridge, future code — flows
+      // through the same event, so this branch needs no special handling.
     } catch (e) {
       // MoveUnit failure → snap the buffer back to the entity's real value.
       console.error('MoveUnit failed:', e)

@@ -195,6 +195,81 @@ func TestMoveUnit_UnknownCN(t *testing.T) {
 	}
 }
 
+// TestMoveUnit_FiresEntityChanged asserts MoveUnit notifies OnEntityChanged
+// subscribers with a "position" Field and the new coordinates baked into the
+// payload. Bridge-driven and UI-driven move paths both flow through this
+// event so the Properties panel + 3D scene can repaint without polling.
+//
+// Also verifies the no-op short-circuit does NOT fire entity-changed (no
+// real mutation, no need to repaint).
+func TestMoveUnit_FiresEntityChanged(t *testing.T) {
+	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("fixture %q not available: %v", src, err)
+	}
+	tmp := t.TempDir()
+	entries, _ := os.ReadDir(src)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
+		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
+	}
+	s := &Session{}
+	var changes []EntityChange
+	s.OnEntityChanged(func(c EntityChange) { changes = append(changes, c) })
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	units := s.Units()
+	if units == nil || len(units.Entities) == 0 {
+		t.Fatalf("expected entities in fixture, got none")
+	}
+	first := units.Entities[0]
+	cn := first.CreationNumber
+	pos := first.Position
+
+	// Real move → expect exactly one entity-changed event with the new
+	// position and the right kind/id/field tags.
+	newPos := [3]float32{pos[0] + 50, pos[1] - 25, pos[2]}
+	if err := s.MoveUnit(cn, newPos[0], newPos[1], newPos[2]); err != nil {
+		t.Fatalf("MoveUnit: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 entity-change event, got %d: %+v", len(changes), changes)
+	}
+	got := changes[0]
+	if got.Kind != "unit" {
+		t.Errorf("Kind = %q, want %q", got.Kind, "unit")
+	}
+	if got.ID != cn {
+		t.Errorf("ID = %d, want %d", got.ID, cn)
+	}
+	if got.Field != "position" {
+		t.Errorf("Field = %q, want %q", got.Field, "position")
+	}
+	if got.Position != newPos {
+		t.Errorf("Position = %v, want %v", got.Position, newPos)
+	}
+
+	// Same-position move (no-op short-circuit) → no additional event.
+	if err := s.MoveUnit(cn, newPos[0], newPos[1], newPos[2]); err != nil {
+		t.Fatalf("MoveUnit (no-op): %v", err)
+	}
+	if len(changes) != 1 {
+		t.Errorf("no-op MoveUnit fired extra entity-change event(s): %+v", changes)
+	}
+
+	// Different move → second event.
+	if err := s.MoveUnit(cn, newPos[0]+10, newPos[1], newPos[2]); err != nil {
+		t.Fatalf("MoveUnit (second real): %v", err)
+	}
+	if len(changes) != 2 {
+		t.Errorf("expected 2 entity-change events after second real move, got %d", len(changes))
+	}
+}
+
 // TestMPQ_SaveReturnsSentinel asserts MPQ-backed sessions reject Save with
 // the documented sentinel error so the UI can show a friendly toast.
 func TestMPQ_SaveReturnsSentinel(t *testing.T) {

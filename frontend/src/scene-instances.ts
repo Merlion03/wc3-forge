@@ -33,6 +33,7 @@ import {
   ListUnits, ListDoodads, GetUnitTypeIndex, GetDoodadTypeIndex, GetTerrain,
   GetPathingMap,
 } from '../wailsjs/go/main/App.js'
+import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
 import { buildTerrain, type TerrainMesh } from './terrain'
 import { buildWater, type WaterMesh } from './water'
 import { buildPathingOverlay, type PathingOverlay } from './pathing'
@@ -906,6 +907,48 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   document.addEventListener('mouseup', onDocMouseUp)
   window.addEventListener('keydown', onWindowKeyDown)
 
+  // Internal helper for re-positioning a placed unit instance to (x, y, z) in
+  // game-space. Used by both the public SceneAPI.updateUnitPosition (kept for
+  // direct callers) AND the entity-changed event subscriber below.
+  //
+  // Mirrors placeUnit's Z-offset: the type's move_height was applied at
+  // placement and must be re-applied here so the instance lands at the same
+  // visual offset above the ground as a freshly-placed unit at the same
+  // game coords.
+  function updateUnitPositionImpl(cn: number, x: number, y: number, z: number): void {
+    const inst = unitInstances.get(cn)
+    // Defense-in-depth: silently skip if the cn isn't a placed unit. Slocs
+    // (rendered via slocRenderer, not unitInstances), doodads, and stale
+    // creation_numbers from a race with map-changed all silently return.
+    if (!inst) return
+    const typeId = (inst as any).__wc3ForgeTypeId as string | undefined
+    const info = typeId ? unitTypeIndexCache?.[typeId] : undefined
+    const moveHeight = info?.move_height ?? 0
+    // setLocation (not move) — move() is ADDITIVE (vec3.add into
+    // localLocation). It only worked as "set" in placeUnit because the
+    // instance was fresh with localLocation=[0,0,0]. Here localLocation is
+    // already non-zero, so we need an absolute set.
+    ;(inst as any).setLocation([x, y, z + moveHeight])
+  }
+
+  // Subscribe to Go-side entity-change events. Any mutation that fires
+  // OnEntityChanged (MoveUnit today; future SetRotation/etc.) flows through
+  // here, regardless of whether the mutator was the JS Properties panel, the
+  // MCP bridge, or any future code path. This is what keeps the 3D scene in
+  // sync with bridge-driven edits without polling.
+  //
+  // Field-aware: ignores changes whose Field isn't one we handle (no-op for
+  // future Field values that don't map to scene state).
+  const ENTITY_EVENT = 'wc3-forge:entity-changed'
+  EventsOn(ENTITY_EVENT, (payload: { kind: string; id: number; field: string; position: number[] }) => {
+    if (!payload || payload.kind !== 'unit') return
+    if (payload.field === 'position') {
+      const p = payload.position
+      if (!p || p.length < 3) return
+      updateUnitPositionImpl(payload.id, p[0], p[1], p[2])
+    }
+  })
+
   return {
     async loadMap(opts?: { keepCamera?: boolean }) {
       const keepCamera = !!opts?.keepCamera
@@ -1080,6 +1123,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       document.removeEventListener('mousemove', onDocMouseMove)
       document.removeEventListener('mouseup', onDocMouseUp)
       window.removeEventListener('keydown', onWindowKeyDown)
+      // Drop the entity-changed subscription. App.svelte also calls
+      // EventsOff for this name on its own unmount; the Wails runtime is
+      // tolerant of duplicate offs (no-op when no listener is attached).
+      EventsOff(ENTITY_EVENT)
       try { overlay.remove() } catch { /* parent already gone */ }
       if (slocRenderer) {
         slocRenderer.dispose()
@@ -1152,27 +1199,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       camera.setPivot(x, y, z)
     },
     updateUnitPosition(cn: number, x: number, y: number, z: number) {
-      const inst = unitInstances.get(cn)
-      // Defense-in-depth: silently skip if the cn isn't a placed unit. The
-      // Properties-panel position-edit gate (singleUnitSelected) already
-      // prevents editing slocs / doodads / multi-select, but a stale cn from
-      // a race with map-changed should never crash the renderer.
-      if (!inst) return
-      // Mirror placeUnit's Z-offset. The unitTypeIndexCache is keyed by
-      // FourCC type_id and the lib's instance doesn't carry that, so
-      // placeUnit stashes it onto inst.__wc3ForgeTypeId at placement time
-      // and we read it back here. Missing-cache or missing-info shouldn't
-      // happen in practice (we only edit units that are already placed +
-      // visible, so the cache is warm) but a 0 fallback keeps the call
-      // sound when it does.
-      const typeId = (inst as any).__wc3ForgeTypeId as string | undefined
-      const info = typeId ? unitTypeIndexCache?.[typeId] : undefined
-      const moveHeight = info?.move_height ?? 0
-      // setLocation (not move) — move() is ADDITIVE (vec3.add into
-      // localLocation). It only worked as "set" in placeUnit because the
-      // instance was fresh with localLocation=[0,0,0]. Here localLocation is
-      // already non-zero, so we need an absolute set.
-      ;(inst as any).setLocation([x, y, z + moveHeight])
+      // Delegates to the shared impl so direct callers and the
+      // entity-changed event subscriber run identical code.
+      updateUnitPositionImpl(cn, x, y, z)
     },
     setUnitAnimation(cn: number, animName: string): boolean {
       const inst = unitInstances.get(cn)

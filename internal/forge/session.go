@@ -131,6 +131,33 @@ type Session struct {
 	// notification pattern (lock-free copy → invoke listeners).
 	dirtyUnits     bool
 	dirtyListeners []func(bool)
+
+	// Entity-change bus — fired from any mutator (MoveUnit today; SetRotation,
+	// SetType, etc. in the future). Subscribers refresh stale views of the
+	// changed entity (Properties panel re-fetches, scene re-positions the
+	// model). Mirrors the OnDirtyChanged pattern: slice of listeners, copied
+	// under the read lock and invoked outside it so listeners may call back
+	// into Session safely. Distinct from OnDirtyChanged because dirty fires
+	// only on the first edit per save-cycle (boolean transition), whereas
+	// every mutation needs to repaint UI even when the session was already
+	// dirty.
+	entityListeners []func(EntityChange)
+}
+
+// EntityChange is the payload for OnEntityChanged. Kind/ID identify which
+// entity changed; Field names the conceptual property that moved ("position"
+// today, room for "rotation"/"type"/etc. as more mutators land). Position
+// rides on the event for Field=="position" so subscribers don't need a
+// callback fetch to repaint the scene — the new value is right there.
+//
+// Forward-compatible by design: new mutators add new Field strings, and the
+// Position field stays a [3]float32 (zero-valued + ignored by non-position
+// subscribers).
+type EntityChange struct {
+	Kind     string     `json:"kind"`     // "unit" today; "doodad"/etc. forward-compatible
+	ID       uint32     `json:"id"`       // creation_number (per-kind in WC3)
+	Field    string     `json:"field"`    // "position" today; "rotation"/"type"/etc. later
+	Position [3]float32 `json:"position"` // game coords for Field=="position", else zero
 }
 
 // SelectionState is the editor's current selection. Items are entity IDs in
@@ -602,6 +629,17 @@ func (s *Session) MoveUnit(creationNumber uint32, x, y, z float32) error {
 	if !wasDirty {
 		s.notifyDirty(true)
 	}
+	// Notify entity-change subscribers AFTER dirty so the Save pill flips
+	// before Properties + scene repaint — keeps the visible-state ordering
+	// consistent with the older UI-driven path (which fired dirty via the
+	// MoveUnit call, then refreshed the scene via the explicit JS-side
+	// scene.updateUnitPosition immediately after).
+	s.notifyEntityChanged(EntityChange{
+		Kind:     "unit",
+		ID:       creationNumber,
+		Field:    "position",
+		Position: [3]float32{x, y, z},
+	})
 	return nil
 }
 
@@ -678,5 +716,30 @@ func (s *Session) notifyDirty(dirty bool) {
 	s.mu.RUnlock()
 	for _, fn := range listeners {
 		fn(dirty)
+	}
+}
+
+// OnEntityChanged subscribes to entity-mutation notifications. Fires AFTER the
+// session lock is released, so listeners may safely call back into Session.
+// Payload carries the (kind, id) of the changed entity, the conceptual field
+// that moved, and (for position-field changes) the new coordinates — so
+// scene-side subscribers don't need a round-trip fetch to repaint.
+//
+// Today only Field=="position" is emitted (from MoveUnit). Future mutators
+// (rotation, type swap) emit their own Field tags and either populate fields
+// added here, or expose their own per-event payload type.
+func (s *Session) OnEntityChanged(fn func(EntityChange)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entityListeners = append(s.entityListeners, fn)
+}
+
+func (s *Session) notifyEntityChanged(c EntityChange) {
+	s.mu.RLock()
+	listeners := make([]func(EntityChange), len(s.entityListeners))
+	copy(listeners, s.entityListeners)
+	s.mu.RUnlock()
+	for _, fn := range listeners {
+		fn(c)
 	}
 }
