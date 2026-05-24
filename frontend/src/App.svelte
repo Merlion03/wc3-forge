@@ -5,6 +5,7 @@
     GetSelection, SetSelection, GetUnit,
     GetReforgedMode, SetReforgedMode,
     GetUnitTypeIndex, GetDoodadTypeIndex,
+    MoveUnit, IsDirty, SaveMap,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
@@ -44,9 +45,12 @@
 
   let canvas: HTMLCanvasElement
   let scene: SceneAPI | null = null
+  let dirty: boolean = false
+  let saving: boolean = false
 
   const SEL_EVENT = 'wc3-forge:selection-changed'
   const MAP_EVENT = 'wc3-forge:map-changed'
+  const DIRTY_EVENT = 'wc3-forge:dirty-changed'
   const DEV_ANIM_EVENT = 'wc3-forge:dev-set-anim'
 
   onMount(async () => {
@@ -86,6 +90,12 @@
     EventsOn(DEV_ANIM_EVENT, (payload: { creation_number: number; anim_name: string }) => {
       scene?.setUnitAnimation(payload.creation_number, payload.anim_name)
     })
+    // Dirty-state changes (MoveUnit edits, Save flushes). Keeps the header
+    // Save pill's modified-dot indicator reactive without polling.
+    EventsOn(DIRTY_EVENT, (payload: { dirty: boolean }) => {
+      dirty = !!payload?.dirty
+      updateTitleDirty()
+    })
     EventsOn(SEL_EVENT, async (s: main.SelectionDTO) => {
       ingestSelection(s)
       // Primary entity fetch — kind-aware so doodad primaries don't crash
@@ -112,7 +122,53 @@
     if (s.loaded) await reloadMap()
     const sel = await GetSelection()
     ingestSelection(sel)
+    try { dirty = await IsDirty() } catch { dirty = false }
+    updateTitleDirty()
+    window.addEventListener('keydown', onGlobalKeyDown)
   })
+
+  // Global Ctrl+S / Cmd+S → save. preventDefault() stops the browser's
+  // "save page as…" dialog. The scene-instances Escape handler is keyed on
+  // 'Escape' only so this doesn't collide. We intentionally leave inputs
+  // alone (Ctrl+S in an X/Y/Z input still saves — there's no reason an
+  // input would want to swallow Ctrl+S).
+  function onGlobalKeyDown(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 's' || e.key === 'S')) {
+      e.preventDefault()
+      void doSave()
+    }
+  }
+
+  async function doSave() {
+    if (!status.loaded || saving) return
+    saving = true
+    error = ''
+    try {
+      await SaveMap()
+      // dirty event will arrive; refresh defensively in case nothing was dirty.
+      try { dirty = await IsDirty() } catch {}
+      updateTitleDirty()
+    } catch (e) {
+      // MPQ-write rejection is the expected hot path until we ship MPQ writing.
+      const msg = String(e)
+      if (/MPQ archive writing is not yet implemented/i.test(msg)) {
+        error = 'This map was opened from an MPQ archive. Extract it to a folder to enable saving.'
+      } else {
+        error = 'save failed: ' + msg
+      }
+    } finally {
+      saving = false
+    }
+  }
+
+  // Title-bar dirty prefix — small polish so the OS window-list shows
+  // unsaved state at a glance. The original document title comes from
+  // index.html ("wc3-forge").
+  let baseTitle = ''
+  function updateTitleDirty() {
+    if (!baseTitle) baseTitle = document.title.replace(/^\*\s+/, '')
+    document.title = dirty ? '* ' + baseTitle : baseTitle
+  }
 
   // Mirror Go-side selection into the local split sets + the scene-side tint.
   // The scene's tint maps are keyed by kind, so we must hand it units and
@@ -177,7 +233,9 @@
   onDestroy(() => {
     EventsOff(SEL_EVENT)
     EventsOff(MAP_EVENT)
+    EventsOff(DIRTY_EVENT)
     EventsOff(DEV_ANIM_EVENT)
+    window.removeEventListener('keydown', onGlobalKeyDown)
     scene?.dispose()
   })
 
@@ -402,6 +460,83 @@
   function isHero(e: unitsdoo.Entity): boolean {
     return e.HeroLevel > 0 || (e.TypeID.length > 0 && e.TypeID[0] >= 'A' && e.TypeID[0] <= 'Z')
   }
+
+  // Single-unit selected? Drives the editable X/Y/Z inputs in the Properties
+  // panel. Multi-select OR doodad/sloc selection → read-only static text.
+  $: singleUnitSelected = (
+    selectionItems.length === 1 &&
+    selectionItems[0].kind === 'unit' &&
+    primaryEntity !== null
+  )
+
+  // Local edit buffers so the inputs don't reset on every keystroke as the
+  // bound entity object refreshes from selection events. We commit on Enter
+  // or blur, then refresh primaryEntity from Go so on-disk-truth wins on any
+  // failed write.
+  let posEdit: { x: string; y: string; z: string } = { x: '', y: '', z: '' }
+  $: if (singleUnitSelected && primaryEntity) {
+    // Seed buffers when the primary entity changes (new selection).
+    posEdit = {
+      x: fmt(primaryEntity.Position[0]),
+      y: fmt(primaryEntity.Position[1]),
+      z: fmt(primaryEntity.Position[2]),
+    }
+  }
+
+  async function commitPositionEdit(axis: 'x' | 'y' | 'z') {
+    if (!primaryEntity) return
+    const cn = primaryEntity.CreationNumber
+    const next = {
+      x: parseFloat(posEdit.x),
+      y: parseFloat(posEdit.y),
+      z: parseFloat(posEdit.z),
+    }
+    // If the user typed garbage, revert that field to the entity's value and
+    // bail before issuing the move (don't move the unit to NaN).
+    if (!Number.isFinite(next[axis])) {
+      posEdit = {
+        x: fmt(primaryEntity.Position[0]),
+        y: fmt(primaryEntity.Position[1]),
+        z: fmt(primaryEntity.Position[2]),
+      }
+      return
+    }
+    try {
+      await MoveUnit(cn, next.x, next.y, next.z)
+      // Refresh the entity so the scene + inventory rows reflect the move
+      // (the scene picks up via map-changed / direct redraw separately;
+      // this just keeps the panel buffers honest).
+      try { primaryEntity = await GetUnit(cn) } catch {}
+    } catch (e) {
+      // MoveUnit failure → snap the buffer back to the entity's real value.
+      console.error('MoveUnit failed:', e)
+      error = 'move failed: ' + String(e)
+      if (primaryEntity) {
+        posEdit = {
+          x: fmt(primaryEntity.Position[0]),
+          y: fmt(primaryEntity.Position[1]),
+          z: fmt(primaryEntity.Position[2]),
+        }
+      }
+    }
+  }
+
+  function onPosKeydown(e: KeyboardEvent, axis: 'x' | 'y' | 'z') {
+    if (e.key === 'Enter') {
+      ;(e.currentTarget as HTMLInputElement).blur() // commit via blur path
+    } else if (e.key === 'Escape') {
+      // Revert just this field to truth and blur (don't propagate so the
+      // viewport doesn't also clear selection).
+      e.stopPropagation()
+      if (primaryEntity) {
+        posEdit = {
+          ...posEdit,
+          [axis]: fmt(primaryEntity.Position[axis === 'x' ? 0 : axis === 'y' ? 1 : 2]),
+        }
+      }
+      ;(e.currentTarget as HTMLInputElement).blur()
+    }
+  }
 </script>
 
 <main>
@@ -415,6 +550,15 @@
       {/if}
     </div>
     <div class="actions">
+      {#if status.loaded}
+        <button on:click={doSave}
+                class="mode-toggle save-pill"
+                class:dirty
+                disabled={saving || !dirty}
+                title="Save pending edits (Ctrl+S).">
+          Save{dirty ? ' •' : ''}
+        </button>
+      {/if}
       <button on:click={togglePathing}
               class="mode-toggle"
               class:on={pathingVisible}
@@ -534,7 +678,25 @@
           <dt>Player</dt>             <dd>{playerLabel(e.Player)}</dd>
 
           <dt class="section">Transform</dt>
-          <dt>Position</dt>           <dd class="mono">{fmtVec3(e.Position)}</dd>
+          {#if singleUnitSelected}
+            <dt>Position</dt>
+            <dd class="mono pos-edit">
+              <input type="number" step="1" bind:value={posEdit.x}
+                     on:blur={() => commitPositionEdit('x')}
+                     on:keydown={(e) => onPosKeydown(e, 'x')}
+                     title="X (game coords). Enter to commit, Esc to revert." />
+              <input type="number" step="1" bind:value={posEdit.y}
+                     on:blur={() => commitPositionEdit('y')}
+                     on:keydown={(e) => onPosKeydown(e, 'y')}
+                     title="Y (game coords). Enter to commit, Esc to revert." />
+              <input type="number" step="1" bind:value={posEdit.z}
+                     on:blur={() => commitPositionEdit('z')}
+                     on:keydown={(e) => onPosKeydown(e, 'z')}
+                     title="Z (game coords). Enter to commit, Esc to revert." />
+            </dd>
+          {:else}
+            <dt>Position</dt>         <dd class="mono">{fmtVec3(e.Position)}</dd>
+          {/if}
           <dt>Rotation</dt>           <dd class="mono">{fmt(e.Rotation, 2)}</dd>
           <dt>Scale</dt>              <dd class="mono">{fmtScale(e.Scale)}</dd>
           <dt>Variation</dt>          <dd>{e.Variation}</dd>
@@ -626,6 +788,11 @@
   button.mode-toggle:hover:not(:disabled) { background: #52525b; }
   button.mode-toggle.on { background: #15803d; }
   button.mode-toggle.on:hover:not(:disabled) { background: #166534; }
+  /* Save pill picks up an amber tone while dirty so the bullet glyph reads
+     as a "modified" indicator even at a glance. Disabled (clean) state stays
+     neutral via the base .mode-toggle styling. */
+  button.save-pill.dirty { background: #b45309; }
+  button.save-pill.dirty:hover:not(:disabled) { background: #92400e; }
 
   .error { background: #7f1d1d; color: #fecaca; padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; max-height: 200px; overflow: auto; }
   .error pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
@@ -703,4 +870,23 @@
   .props dd { margin: 0; color: #e4e4e7; }
   .mono { font-family: 'Cascadia Mono', Consolas, monospace; }
   .dim { color: #71717a; }
+
+  /* Position-edit row: 3 narrow numeric inputs, tight gap, monospace for
+     alignment with the rest of the Properties panel. */
+  .pos-edit { display: flex; gap: 4px; }
+  .pos-edit input {
+    width: 64px; padding: 2px 4px;
+    background: #18181b; color: #e4e4e7;
+    border: 1px solid #3f3f46; border-radius: 3px;
+    font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px;
+  }
+  .pos-edit input:focus {
+    outline: none; border-color: #2563eb;
+  }
+  /* Strip the spinner arrows — they crowd the value at this width and most
+     editing happens via type-and-Enter anyway. */
+  .pos-edit input::-webkit-inner-spin-button,
+  .pos-edit input::-webkit-outer-spin-button {
+    -webkit-appearance: none; margin: 0;
+  }
 </style>

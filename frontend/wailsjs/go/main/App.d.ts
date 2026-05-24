@@ -26,20 +26,28 @@ export function GetUnit(arg1:number):Promise<unitsdoo.Entity>;
 
 export function GetUnitTypeIndex():Promise<Record<string, main.UnitTypeInfo>>;
 
+export function IsDirty():Promise<boolean>;
+
 export function ListDoodads():Promise<Array<main.DoodadDTO>>;
 
 export function ListUnits():Promise<Array<main.UnitDTO>>;
 
 export function LogJS(arg1:string):Promise<void>;
 
+export function MoveUnit(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
+
 export function OpenMap(arg1:string):Promise<main.MapStatus>;
 
 export function OpenMapDialog():Promise<string>;
+
+export function SaveMap():Promise<void>;
 
 export function SelectUnit(arg1:number):Promise<main.SelectionDTO>;
 
 export function SetReforgedMode(arg1:boolean):Promise<boolean>;
 
 export function SetSelection(arg1:Array<main.SelectionItemDTO>):Promise<main.SelectionDTO>;
+
+export function SetUnitAnimation(arg1:number,arg2:string):Promise<void>;
 
 export function Status():Promise<main.MapStatus>;

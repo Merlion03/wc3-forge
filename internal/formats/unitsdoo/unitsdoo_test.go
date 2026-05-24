@@ -1,18 +1,23 @@
 package unitsdoo
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
-// Fixture: a real war3mapUnits.doo from wc3-survival-game (Reforged Lua map,
-// version=8 subversion=11, ~10 placed entities including a Goblin Merchant,
-// hero previews, and gym/dummy units).
-const fixturePath = `C:\Users\4step\projects\wc3-survival-game\map\extracted\war3mapUnits.doo`
+// Fixture 1: wc3-survival's war3mapUnits.doo. Small (1166 bytes) — version 8,
+// subversion 11, 10 entities including a sloc + Goblin Merchant + gym units.
+var fixturePathV16 = filepath.Join("testdata", "wc3_survival_v1_6.doo")
+
+// Fixture 2: enfos v2.64f's war3mapUnits.doo. Larger (1396 bytes) — exercises
+// more of the per-entity code paths than the survival fixture.
+var fixturePathEnfo = filepath.Join("testdata", "enfo_ffb_v2_64f.doo")
 
 func TestParse_v1_6(t *testing.T) {
-	data, err := os.ReadFile(fixturePath)
+	data, err := os.ReadFile(fixturePathV16)
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -72,6 +77,50 @@ func TestParse_v1_6(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	t.Logf("Parsed file:\n%s", string(pretty))
+}
+
+// TestRoundTrip asserts that Encode is the byte-faithful inverse of Parse for
+// real-world fixtures. This is the contract that lets Session.Save write the
+// file back through a folder source without corrupting unmodified entities.
+func TestRoundTrip(t *testing.T) {
+	cases := []string{fixturePathV16, fixturePathEnfo}
+	for _, path := range cases {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			orig, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			f, err := Parse(orig)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			out, err := Encode(f)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			if !bytes.Equal(orig, out) {
+				// Find first divergence to make the failure actionable.
+				div := firstDiff(orig, out)
+				t.Fatalf("Encode output != original (sizes orig=%d encoded=%d, first diff at offset %d)",
+					len(orig), len(out), div)
+			}
+		})
+	}
+}
+
+// firstDiff returns the offset of the first differing byte between a and b,
+// or min(len(a), len(b)) if one is a prefix of the other.
+func firstDiff(a, b []byte) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return n
 }
 
 func abs32(f float32) float32 {

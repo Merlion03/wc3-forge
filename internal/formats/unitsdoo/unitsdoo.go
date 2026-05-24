@@ -97,6 +97,32 @@ type Entity struct {
 	CustomColor    int32  // override player color, -1 = use player slot color
 	WaygateRegion  int32  // destination region id for waygates, -1 = none
 	CreationNumber uint32 // stable HiveWE-assigned identity; survives save round-trip
+
+	// --- Round-trip preservation (unexported, set by Parse) ---
+	//
+	// These fields capture on-disk shape that the public fields cannot represent,
+	// so Encode can reproduce the original file byte-for-byte. None of them
+	// participate in JSON (unexported) and consumers that hand-construct Entity
+	// values can leave them zero — Encode falls back to deriving them from the
+	// public fields.
+
+	// scaleRaw is the unscaled scale as it appears in the file. Parse divides by
+	// 128 into Scale, but that mapping is not strictly bidirectional on disk
+	// (some entities — slocs — store raw 1.0, others store 128.0). Encode
+	// prefers scaleRaw when non-zero, otherwise emits Scale * 128.
+	scaleRaw [3]float32
+	// skinIDPresent records whether the on-disk entity carried a skin_id chunk.
+	// At subversion >= 11 this is always true. At subversion 9 the parser uses
+	// a peek heuristic; the result drives whether Encode emits a skin_id chunk
+	// for that entity. (Newly-constructed Entity values default to false at
+	// sub-9 — set SkinID via Parse output if you need it preserved.)
+	skinIDPresent bool
+	// itemDropSetSizes preserves the per-set entry counts so the encoder can
+	// reconstruct the (set_count, [items_in_set_i]*) prefix structure the file
+	// uses. Sum equals len(ItemDrops). If left nil/empty when ItemDrops is
+	// non-empty, Encode emits a single set containing all drops (a defensible
+	// default for hand-constructed entities).
+	itemDropSetSizes []uint32
 }
 
 // ItemDrop is one entry within an item-drop set. Each set fires once on death;
@@ -202,11 +228,16 @@ func readEntity(r *reader, subversion uint32) (Entity, error) {
 	// by 128 (HiveWE's storage convention). We divide here so the wire format
 	// matches the runtime convention used by Lua's BlzSetUnitScale (1.0 = default).
 	// Without this divide, every unit reports scale=128 instead of 1.0.
+	//
+	// scaleRaw captures the on-disk value verbatim — the divide isn't strictly
+	// bidirectional in practice (slocs store raw 1.0, normal units store 128.0)
+	// so byte-faithful Encode needs the original.
 	for i := 0; i < 3; i++ {
 		raw, err := r.readF32()
 		if err != nil {
 			return e, fmt.Errorf("scale[%d]: %w", i, err)
 		}
+		e.scaleRaw[i] = raw
 		e.Scale[i] = raw / 128.0
 	}
 
@@ -232,6 +263,7 @@ func readEntity(r *reader, subversion uint32) (Entity, error) {
 		if e.SkinID, err = r.readFourCC(); err != nil {
 			return e, fmt.Errorf("skin_id: %w", err)
 		}
+		e.skinIDPresent = true
 	}
 
 	if e.Flags, err = r.readU8(); err != nil {
@@ -279,15 +311,18 @@ func readEntity(r *reader, subversion uint32) (Entity, error) {
 	if err != nil {
 		return e, fmt.Errorf("item_drop_set_count: %w", err)
 	}
-	// Flatten all sets into a single []ItemDrop. The Entity struct doesn't
-	// preserve set boundaries — if a future caller needs set-grouping for
-	// faithful round-trip, we'll add a [][]ItemDrop. wc3-forge's current
-	// use case is read-only inspection.
+	// Flatten all sets into a single []ItemDrop, but capture per-set sizes in
+	// itemDropSetSizes so byte-faithful Encode can reconstruct the
+	// (set_count, [items_in_set_i]*) prefix structure.
+	if setCount > 0 {
+		e.itemDropSetSizes = make([]uint32, 0, setCount)
+	}
 	for s := uint32(0); s < setCount; s++ {
 		itemCount, err := r.readU32()
 		if err != nil {
 			return e, fmt.Errorf("drop_set[%d] count: %w", s, err)
 		}
+		e.itemDropSetSizes = append(e.itemDropSetSizes, itemCount)
 		for it := uint32(0); it < itemCount; it++ {
 			var drop ItemDrop
 			if drop.ItemID, err = r.readFourCC(); err != nil {

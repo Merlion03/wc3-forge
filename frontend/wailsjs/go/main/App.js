@@ -46,6 +46,10 @@ export function GetUnitTypeIndex() {
   return window['go']['main']['App']['GetUnitTypeIndex']();
 }
 
+export function IsDirty() {
+  return window['go']['main']['App']['IsDirty']();
+}
+
 export function ListDoodads() {
   return window['go']['main']['App']['ListDoodads']();
 }
@@ -58,12 +62,20 @@ export function LogJS(arg1) {
   return window['go']['main']['App']['LogJS'](arg1);
 }
 
+export function MoveUnit(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['MoveUnit'](arg1, arg2, arg3, arg4);
+}
+
 export function OpenMap(arg1) {
   return window['go']['main']['App']['OpenMap'](arg1);
 }
 
 export function OpenMapDialog() {
   return window['go']['main']['App']['OpenMapDialog']();
+}
+
+export function SaveMap() {
+  return window['go']['main']['App']['SaveMap']();
 }
 
 export function SelectUnit(arg1) {
@@ -76,6 +88,10 @@ export function SetReforgedMode(arg1) {
 
 export function SetSelection(arg1) {
   return window['go']['main']['App']['SetSelection'](arg1);
+}
+
+export function SetUnitAnimation(arg1, arg2) {
+  return window['go']['main']['App']['SetUnitAnimation'](arg1, arg2);
 }
 
 export function Status() {

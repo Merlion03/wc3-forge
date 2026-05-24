@@ -18,6 +18,7 @@ import (
 const (
 	eventSelectionChanged = "wc3-forge:selection-changed"
 	eventMapChanged       = "wc3-forge:map-changed"
+	eventDirtyChanged     = "wc3-forge:dirty-changed"
 	eventDevSetAnim       = "wc3-forge:dev-set-anim"
 )
 
@@ -58,6 +59,12 @@ func (a *App) startup(ctx context.Context) {
 	// --open flag at startup) to the frontend so it reloads.
 	forge.Current.OnMapChanged(func(loaded bool) {
 		runtime.EventsEmit(a.ctx, eventMapChanged, map[string]any{"loaded": loaded})
+	})
+	// Forward dirty-state changes (MoveUnit edits, Save flushes) so the UI
+	// can keep its modified-dot + Save-button enable state in sync without
+	// polling. Payload mirrors the map-changed shape: { dirty: bool }.
+	forge.Current.OnDirtyChanged(func(dirty bool) {
+		runtime.EventsEmit(a.ctx, eventDirtyChanged, map[string]any{"dirty": dirty})
 	})
 }
 
@@ -460,4 +467,29 @@ func (a *App) GetUnit(creationNumber uint32) (*unitsdoo.Entity, error) {
 		}
 	}
 	return nil, fmt.Errorf("no entity with creation_number %d", creationNumber)
+}
+
+// MoveUnit relocates the unit with the given creation_number to the supplied
+// game coordinates. The Properties panel calls this on X/Y/Z edit-commit.
+//
+// Wire contract: incoming x/y/z are GAME coords (centered at 0,0); the
+// unitsdoo parser stores Position verbatim so we pass them straight through.
+// No conversion happens at this boundary.
+func (a *App) MoveUnit(creationNumber uint32, x, y, z float32) error {
+	return forge.Current.MoveUnit(creationNumber, x, y, z)
+}
+
+// IsDirty reports whether the session has unsaved edits. The header Save
+// button's modified-dot indicator polls this on mount; subsequent updates
+// arrive via the dirty-changed Wails event.
+func (a *App) IsDirty() bool {
+	return forge.Current.IsDirty()
+}
+
+// SaveMap flushes all pending edits back through the source's write path.
+// Returns ErrMPQWriteNotImplemented (wrapped) when the loaded map is backed
+// by an MPQ archive — the UI should surface that as a friendly toast and
+// suggest extracting to a folder.
+func (a *App) SaveMap() error {
+	return forge.Current.Save()
 }

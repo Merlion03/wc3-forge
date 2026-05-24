@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
@@ -30,9 +31,19 @@ type fileSource interface {
 	// isn't present" (the caller decides whether that's fatal). A non-nil
 	// error means a real I/O / format problem.
 	read(name string) (data []byte, ok bool, err error)
+	// write replaces (or creates) the named file's bytes in this source.
+	// Folder sources write to disk; MPQ sources currently return
+	// ErrMPQWriteNotImplemented (extract to a folder first).
+	write(name string, data []byte) error
 	// close releases any open handles. Safe to call once at end of Open.
 	close() error
 }
+
+// ErrMPQWriteNotImplemented is returned by Save when the loaded map is backed
+// by an MPQ archive. MPQ writing is not yet supported — callers should extract
+// the map to a folder first. errors.Is-checkable so the UI can surface a
+// friendly toast rather than a stack trace.
+var ErrMPQWriteNotImplemented = errors.New("MPQ archive writing is not yet implemented — extract the map to a folder first")
 
 type folderSource struct{ root string }
 
@@ -46,6 +57,18 @@ func (f folderSource) read(name string) ([]byte, bool, error) {
 	}
 	return b, true, nil
 }
+
+// write replaces (or creates) the named file under f.root. Path traversal is
+// defended against via filepath.Clean — name comes from Session's own code
+// today but plumb safely in case future callers route untrusted strings here.
+func (f folderSource) write(name string, data []byte) error {
+	clean := filepath.Clean(name)
+	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, string(filepath.Separator)+"..") {
+		return fmt.Errorf("write %q: unsafe path", name)
+	}
+	return os.WriteFile(filepath.Join(f.root, clean), data, 0o644)
+}
+
 func (f folderSource) close() error { return nil }
 
 type mpqSource struct{ a *mpq.Archive }
@@ -60,6 +83,15 @@ func (m mpqSource) read(name string) ([]byte, bool, error) {
 	}
 	return b, true, nil
 }
+
+// write on an MPQ source is intentionally unsupported. MPQ writing is a
+// multi-thousand-line problem (rebuild block table, hash table, sector
+// offsets, optional compression) that wc3-forge defers in favour of the
+// folder-source path. Callers should extract the .w3x to a folder first.
+func (m mpqSource) write(name string, data []byte) error {
+	return fmt.Errorf("%w (file=%q)", ErrMPQWriteNotImplemented, name)
+}
+
 func (m mpqSource) close() error { return m.a.Close() }
 
 // Session holds the currently-loaded map. Phase 1 only supports folder-based
@@ -92,6 +124,13 @@ type Session struct {
 	selection      SelectionState
 	listeners      []func(SelectionState)
 	mapListeners   []func(bool) // fired after Open/Close; bool = loaded
+
+	// Dirty tracking — per-file granularity. Save iterates these and writes
+	// only the dirty files back through the source's write path. Open + Close
+	// reset them. The boolean dirty-changed bus mirrors the map/selection
+	// notification pattern (lock-free copy → invoke listeners).
+	dirtyUnits     bool
+	dirtyListeners []func(bool)
 }
 
 // SelectionState is the editor's current selection. Items are entity IDs in
@@ -263,12 +302,17 @@ func (s *Session) Open(path string) error {
 	s.pathingMap = pathingMap
 	s.strings = wtsStrings
 	s.selection = SelectionState{Items: nil, Primary: -1}
+	wasDirty := s.dirtyUnits
+	s.dirtyUnits = false
 	s.mu.Unlock()
 	if prevSource != nil {
 		_ = prevSource.close()
 	}
 	s.notifySelection()
 	s.notifyMapChanged(true)
+	if wasDirty {
+		s.notifyDirty(false)
+	}
 	return nil
 }
 
@@ -311,12 +355,17 @@ func (s *Session) Close() {
 	s.pathingMap = nil
 	s.strings = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
+	wasDirty := s.dirtyUnits
+	s.dirtyUnits = false
 	s.mu.Unlock()
 	if prevSource != nil {
 		_ = prevSource.close()
 	}
 	s.notifySelection()
 	s.notifyMapChanged(false)
+	if wasDirty {
+		s.notifyDirty(false)
+	}
 }
 
 // Strings returns the parsed war3map.wts trigger-strings table, or nil if
@@ -506,5 +555,116 @@ func (s *Session) notifySelection() {
 	s.mu.RUnlock()
 	for _, fn := range listeners {
 		fn(state)
+	}
+}
+
+// MoveUnit relocates the unit with the given creation_number to the supplied
+// game coordinates. Fires the dirty-changed event when this is the first
+// pending edit. Returns an error if no entity with that creation_number is
+// loaded.
+//
+// Game-coords contract: x/y/z are already in WC3 game coordinates (centered
+// at 0,0), matching the wire format used everywhere in this package. The
+// unitsdoo parser stores Position verbatim — no conversion needed here.
+func (s *Session) MoveUnit(creationNumber uint32, x, y, z float32) error {
+	s.mu.Lock()
+	if s.units == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	found := -1
+	for i := range s.units.Entities {
+		if s.units.Entities[i].CreationNumber == creationNumber {
+			found = i
+			break
+		}
+	}
+	if found < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no unit with creation_number %d", creationNumber)
+	}
+	s.units.Entities[found].Position = [3]float32{x, y, z}
+	wasDirty := s.dirtyUnits
+	s.dirtyUnits = true
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	return nil
+}
+
+// IsDirty reports whether the session holds unsaved edits to any in-memory
+// map file. Today only units are mutable; future entity kinds extend this
+// to a per-file flag check.
+func (s *Session) IsDirty() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dirtyUnits
+}
+
+// Save flushes every dirty in-memory file back through the source's write
+// path. On success the dirty flag clears and a dirty=false event fires.
+//
+// Partial-write semantics: if one file writes and another fails, the dirty
+// flags for the written files clear (they're now in sync with disk) but the
+// failed file stays dirty so the user can retry. The first error is returned;
+// successive failures are surfaced via wrapped messages.
+//
+// MPQ-backed sessions short-circuit with ErrMPQWriteNotImplemented — extract
+// the map to a folder first.
+func (s *Session) Save() error {
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	if !s.dirtyUnits {
+		s.mu.Unlock()
+		return nil // nothing to do
+	}
+	src := s.source
+	units := s.units
+	s.mu.Unlock()
+
+	if src == nil {
+		return fmt.Errorf("no source for writing")
+	}
+
+	// Encode dirty files OUTSIDE the lock so the (potentially-slow) write
+	// doesn't block UI reads. Encode is pure over its inputs.
+	data, err := unitsdoo.Encode(units)
+	if err != nil {
+		return fmt.Errorf("encode war3mapUnits.doo: %w", err)
+	}
+	if err := src.write("war3mapUnits.doo", data); err != nil {
+		return fmt.Errorf("write war3mapUnits.doo: %w", err)
+	}
+
+	s.mu.Lock()
+	s.dirtyUnits = false
+	s.mu.Unlock()
+	s.notifyDirty(false)
+	return nil
+}
+
+// OnDirtyChanged subscribes to dirty-state-change notifications. Fired
+// AFTER the lock is released, so listeners may safely call back into Session.
+// Bool argument is the new dirty value (true = pending edits, false = clean).
+//
+// No-op when the dirty state doesn't actually change (e.g. a second MoveUnit
+// when the session is already dirty does not re-fire).
+func (s *Session) OnDirtyChanged(fn func(dirty bool)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dirtyListeners = append(s.dirtyListeners, fn)
+}
+
+func (s *Session) notifyDirty(dirty bool) {
+	s.mu.RLock()
+	listeners := make([]func(bool), len(s.dirtyListeners))
+	copy(listeners, s.dirtyListeners)
+	s.mu.RUnlock()
+	for _, fn := range listeners {
+		fn(dirty)
 	}
 }
