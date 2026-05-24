@@ -63,8 +63,18 @@ func (a *App) startup(ctx context.Context) {
 	// Forward dirty-state changes (MoveUnit edits, Save flushes) so the UI
 	// can keep its modified-dot + Save-button enable state in sync without
 	// polling. Payload mirrors the map-changed shape: { dirty: bool }.
+	//
+	// Also reflect dirty state in the OS-visible Wails window title. The JS
+	// side's document.title only updates the inner WebView2 child window,
+	// which the user never sees; runtime.WindowSetTitle hits the outer Wails
+	// window so the taskbar + window-list entry pick up the `* ` prefix too.
 	forge.Current.OnDirtyChanged(func(dirty bool) {
 		runtime.EventsEmit(a.ctx, eventDirtyChanged, map[string]any{"dirty": dirty})
+		title := "wc3-forge"
+		if dirty {
+			title = "* wc3-forge"
+		}
+		runtime.WindowSetTitle(a.ctx, title)
 	})
 }
 

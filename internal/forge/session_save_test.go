@@ -109,6 +109,63 @@ func TestMoveUnit_Save_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestMoveUnit_NoOpDoesNotDirty asserts that MoveUnit to the unit's current
+// position is a no-op — no dirty flip, no listener fire. The Properties panel
+// commits position edits on blur/Enter even when the value didn't actually
+// change (e.g. user clicked into the field and Escape-blurred without typing),
+// so without this short-circuit the Save pill flips to amber for no real edit.
+func TestMoveUnit_NoOpDoesNotDirty(t *testing.T) {
+	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("fixture %q not available: %v", src, err)
+	}
+	tmp := t.TempDir()
+	entries, _ := os.ReadDir(src)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
+		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
+	}
+	s := &Session{}
+	var dirtyHistory []bool
+	s.OnDirtyChanged(func(d bool) { dirtyHistory = append(dirtyHistory, d) })
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	units := s.Units()
+	if units == nil || len(units.Entities) == 0 {
+		t.Fatalf("expected entities in fixture, got none")
+	}
+	first := units.Entities[0]
+	cn := first.CreationNumber
+	pos := first.Position
+
+	// Same-position move should not flip dirty.
+	if err := s.MoveUnit(cn, pos[0], pos[1], pos[2]); err != nil {
+		t.Fatalf("MoveUnit (no-op): %v", err)
+	}
+	if s.IsDirty() {
+		t.Errorf("same-position MoveUnit flipped dirty")
+	}
+	if len(dirtyHistory) != 0 {
+		t.Errorf("same-position MoveUnit fired %d dirty events, want 0: %v",
+			len(dirtyHistory), dirtyHistory)
+	}
+
+	// Sanity: a real move still flips dirty.
+	if err := s.MoveUnit(cn, pos[0]+1, pos[1], pos[2]); err != nil {
+		t.Fatalf("MoveUnit (real): %v", err)
+	}
+	if !s.IsDirty() {
+		t.Errorf("real MoveUnit failed to flip dirty")
+	}
+	if len(dirtyHistory) != 1 || !dirtyHistory[0] {
+		t.Errorf("real MoveUnit dirty history = %v, want [true]", dirtyHistory)
+	}
+}
+
 // TestMoveUnit_UnknownCN asserts MoveUnit surfaces a clear error for a
 // creation_number that doesn't exist (and doesn't mark the session dirty).
 func TestMoveUnit_UnknownCN(t *testing.T) {

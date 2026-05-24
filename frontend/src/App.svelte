@@ -91,10 +91,12 @@
       scene?.setUnitAnimation(payload.creation_number, payload.anim_name)
     })
     // Dirty-state changes (MoveUnit edits, Save flushes). Keeps the header
-    // Save pill's modified-dot indicator reactive without polling.
+    // Save pill's modified-dot indicator reactive without polling. The OS
+    // window title's "* " prefix is updated Go-side via runtime.WindowSetTitle
+    // in App.startup's OnDirtyChanged handler — the inner WebView2 child's
+    // document.title isn't visible to the user.
     EventsOn(DIRTY_EVENT, (payload: { dirty: boolean }) => {
       dirty = !!payload?.dirty
-      updateTitleDirty()
     })
     EventsOn(SEL_EVENT, async (s: main.SelectionDTO) => {
       ingestSelection(s)
@@ -123,7 +125,6 @@
     const sel = await GetSelection()
     ingestSelection(sel)
     try { dirty = await IsDirty() } catch { dirty = false }
-    updateTitleDirty()
     window.addEventListener('keydown', onGlobalKeyDown)
   })
 
@@ -147,7 +148,6 @@
       await SaveMap()
       // dirty event will arrive; refresh defensively in case nothing was dirty.
       try { dirty = await IsDirty() } catch {}
-      updateTitleDirty()
     } catch (e) {
       // MPQ-write rejection is the expected hot path until we ship MPQ writing.
       const msg = String(e)
@@ -159,15 +159,6 @@
     } finally {
       saving = false
     }
-  }
-
-  // Title-bar dirty prefix — small polish so the OS window-list shows
-  // unsaved state at a glance. The original document title comes from
-  // index.html ("wc3-forge").
-  let baseTitle = ''
-  function updateTitleDirty() {
-    if (!baseTitle) baseTitle = document.title.replace(/^\*\s+/, '')
-    document.title = dirty ? '* ' + baseTitle : baseTitle
   }
 
   // Mirror Go-side selection into the local split sets + the scene-side tint.

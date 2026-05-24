@@ -583,6 +583,18 @@ func (s *Session) MoveUnit(creationNumber uint32, x, y, z float32) error {
 		s.mu.Unlock()
 		return fmt.Errorf("no unit with creation_number %d", creationNumber)
 	}
+	// No-op when the new position matches the current one. The Properties
+	// panel commits on blur/Enter even when the user only inspected the
+	// input (or pressed Escape, which blurs without a real change), so
+	// without this guard the Save pill flips to amber on every focus-out
+	// for no actual edit. Bit-exact float compare is fine: parseFloat of
+	// the same stringified value round-trips, and the JS side always
+	// formats current truth into the input before the user touches it.
+	cur := s.units.Entities[found].Position
+	if cur[0] == x && cur[1] == y && cur[2] == z {
+		s.mu.Unlock()
+		return nil
+	}
 	s.units.Entities[found].Position = [3]float32{x, y, z}
 	wasDirty := s.dirtyUnits
 	s.dirtyUnits = true
