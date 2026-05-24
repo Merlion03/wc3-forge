@@ -31,7 +31,7 @@ import * as MV_ns from 'mdx-m3-viewer'
 import { flog } from './debuglog'
 import {
   ListUnits, ListDoodads, GetUnitTypeIndex, GetDoodadTypeIndex, GetTerrain,
-  GetPathingMap,
+  GetPathingMap, MoveUnit,
 } from '../wailsjs/go/main/App.js'
 import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
 import { buildTerrain, type TerrainMesh } from './terrain'
@@ -624,6 +624,28 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     }
   }
 
+  // Project a canvas-pixel (px, py) into world XY on the z=0 ground plane.
+  // Returns null in the degenerate case where the camera is looking nearly
+  // horizontal (dir.z ≈ 0 means the ray never hits the ground in front of
+  // it) — the RTS camera's enforced pitch (PITCH_MIN ~10°) keeps us out of
+  // that regime in practice, but the guard prevents NaN propagation if the
+  // camera ever does end up there.
+  function groundPlaneXY(px: number, py: number): [number, number] | null {
+    const out = new Float32Array(6)
+    const vp = (scene as any).viewport as Float32Array
+    // mdx-m3-viewer screen Y origin is at canvas BOTTOM; DOM event Y is from
+    // the top — flip before handing to screenToWorldRay (matches rayPick).
+    const screen = new Float32Array([px, canvas.clientHeight - py])
+    scene.camera.screenToWorldRay(out, screen, vp)
+    const nx = out[0], ny = out[1], nz = out[2]
+    const dx = out[3] - nx, dy = out[4] - ny, dz = out[5] - nz
+    if (Math.abs(dz) < 1e-6) return null
+    // Plane equation: near.z + t * dz = 0  →  t = -near.z / dz.
+    const t = -nz / dz
+    if (!isFinite(t)) return null
+    return [nx + dx * t, ny + dy * t]
+  }
+
   function rayPick(px: number, py: number): PickHit | null {
     // screenToWorldRay outputs near + far points (vec3 + vec3 = 6 floats).
     const out = new Float32Array(6)
@@ -768,6 +790,22 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // Did the user start a rubber-band gesture? Lazy-set on the first
     // mousemove that crosses the click-vs-drag threshold while shift is held.
     rubberBanding: boolean
+    // Drag-to-move armed at mousedown: the user clicked on a unit that was
+    // already in the selection without modifier keys. Stays null when the
+    // hit was empty space, a non-selected unit, or any modifier was held —
+    // those paths defer to the existing rubber-band / click-select code.
+    // `active` flips true once motion crosses CLICK_PIXEL_THRESHOLD; before
+    // that, mouseup still routes through the regular click handler (so a
+    // click on a selected unit re-selects it cleanly via mode='set').
+    dragMove: {
+      cns: number[]                                   // unit creation_numbers
+      anchorXY: [number, number]                      // ground XY at mousedown
+      original: Map<number, {                         // per-cn original state
+        wl: [number, number, number]                  // worldLocation (post-move_height)
+        gameZ: number                                 // game-space Z (pre-move_height)
+      }>
+      active: boolean
+    } | null
   }
   let downAt: DownState | null = null
 
@@ -799,14 +837,54 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   function onCanvasMouseDown(e: MouseEvent) {
     if (e.button !== 0) return
     const r = canvas.getBoundingClientRect()
+    const px = e.clientX - r.left
+    const py = e.clientY - r.top
+    const shift = e.shiftKey
+    const ctrl = e.ctrlKey || e.metaKey
+    // Arm a drag-to-move only on a plain LMB click that lands on a unit
+    // that's ALREADY in the current selection. Modifier-held clicks defer to
+    // toggle/add semantics (shift+click a selected unit = deselect via
+    // toggle; shift-drag empty = rubber-band) so the drag-move path stays
+    // narrowly scoped to "user clicked something they had selected."
+    //
+    // Doodads don't get a drag-move treatment — the spec focuses on units,
+    // and doodad position editing has its own deferred work (different
+    // preservation fields in war3map.doo encoding).
+    let dragMove: DownState['dragMove'] = null
+    if (!shift && !ctrl) {
+      const hit = rayPick(px, py)
+      if (hit && hit.kind === 'unit' && selectedSet.has(hit.id)) {
+        const anchor = groundPlaneXY(px, py)
+        if (anchor) {
+          const cns = [...selectedSet]
+          const original = new Map<number, { wl: [number, number, number]; gameZ: number }>()
+          for (const cn of cns) {
+            const inst = unitInstances.get(cn)
+            if (!inst) continue
+            const wl = inst.worldLocation
+            const typeId = (inst as any).__wc3ForgeTypeId as string | undefined
+            const info = typeId ? unitTypeIndexCache?.[typeId] : undefined
+            const moveHeight = info?.move_height ?? 0
+            original.set(cn, {
+              wl: [wl[0], wl[1], wl[2]],
+              gameZ: wl[2] - moveHeight,
+            })
+          }
+          if (original.size > 0) {
+            dragMove = { cns, anchorXY: anchor, original, active: false }
+          }
+        }
+      }
+    }
     downAt = {
-      x: e.clientX - r.left,
-      y: e.clientY - r.top,
+      x: px,
+      y: py,
       clientX: e.clientX,
       clientY: e.clientY,
-      shift: e.shiftKey,
-      ctrl: e.ctrlKey || e.metaKey,
+      shift,
+      ctrl,
       rubberBanding: false,
+      dragMove,
     }
   }
 
@@ -835,6 +913,32 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // app chrome — matches what every other editor does).
   function onDocMouseMove(e: MouseEvent) {
     if (!downAt) return
+    // Drag-to-move on a selected unit. Threshold-gated like rubber-band:
+    // sub-threshold motion stays as a click (so the mouseup path re-selects),
+    // past-threshold motion locks into a drag-move that ignores any further
+    // selection events until release. We mutate setLocation on every move
+    // tick — the lib's render loop picks up the new worldLocation next RAF.
+    if (downAt.dragMove) {
+      const dragMove = downAt.dragMove
+      if (!dragMove.active) {
+        const dist = Math.hypot(e.clientX - downAt.clientX, e.clientY - downAt.clientY)
+        if (dist <= CLICK_PIXEL_THRESHOLD) return
+        dragMove.active = true
+      }
+      const r = canvas.getBoundingClientRect()
+      const curXY = groundPlaneXY(e.clientX - r.left, e.clientY - r.top)
+      if (!curXY) return
+      const dx = curXY[0] - dragMove.anchorXY[0]
+      const dy = curXY[1] - dragMove.anchorXY[1]
+      for (const cn of dragMove.cns) {
+        const orig = dragMove.original.get(cn)
+        if (!orig) continue
+        const inst = unitInstances.get(cn)
+        if (!inst) continue
+        ;(inst as any).setLocation([orig.wl[0] + dx, orig.wl[1] + dy, orig.wl[2]])
+      }
+      return
+    }
     if (!downAt.rubberBanding) {
       // Promote to rubber-band only if shift was held at mousedown AND the
       // pointer has actually moved enough to look like a drag, not a click.
@@ -853,6 +957,41 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const d = downAt
     downAt = null
     if (!d || e.button !== 0) return
+
+    if (d.dragMove?.active) {
+      // Commit each unit's final position via MoveUnit. Sequential (not
+      // Promise.all) so the resulting entity-changed events arrive in a
+      // predictable order — same reason the Properties path uses a single
+      // await + commit. One failure logs via flog and we continue: a partial
+      // batch is more useful than blowing the whole drag away.
+      //
+      // The 3D model has already been moved live during the drag via
+      // setLocation, so MoveUnit's role here is to persist into Go memory +
+      // mark the session dirty. The OnEntityChanged → setLocation callback
+      // is idempotent so the re-paint on event delivery is a no-op.
+      const dragMove = d.dragMove
+      const r = canvas.getBoundingClientRect()
+      const finalXY = groundPlaneXY(e.clientX - r.left, e.clientY - r.top)
+      // Recompute the final position from the release coords (don't trust
+      // the per-frame setLocation calls' last value — a missed RAF tick
+      // could leave the visible position slightly behind the cursor).
+      const dx = finalXY ? finalXY[0] - dragMove.anchorXY[0] : 0
+      const dy = finalXY ? finalXY[1] - dragMove.anchorXY[1] : 0
+      ;(async () => {
+        for (const cn of dragMove.cns) {
+          const orig = dragMove.original.get(cn)
+          if (!orig) continue
+          const finalX = orig.wl[0] + dx
+          const finalY = orig.wl[1] + dy
+          try {
+            await MoveUnit(cn, finalX, finalY, orig.gameZ)
+          } catch (err) {
+            flog(`[drag-move] MoveUnit cn=${cn} failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+      })()
+      return
+    }
 
     if (d.rubberBanding) {
       // Commit the rubber-band: collect everything inside the final rect
@@ -886,7 +1025,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   }
 
   function onWindowKeyDown(e: KeyboardEvent) {
-    if (e.key !== 'Escape' || !pickCallback) return
+    if (e.key !== 'Escape') return
     // Don't steal Escape from text inputs / contenteditable / form controls.
     // Future inline-edit fields, search boxes, or modals need to handle their
     // own Escape (close themselves) without losing the viewport selection too.
@@ -896,6 +1035,27 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (a.isContentEditable) return
     }
+    // Mid-drag Escape = cancel the move and snap each unit back to its
+    // pre-drag position. The mouseup that follows will see `downAt` is
+    // null and won't commit MoveUnit. Selection is NOT cleared in this
+    // path — Escape during a drag cancels the drag, not the selection.
+    if (downAt?.dragMove?.active) {
+      const dragMove = downAt.dragMove
+      for (const cn of dragMove.cns) {
+        const orig = dragMove.original.get(cn)
+        if (!orig) continue
+        const inst = unitInstances.get(cn)
+        if (!inst) continue
+        ;(inst as any).setLocation(orig.wl)
+      }
+      // Drop the gesture state so the impending mouseup is a no-op.
+      // Rubber-band overlay (if visible) is also hidden in case the user
+      // managed to be in both states somehow.
+      downAt = null
+      overlay.style.display = 'none'
+      return
+    }
+    if (!pickCallback) return
     pickCallback([], 'set')
   }
 
@@ -906,6 +1066,42 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   document.addEventListener('mousemove', onDocMouseMove)
   document.addEventListener('mouseup', onDocMouseUp)
   window.addEventListener('keydown', onWindowKeyDown)
+
+  // Cursor feedback for hover. Picks per mousemove but throttled to ~30 Hz —
+  // a full rayPick on every native mousemove event (which can fire at 1000Hz
+  // on high-poll mice) walks every unit + doodad + sloc and would chug on
+  // 500+-entity maps. ~33ms gating keeps the cursor responsive without
+  // burning CPU. We also skip when a drag-related gesture is in progress
+  // (downAt set) — once the user is committed to a drag the cursor doesn't
+  // need to reflect what's under it.
+  let lastHoverTs = 0
+  const HOVER_THROTTLE_MS = 33
+  function onCanvasHoverMove(e: MouseEvent) {
+    if (downAt) return // suppress hover-pick during any active gesture
+    // e.buttons bit 0=LMB, bit 1=RMB, bit 2=MMB. Any held button means an
+    // ongoing drag (LMB without downAt is weird but safe to ignore; RMB/MMB
+    // = camera pan, no point updating cursor under a pan).
+    if (e.buttons !== 0) return
+    const now = performance.now()
+    if (now - lastHoverTs < HOVER_THROTTLE_MS) return
+    lastHoverTs = now
+    const r = canvas.getBoundingClientRect()
+    const px = e.clientX - r.left
+    const py = e.clientY - r.top
+    const hit = rayPick(px, py)
+    let cursor = 'default'
+    if (hit) {
+      if (hit.kind === 'unit' && selectedSet.has(hit.id)) cursor = 'move'
+      else if (hit.kind === 'doodad' && selectedDoodadSet.has(hit.id)) cursor = 'move'
+      else cursor = 'pointer'
+    }
+    if (canvas.style.cursor !== cursor) canvas.style.cursor = cursor
+  }
+  function onCanvasHoverLeave() {
+    if (canvas.style.cursor !== '') canvas.style.cursor = ''
+  }
+  canvas.addEventListener('mousemove', onCanvasHoverMove)
+  canvas.addEventListener('mouseleave', onCanvasHoverLeave)
 
   // Internal helper for re-positioning a placed unit instance to (x, y, z) in
   // game-space. Used by both the public SceneAPI.updateUnitPosition (kept for
@@ -1120,6 +1316,8 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       cancelAnimationFrame(rafId)
       ro.disconnect()
       canvas.removeEventListener('mousedown', onCanvasMouseDown)
+      canvas.removeEventListener('mousemove', onCanvasHoverMove)
+      canvas.removeEventListener('mouseleave', onCanvasHoverLeave)
       document.removeEventListener('mousemove', onDocMouseMove)
       document.removeEventListener('mouseup', onDocMouseUp)
       window.removeEventListener('keydown', onWindowKeyDown)
