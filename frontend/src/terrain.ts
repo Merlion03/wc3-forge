@@ -1,31 +1,26 @@
-// Textured terrain renderer.
+// Textured terrain renderer with 4-corner alpha blending (HiveWE-style).
 //
-// Per-cell tile selection (v1): each cell uses the tile texture chosen by
-// its bottom-left corner's `ground_tex` palette index. Variation comes from
-// the bottom-left corner's `ground_var` (low 5 bits of TextureDetails) —
-// picks a sub-tile within the texture's 4×4 (non-extended) or 4×8 (extended)
-// sub-tile atlas.
+// Each cell can show up to 4 distinct tile textures (one per corner). The
+// corner's ground_tex picks which palette tile that corner "owns"; weights
+// fall off bilinearly across the cell so adjacent cells with different
+// primary tiles blend with feathered edges instead of a hard line.
 //
-// HiveWE's terrain shader does up to 4-texture-per-cell alpha-blended
-// rendering keyed on per-corner texture types, which gives blended tile-type
-// boundaries. We render a single texture per cell — a v1 that still matches
-// the user-visible model "this cell is grass / that cell is dirt" but without
-// the blended transitions between them. (Blending is a stretch goal — see
-// project memory.)
+// Single draw call for the whole terrain. To get there in WebGL1 (no
+// sampler2DArray, no dynamic indexing into sampler arrays), all loaded
+// palette textures are pre-composited into a single vertical-strip atlas
+// (one palette per row, row height = 256, atlas width = max palette width)
+// via FBO-blit at build time. The frag shader then samples that one atlas
+// 4 times — once per cell corner — at offsets keyed by per-corner palette
+// layer index and per-corner sub-tile slot.
 //
-// Each palette tile that's actually used in the map becomes one draw call;
-// the mesh for that palette draw covers ONLY the cells using that palette as
-// their primary tile. Up to 16 palette entries → up to 16 draw calls per
-// frame; in practice maps use 4–8.
-//
-// Texture loading uses the same `viewer.load(path, pathSolver)` pattern as
-// water.ts. The asset-handler's BLP↔DDS swap covers Reforged-DDS-only
-// installs when we request `.blp`, but we ask for `.dds` first because that's
-// the primary format on every Reforged install we've seen.
+// Extended atlases (width = 2×height, 8×4 sub-tile layout) live alongside
+// non-extended (4×4) palettes in the same atlas: extended palettes occupy
+// the full atlas width, non-extended only the left half. The per-palette
+// `extended` flag rides along as a per-corner shader uniform-via-attribute
+// (packed into the layer-index attribute's fractional part — see usage).
 //
 // Drawn between viewer.startFrame() and viewer.render() so it lands in the
-// depth buffer before unit instances. Same approach as the previous
-// color-only renderer.
+// depth buffer before unit instances.
 
 import { flog } from './debuglog'
 
@@ -41,24 +36,16 @@ interface TerrainDTO {
   ground_var: number[]
   tileset: string
   palette: string[]
-  /** Real per-tile RGB (0..255), sampled from the WC3 tileset BLP/DDS in
-   *  CASC via Terrain.slk. Used as a fallback color when the matching
-   *  texture fails to load. Same length as `palette`. */
   palette_colors: [number, number, number][]
-  /** Asset path stem (no extension) for each palette tile — JS appends
-   *  `.dds`. Empty string when Terrain.slk lookup failed. */
   palette_textures: string[]
-  /** war3map.shd as base64 (Wails encodes []byte that way). Empty string
-   *  when the map ships no shadow map. */
   shadow_map: string
   shadow_map_width: number
   shadow_map_height: number
 }
 
-// Pick the sub-tile index (0..31 for extended, 0..15 for non-extended)
-// matching HiveWE's `get_tile_variation`. Sub-tile k is at atlas coord
-// (k % 4, k / 4) for non-extended (4×4 layout) or (k % 8, k / 8) for
-// extended (8×4 layout) — see the UV-build code below for the actual math.
+// Mirrors HiveWE's `get_tile_variation`: the per-corner variation byte
+// selects a sub-tile slot inside the texture's 4×4 (non-extended) or 8×4
+// (extended) sub-tile layout.
 function pickSubTile(extended: boolean, variation: number): number {
   if (extended) {
     if (variation <= 15) return 16 + variation
@@ -69,45 +56,107 @@ function pickSubTile(extended: boolean, variation: number): number {
   return 15
 }
 
+// Per-cell vertex shader inputs:
+//   a_position    — world XYZ
+//   a_shadowUV    — shadow-map sample coord (per vertex)
+//   a_cellUV      — cell-local UV (0..1), bilinear weight basis
+//   a_layers      — palette layer index for each of the 4 corners (TL, TR, BR, BL)
+//   a_subUV0..3   — pre-computed (atlas_u0, atlas_v0) sub-tile origin for each
+//                   corner's chosen palette + sub-tile slot. Half is enough
+//                   because subTileSize is constant per palette and packed
+//                   into a_layers (see below).
+//   a_subSize     — (sub_tile_width, sub_tile_height) in atlas UV for each
+//                   of the 4 corners, packed as 2 vec4s (corners 0,1 and 2,3
+//                   share the attribute).
+//
+// All 4 verts of a cell carry the same a_layers, a_subUV*, a_subSize values
+// — only a_position, a_shadowUV, a_cellUV vary per vertex.
 const VERT_SHADER = `
 attribute vec3 a_position;
-attribute vec2 a_uv;
 attribute vec2 a_shadowUV;
+attribute vec2 a_cellUV;
+attribute vec4 a_subUV01;   // TL.uv, TR.uv
+attribute vec4 a_subUV23;   // BR.uv, BL.uv
+attribute vec4 a_subSize01; // TL.size, TR.size
+attribute vec4 a_subSize23; // BR.size, BL.size
+attribute vec4 a_rowV;      // per-corner atlas row start (v coord in atlas, 0..1)
 uniform mat4 u_viewProj;
-varying vec2 v_uv;
 varying vec2 v_shadowUV;
+varying vec2 v_cellUV;
+varying vec4 v_subUV01;
+varying vec4 v_subUV23;
+varying vec4 v_subSize01;
+varying vec4 v_subSize23;
+varying vec4 v_rowV;
 void main() {
-  v_uv = a_uv;
   v_shadowUV = a_shadowUV;
+  v_cellUV = a_cellUV;
+  v_subUV01 = a_subUV01;
+  v_subUV23 = a_subUV23;
+  v_subSize01 = a_subSize01;
+  v_subSize23 = a_subSize23;
+  v_rowV = a_rowV;
   gl_Position = u_viewProj * vec4(a_position, 1.0);
 }
 `.trim()
 
-// Shadow map: single-channel texture sampled at the per-vertex shadow UV
-// (computed at build time from each vertex's grid position). WC3's shadow
-// bytes are effectively binary in practice — 0x00 = lit, 0x80+ = shadowed.
-// With LINEAR filtering on the texture the edges get smooth interpolation,
-// but the core values still drive the lit/shadowed branch.
+// Frag shader: bilinear weights from cellUV, sample atlas 4 times.
+// Corner order (matches HiveWE 4-corner conventions):
+//   0 = TL (u=0, v=1)  weight = (1-u) * v
+//   1 = TR (u=1, v=1)  weight = u     * v
+//   2 = BR (u=1, v=0)  weight = u     * (1-v)
+//   3 = BL (u=0, v=0)  weight = (1-u) * (1-v)
+// cellUV is (0,0) at BL, (1,1) at TR — standard quad UV with v-up.
 //
-// u_hasTexture controls fall-through to flat color when the palette texture
-// failed to load (rare: missing asset or unusual format). u_fallbackColor is
-// the per-palette average we computed Go-side from the DDS reference colors.
+// Each corner's atlas sample = subUV + cellUV_localized * subSize. The
+// localization flips cellUV per corner so each corner's "own" texel sits at
+// the appropriate sub-tile interior coord.
 const FRAG_SHADER = `
 precision mediump float;
-uniform sampler2D u_tileTex;
+uniform sampler2D u_atlas;
 uniform sampler2D u_shadowTex;
-uniform bool u_hasTexture;
 uniform bool u_hasShadow;
-uniform vec3 u_fallbackColor;
-varying vec2 v_uv;
 varying vec2 v_shadowUV;
+varying vec2 v_cellUV;
+varying vec4 v_subUV01;
+varying vec4 v_subUV23;
+varying vec4 v_subSize01;
+varying vec4 v_subSize23;
+varying vec4 v_rowV;
 void main() {
-  vec3 col = u_hasTexture ? texture2D(u_tileTex, v_uv).rgb : u_fallbackColor;
+  float u = v_cellUV.x;
+  float v = v_cellUV.y;
+  // Bilinear weights (must sum to 1).
+  float wTL = (1.0 - u) * v;
+  float wTR = u * v;
+  float wBR = u * (1.0 - v);
+  float wBL = (1.0 - u) * (1.0 - v);
+
+  // Per-corner atlas sample coord: (subOrigin.x + cellUV.x * subSize.x,
+  // rowV + (1 - cellUV.y) * subSize.y).  The v-flip matches HiveWE's
+  // "UV = vec2(vPos.x, 1 - vPos.y)" sub-tile orientation (image y-down,
+  // cellUV v-up). The atlas row "rowV" is the bottom of the palette's
+  // strip in the atlas — sub-tile slot's vertical offset (subUV.y) is
+  // already baked into the per-corner subUV value, so rowV adds the
+  // palette base only.
+  vec2 uvTL = vec2(v_subUV01.x + u * v_subSize01.x,
+                   v_subUV01.y + (1.0 - v) * v_subSize01.y);
+  vec2 uvTR = vec2(v_subUV01.z + u * v_subSize01.z,
+                   v_subUV01.w + (1.0 - v) * v_subSize01.w);
+  vec2 uvBR = vec2(v_subUV23.x + u * v_subSize23.x,
+                   v_subUV23.y + (1.0 - v) * v_subSize23.y);
+  vec2 uvBL = vec2(v_subUV23.z + u * v_subSize23.z,
+                   v_subUV23.w + (1.0 - v) * v_subSize23.w);
+
+  vec4 cTL = texture2D(u_atlas, uvTL);
+  vec4 cTR = texture2D(u_atlas, uvTR);
+  vec4 cBR = texture2D(u_atlas, uvBR);
+  vec4 cBL = texture2D(u_atlas, uvBL);
+
+  vec3 col = cTL.rgb * wTL + cTR.rgb * wTR + cBR.rgb * wBR + cBL.rgb * wBL;
+
   if (u_hasShadow) {
     float shadow = texture2D(u_shadowTex, v_shadowUV).r;
-    // Darken by up to 45% in fully-shadowed cells. Editor visibility
-    // matters more than perfect WC3 mood lighting — we want the user to
-    // still see what's under a shadow.
     col *= 1.0 - shadow * 0.45;
   }
   gl_FragColor = vec4(col, 1.0);
@@ -139,26 +188,25 @@ function buildProgram(gl: WebGLRenderingContext) {
   return {
     program,
     aPosition: gl.getAttribLocation(program, 'a_position'),
-    aUV: gl.getAttribLocation(program, 'a_uv'),
     aShadowUV: gl.getAttribLocation(program, 'a_shadowUV'),
+    aCellUV: gl.getAttribLocation(program, 'a_cellUV'),
+    aSubUV01: gl.getAttribLocation(program, 'a_subUV01'),
+    aSubUV23: gl.getAttribLocation(program, 'a_subUV23'),
+    aSubSize01: gl.getAttribLocation(program, 'a_subSize01'),
+    aSubSize23: gl.getAttribLocation(program, 'a_subSize23'),
+    aRowV: gl.getAttribLocation(program, 'a_rowV'),
     uViewProj: gl.getUniformLocation(program, 'u_viewProj')!,
-    uTileTex: gl.getUniformLocation(program, 'u_tileTex')!,
+    uAtlas: gl.getUniformLocation(program, 'u_atlas')!,
     uShadowTex: gl.getUniformLocation(program, 'u_shadowTex')!,
-    uHasTexture: gl.getUniformLocation(program, 'u_hasTexture')!,
     uHasShadow: gl.getUniformLocation(program, 'u_hasShadow')!,
-    uFallbackColor: gl.getUniformLocation(program, 'u_fallbackColor')!,
   }
 }
 
 // Decode the base64 shadow map and upload as a single-channel GL texture.
-// Returns null if the map shipped no shadow data. Uses GL_LUMINANCE for
-// WebGL1 compatibility (gl.RED + GL_R8 needs WebGL2 / EXT_texture_rg).
 function uploadShadowTexture(
   gl: WebGLRenderingContext, b64: string, w: number, h: number,
 ): WebGLTexture | null {
   if (!b64 || w <= 0 || h <= 0) return null
-  // Wails serialises []byte as a base64 string with no padding tricks; the
-  // browser atob produces a binary string we then read by char-code.
   const bin = atob(b64)
   if (bin.length !== w * h) {
     flog(`[terrain shadow] size mismatch (got ${bin.length}, want ${w}*${h}=${w * h})`)
@@ -170,9 +218,6 @@ function uploadShadowTexture(
   const tex = gl.createTexture()
   if (!tex) return null
   gl.bindTexture(gl.TEXTURE_2D, tex)
-  // LUMINANCE: shader reads .r and gets the byte value (replicated across
-  // R/G/B). Linear filter gives smooth shadow edges instead of pixelated
-  // 4×4 cell blocks; clamp-to-edge avoids wrap-around at map boundaries.
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, w, h, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, bytes)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
@@ -182,53 +227,182 @@ function uploadShadowTexture(
   return tex
 }
 
-// One draw bucket per palette tile index: covers all cells where that
-// palette is the primary tile.
-interface TileBucket {
-  paletteIdx: number
-  vbo: WebGLBuffer
-  ibo: WebGLBuffer
-  /** Index data type: gl.UNSIGNED_SHORT or gl.UNSIGNED_INT (via the
-   *  OES_element_index_uint extension). Used in drawElements. */
-  indexType: number
-  triCount: number
-  // mdx-m3-viewer-managed texture. null when the tile load failed; we then
-  // fall back to the per-palette average color uniform.
-  glTex: WebGLTexture | null
+// Composite each loaded palette texture into a single vertical-strip atlas
+// via FBO-blit. Atlas layout: width = max palette width (256 or 512),
+// height = numPalettes * 256, palette p occupies row [p*256 .. (p+1)*256).
+//
+// Extended palettes (512×256) fill the row width; non-extended (256×256)
+// occupy the left half and the right half is left clear (sub-tile picks for
+// non-extended palettes never index beyond u < 0.5 — pickSubTile only
+// returns slots 0..15 there, and the per-corner subUV computed at build time
+// stays inside that half).
+//
+// Returns the atlas texture handle plus per-palette metadata the geometry
+// build step needs to map (paletteIdx, subSlot) → atlas UV.
+interface PaletteRow {
+  extended: boolean
+  loaded: boolean
   fallbackColor: [number, number, number]
+}
+function buildAtlas(
+  gl: WebGLRenderingContext,
+  palettes: { glTex: WebGLTexture | null; extended: boolean; width: number; height: number; fallback: [number, number, number] }[],
+): { atlas: WebGLTexture; atlasW: number; atlasH: number; rows: PaletteRow[] } | null {
+  const numPalettes = palettes.length
+  if (numPalettes === 0) return null
+
+  // Atlas width = widest palette (256 for non-extended-only, 512 if any
+  // extended). Atlas height = numPalettes * 256.
+  let atlasW = 256
+  for (const p of palettes) {
+    if (p.glTex && p.width > atlasW) atlasW = p.width
+  }
+  const rowH = 256
+  const atlasH = numPalettes * rowH
+
+  // Round atlas dims up to power-of-two? Not required for non-mip CLAMP
+  // textures in WebGL1, but min/mag filtering is more well-defined. We're
+  // already POT (256/512 width, num*256 height — only POT when numPalettes
+  // is itself a power of two, but the WebGL1 NPOT-with-CLAMP path supports
+  // LINEAR sampling fine).
+
+  const atlas = gl.createTexture()
+  if (!atlas) return null
+  gl.bindTexture(gl.TEXTURE_2D, atlas)
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, atlasW, atlasH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+
+  // FBO with the atlas as color attachment; we draw each palette into its
+  // row via a fullscreen-style textured quad. Viewport is set to the row's
+  // sub-rect of the atlas, so the quad covers exactly that row.
+  const fbo = gl.createFramebuffer()
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, atlas, 0)
+  const fbStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
+  if (fbStatus !== gl.FRAMEBUFFER_COMPLETE) {
+    flog(`[terrain atlas] FBO incomplete: 0x${fbStatus.toString(16)}`)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    gl.deleteFramebuffer(fbo)
+    gl.deleteTexture(atlas)
+    return null
+  }
+
+  // Build a tiny throwaway program: textured quad (positions in clip space,
+  // UVs 0..1) sampling u_src. We use it once per palette row, then dispose.
+  const QV = `
+attribute vec2 a_p;
+attribute vec2 a_uv;
+varying vec2 v_uv;
+void main() {
+  v_uv = a_uv;
+  gl_Position = vec4(a_p, 0.0, 1.0);
+}
+`.trim()
+  const QF = `
+precision mediump float;
+uniform sampler2D u_src;
+varying vec2 v_uv;
+void main() {
+  gl_FragColor = texture2D(u_src, v_uv);
+}
+`.trim()
+  const vs = compileShader(gl, gl.VERTEX_SHADER, QV)
+  const fs = compileShader(gl, gl.FRAGMENT_SHADER, QF)
+  const prog = gl.createProgram()!
+  gl.attachShader(prog, vs)
+  gl.attachShader(prog, fs)
+  gl.linkProgram(prog)
+  gl.useProgram(prog)
+  const aP = gl.getAttribLocation(prog, 'a_p')
+  const aUV = gl.getAttribLocation(prog, 'a_uv')
+  const uSrc = gl.getUniformLocation(prog, 'u_src')!
+
+  const quadVbo = gl.createBuffer()
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadVbo)
+  // Quad covering clip-space [-1..1] in both axes. UV (0,0) at bottom-left,
+  // (1,1) at top-right. The blit will be drawn into a viewport rect that
+  // selects the destination row inside the atlas.
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1, -1, 0, 0,
+     1, -1, 1, 0,
+    -1,  1, 0, 1,
+     1,  1, 1, 1,
+  ]), gl.STATIC_DRAW)
+
+  // Some lib state is globally enabled by mdx-m3-viewer at boot — most
+  // importantly SCISSOR_TEST (viewer.js line 102), with a scissor rect
+  // pinned to the canvas size by scene.render(). That clips our FBO writes
+  // to the canvas region (e.g. 768×768) and silently drops writes outside
+  // it — the cause of mysteriously-empty atlas rows when atlasH > canvasH.
+  // Disable scissor for the duration of the blit; the caller re-enables
+  // via its own state setup (terrain.draw doesn't toggle it, but
+  // viewer.update/render will set the scissor box again next frame).
+  gl.disable(gl.SCISSOR_TEST)
+  gl.disable(gl.BLEND)
+  gl.disable(gl.DEPTH_TEST)
+  gl.disable(gl.CULL_FACE)
+
+  const rows: PaletteRow[] = new Array(numPalettes)
+  for (let p = 0; p < numPalettes; p++) {
+    const pal = palettes[p]
+    rows[p] = { extended: pal.extended, loaded: !!pal.glTex, fallbackColor: pal.fallback }
+    if (!pal.glTex) continue
+
+    // Destination viewport rect in the atlas for palette p. v=0 is atlas
+    // bottom; we lay palettes from top→bottom so palette 0 sits at the
+    // visually-top of the atlas. But sampling convention only requires that
+    // we agree with ourselves — pick top-to-bottom so row v-coord =
+    // (atlasH - (p+1)*rowH) / atlasH .. (atlasH - p*rowH) / atlasH.
+    //
+    // For non-extended palettes (width 256), only fill the left half of the
+    // atlas row. The right half is undefined memory; non-extended sub-tile
+    // UVs never reach into u >= 0.5, so it doesn't matter.
+    const dstW = pal.extended ? atlasW : Math.min(pal.width, atlasW)
+    const dstH = rowH
+    const dstX = 0
+    const dstY = atlasH - (p + 1) * rowH
+
+    gl.viewport(dstX, dstY, dstW, dstH)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, pal.glTex)
+    // The source palette texture was uploaded by mdx-m3-viewer with
+    // its own filter/wrap state. We need CLAMP + LINEAR for a clean copy.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.uniform1i(uSrc, 0)
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadVbo)
+    gl.enableVertexAttribArray(aP)
+    gl.vertexAttribPointer(aP, 2, gl.FLOAT, false, 16, 0)
+    gl.enableVertexAttribArray(aUV)
+    gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 16, 8)
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+  }
+
+  // Re-enable scissor test for the viewer's per-frame pipeline.
+  gl.enable(gl.SCISSOR_TEST)
+  // Cleanup of the throwaway program. The atlas + rows live on.
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+  gl.deleteFramebuffer(fbo)
+  gl.deleteBuffer(quadVbo)
+  gl.deleteProgram(prog)
+  gl.deleteShader(vs)
+  gl.deleteShader(fs)
+
+  return { atlas, atlasW, atlasH, rows }
 }
 
 export interface TerrainMesh {
-  /** Draw using the given world→clip matrix (camera.viewProjectionMatrix). */
   draw(viewProj: Float32Array): void
-  /** Release GL resources. */
   dispose(): void
-  /** Number of draw calls (one per used palette tile). */
   drawCallCount: number
 }
 
-// Build a textured terrain mesh from the DTO. Async because we wait on
-// viewer.load for each palette texture.
-//
-// Coordinate system: w3e stores width × height VERTICES (not tiles) in a
-// row-major grid. center_offset is the game-coord position of vertex (0,0)
-// (typically the negative half-map-size so the map center lands at 0,0).
-// Vertex (i, j) is at game-space (x, y, z) where:
-//   x = centerOffsetX + i * 128
-//   y = centerOffsetY + j * 128
-//   z = heights[j*width + i]       (FinalZ — includes cliff layer offset)
-//
-// Cells are indexed by their bottom-left corner (i, j) where 0 <= i < W-1,
-// 0 <= j < H-1. The 4 corners of cell (i, j) are at vertex indices:
-//   bl = j*W + i
-//   br = bl + 1
-//   tl = bl + W
-//   tr = tl + 1
-//
-// Per-palette mesh: vertices are NOT shared between cells (each cell owns
-// its own 4 verts) so adjacent cells using different palettes can have
-// independent UVs without conflict. Index-buffer size = 6 indices/cell;
-// cells with that palette as primary contribute one quad each.
 export async function buildTerrain(
   gl: WebGLRenderingContext,
   viewer: any,
@@ -245,61 +419,28 @@ export async function buildTerrain(
     return null
   }
 
-  // Each cell needs 4 unshared vertices for per-cell UVs. For a per-palette
-  // bucket on a large map (Enfo: 162×162 ≈ 26000 cells, single palette
-  // covering 17855 cells → 71420 verts), we need 32-bit indices via the
-  // OES_element_index_uint WebGL1 extension. Modern browsers ship this
-  // universally; we fall back to UNSIGNED_SHORT when not available (and
-  // skip oversize buckets in that case).
-  const uintExt = gl.getExtension('OES_element_index_uint')
-  const has32Bit = !!uintExt
-
   const numCells = (W - 1) * (H - 1)
   if (numCells === 0) {
     flog(`[terrain] no cells: ${W}×${H}`)
     return null
   }
 
-  // ---- Phase 1: pick per-cell palette index ----
-  //
-  // HiveWE picks the cell's textures by examining all 4 corners' ground_tex
-  // values and emitting up to 4 textures with alpha-faded edge masks. We
-  // simplify to one tile per cell via the bottom-left corner's palette idx.
-  // This loses tile-type transitions but matches the per-cell variation
-  // index naturally (variations are per-corner; bl's variation is canonical).
-  const cellPalette = new Uint8Array(numCells)
-  const cellVariation = new Uint8Array(numCells)
-  // Histogram of palette usage so we know which buckets to even build.
-  const paletteUseCount = new Array<number>(t.palette.length).fill(0)
-  for (let j = 0; j < H - 1; j++) {
-    for (let i = 0; i < W - 1; i++) {
-      const bl = j * W + i
-      const cell = j * (W - 1) + i
-      const p = t.ground_tex[bl]
-      cellPalette[cell] = p
-      cellVariation[cell] = t.ground_var[bl] & 0x1F
-      if (p < paletteUseCount.length) paletteUseCount[p]++
-    }
-  }
-
-  // ---- Phase 2: load palette textures ----
-  //
-  // Issue each viewer.load in parallel. Reforged ships DDS only; we ask for
-  // `.dds` first and let the assetHandler's BLP↔DDS swap cover the rare
-  // legacy case where the texture file is actually a BLP.
-  //
-  // The loaded resource has `webglResource: WebGLTexture | null` and
-  // `width`/`height`. Extended atlases are width = 2 * height (an extra 4×4
-  // grid of variation tiles fused to the right of the main 4×4).
+  // ---- Load palette textures (parallel) ----
   type PaletteTex = {
     glTex: WebGLTexture | null
     extended: boolean
+    width: number
+    height: number
+    fallback: [number, number, number]
   }
   const paletteTextures: PaletteTex[] = new Array(t.palette.length)
   const palettePromises: Promise<void>[] = []
   for (let p = 0; p < t.palette.length; p++) {
-    paletteTextures[p] = { glTex: null, extended: false }
-    if (paletteUseCount[p] === 0) continue // not used by any cell, skip the load
+    const fb = t.palette_colors?.[p]
+    const fallback: [number, number, number] = fb
+      ? [fb[0] / 255, fb[1] / 255, fb[2] / 255]
+      : [0.4, 0.4, 0.4]
+    paletteTextures[p] = { glTex: null, extended: false, width: 256, height: 256, fallback }
     const stem = t.palette_textures?.[p]
     if (!stem) {
       flog(`[terrain] palette[${p}] (${t.palette[p]}) has no Terrain.slk path; using fallback color`)
@@ -312,12 +453,13 @@ export async function buildTerrain(
           flog(`[terrain] palette[${p}] (${t.palette[p]}) failed to load: ${path}`)
           return
         }
-        // Detect extended (variation half packed to the right).
-        // Typical textures: 256×256 (non-extended), 512×256 (extended).
         const w = res.width as number
         const h = res.height as number
         const extended = w >= 2 * h
-        paletteTextures[p] = { glTex: res.webglResource as WebGLTexture, extended }
+        paletteTextures[p] = {
+          glTex: res.webglResource as WebGLTexture,
+          extended, width: w, height: h, fallback,
+        }
         flog(`[terrain] palette[${p}] (${t.palette[p]}) loaded ${w}×${h} extended=${extended} from ${path}`)
       }).catch((e: unknown) => {
         flog(`[terrain] palette[${p}] (${t.palette[p]}) load threw:`,
@@ -327,197 +469,245 @@ export async function buildTerrain(
   }
   await Promise.all(palettePromises)
 
-  // ---- Phase 3: build per-palette buckets ----
+  // ---- Composite atlas ----
+  const atlasInfo = buildAtlas(gl, paletteTextures)
+  if (!atlasInfo) {
+    flog('[terrain] atlas build failed; aborting')
+    return null
+  }
+  const { atlas, atlasW, atlasH, rows } = atlasInfo
+  const numPalettes = rows.length
+
+  // ---- Pre-compute per-palette atlas mapping helpers ----
   //
-  // For each palette that's actually used: walk all cells, collect those
-  // with this palette as primary, emit 4 verts + 6 indices per cell with UVs
-  // that point into the chosen sub-tile slot in the (4×4) or (4×8) atlas.
+  // For palette p, sub-tile slot k, the sub-tile origin (in normalized atlas
+  // UV) is (atlasU0, atlasV0) and the sub-tile size in normalized atlas UV
+  // is (subW, subH). Both depend on whether the palette is extended.
   //
-  // Sub-tile slot k maps to atlas pixel-coord origin:
-  //   non-extended (4×4 layout): (k % 4) / 4, (k / 4) / 4
-  //   extended    (8×4 layout): (k % 8) / 8, (k / 8) / 4
-  // Sub-tile size in normalized UV = (1/4, 1/4) for non-extended,
-  //                                 (1/8, 1/4) for extended.
+  // Layout within a row (palette p occupies rows [(numPalettes-p-1)*256,
+  // (numPalettes-p)*256] in pixels):
+  //   non-extended: 4 cols × 4 rows of 64×64 sub-tiles in the left half
+  //                 → col c=0..3 at u = c * (1/8), width = (1/8) of atlas
+  //                 → row r=0..3 at v_within_row = r * 0.25 (top→bottom in
+  //                   image y-down, so r=0 is the TOP of the sub-tile grid)
+  //   extended:     8 cols × 4 rows of 64×64 sub-tiles spanning full row
+  //                 → col c=0..7 at u = c * (1/8), width = (1/8)
+  //                 → same row layout
   //
-  // Per the BLP/DDS convention, UV (0,0) is top-left of the image; sub-tile
-  // (col, row) sits at (col * size, row * size) in normalized UV. WebGL's
-  // texture sampling is top-down by default for these decoded resources
-  // (mdx-m3-viewer doesn't apply UNPACK_FLIP_Y for terrain textures).
+  // Edge inset: tighten by 1% of sub-tile size to suppress LINEAR-filter
+  // bleed from adjacent sub-tiles. The atlas's row boundaries are also a
+  // potential bleed source (palette p+1's first row bleeds up into
+  // palette p's last row); inset on the row v handles that too.
+  function subTileAtlasRect(p: number, slot: number): {
+    u0: number; v0: number; sw: number; sh: number; rowV: number;
+  } {
+    const ext = rows[p].extended
+    const subCols = ext ? 8 : 4
+    const subRows = 4
+    // In pixels within the row (image y-down, row top at pixel 0):
+    const colW = 64 // 256/4 or 512/8 = 64
+    const rowH = 64 // 256/4
+    const sc = slot % subCols
+    const sr = Math.floor(slot / subCols)
+    const xPx = sc * colW
+    const yPxTop = sr * rowH // top of the sub-tile within the row (image y-down)
+
+    // The row sits at atlas pixel rows [palY .. palY + 256), where palY is
+    // the row's BOTTOM in atlas-pixel-y (since we used dstY = atlasH -
+    // (p+1)*256 above — yes, atlas pixel y goes UP from bottom in GL coords,
+    // so the row spans GL y from (atlasH-(p+1)*256) up to (atlasH-p*256)).
+    //
+    // The blit copied the source texture with UV (0,0) at the destination
+    // viewport's bottom-left. That means the image's "y=0 pixel" (top of
+    // the source) ended up at GL pixel y = atlasH - p*256 - 1 (top of the
+    // destination row). And image's "y=255 pixel" (bottom of source) at
+    // GL pixel y = atlasH - (p+1)*256.
+    //
+    // So sub-tile (sc, sr) in image-y-down coordinates occupies image rows
+    // [sr*64 .. (sr+1)*64), which maps to GL pixel-y rows:
+    //   GL y_top    = atlasH - p*256 - sr*64 - 1
+    //   GL y_bottom = atlasH - p*256 - (sr+1)*64
+    //
+    // Atlas UV v = GL_pixel_y / atlasH. Sub-tile origin (bottom-left in UV
+    // coords with v-up): u = xPx / atlasW, v = (atlasH - p*256 -
+    // (sr+1)*64) / atlasH. Sub-tile size: sw = colW/atlasW, sh = rowH/atlasH.
+    // Palette p occupies atlas v ∈ [base_v .. base_v + 256/atlasH], where
+    // base_v = (atlasH - (p+1)*256) / atlasH (palette 0 is at the TOP of
+    // the atlas in v-up GL UV-space, so base_v=1-256/atlasH for p=0).
+    // Within that palette's strip, source UV v is "v-down" in image terms:
+    // sub-tile row sr=0 is the top of the image, occupying source UV v
+    // [0..0.25]. Translated to atlas UV (which is v-up but the blit
+    // preserves the source's v-down orientation across the strip):
+    //   atlas_v(image_top_of_subtile) = base_v + sr * 256/atlasH * 0.25
+    //                                 = base_v + sr * 64/atlasH
+    const baseV = (atlasH - (p + 1) * 256) / atlasH
+    const u0 = xPx / atlasW
+    const v0 = baseV + sr * (rowH / atlasH)
+    const sw = colW / atlasW
+    const sh = rowH / atlasH
+    // Inset by 1% of sub-tile to suppress LINEAR bleed from neighbors.
+    const insetU = sw * 0.01
+    const insetV = sh * 0.01
+    return {
+      u0: u0 + insetU,
+      v0: v0 + insetV,
+      sw: sw - 2 * insetU,
+      sh: sh - 2 * insetV,
+      rowV: baseV,
+    }
+  }
+
+  // ---- Build whole-map mesh (single VBO/IBO) ----
   //
-  // Within a cell, we map quad corners to sub-tile corners:
-  //   bottom-left  vert → (u0, v1)  [bottom-left of the sub-tile in v-down]
-  //   bottom-right vert → (u1, v1)
-  //   top-left     vert → (u0, v0)
-  //   top-right    vert → (u1, v0)
-  // …matching the HiveWE convention `UV = vec2(vPos.x, 1 - vPos.y)`.
+  // Per-vertex: pos(3) + shadowUV(2) + cellUV(2) + subUV01(4) + subUV23(4)
+  //           + subSize01(4) + subSize23(4) + rowV(4) = 27 floats.
+  //
+  // 4 verts per cell × numCells cells. uint32 indices when vCount > 65535
+  // (needs OES_element_index_uint, ships universally in modern browsers).
+  const uintExt = gl.getExtension('OES_element_index_uint')
+  const has32Bit = !!uintExt
+
+  const vCount = numCells * 4
+  const need32 = vCount > 65535
+  if (need32 && !has32Bit) {
+    flog(`[terrain] needs uint32 indices (${vCount} verts) but OES_element_index_uint missing`)
+    return null
+  }
+  const STRIDE_F = 27
+  const verts = new Float32Array(vCount * STRIDE_F)
+  const indices = need32
+    ? new Uint32Array(numCells * 6)
+    : new Uint16Array(numCells * 6)
+  const indexType = need32 ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT
 
   const cx = t.center_offset[0]
   const cy = t.center_offset[1]
   const invWm1 = 1 / Math.max(1, W - 1)
   const invHm1 = 1 / Math.max(1, H - 1)
 
-  const buckets: TileBucket[] = []
-  for (let p = 0; p < t.palette.length; p++) {
-    const usedCells = paletteUseCount[p]
-    if (usedCells === 0) continue
+  let vOff = 0
+  let iOff = 0
+  let baseVert = 0
 
-    const ptx = paletteTextures[p]
-    const extended = ptx.extended
-    const subCols = extended ? 8 : 4
-    const subRows = 4
-    const dU = 1 / subCols
-    const dV = 1 / subRows
+  // Per-corner data assembled per cell. Corner order TL, TR, BR, BL matches
+  // the bilinear-weight layout in the frag shader.
+  for (let j = 0; j < H - 1; j++) {
+    for (let i = 0; i < W - 1; i++) {
+      const bl = j * W + i
+      const br = bl + 1
+      const tl = bl + W
+      const tr = tl + 1
 
-    // Layout: 8 floats per vert (pos.xyz + uv.uv + shadowUV.uv + padding).
-    // We use 7 floats actually — pos(3) + uv(2) + shadowUV(2) = 7.
-    const vCount = usedCells * 4
-    const need32 = vCount > 65535
-    if (need32 && !has32Bit) {
-      flog(`[terrain] palette[${p}] uses ${usedCells} cells (${vCount} verts) — needs uint32 indices but OES_element_index_uint missing, skipping`)
-      continue
-    }
-    const verts = new Float32Array(vCount * 7)
-    const indices = need32
-      ? new Uint32Array(usedCells * 6)
-      : new Uint16Array(usedCells * 6)
-    const indexType = need32 ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT
-    let vOff = 0
-    let iOff = 0
-    let baseVert = 0
+      const xL = cx + i * 128
+      const xR = cx + (i + 1) * 128
+      const yB = cy + j * 128
+      const yT = cy + (j + 1) * 128
 
-    for (let j = 0; j < H - 1; j++) {
-      for (let i = 0; i < W - 1; i++) {
-        const cell = j * (W - 1) + i
-        if (cellPalette[cell] !== p) continue
+      // 4 corners' palette indices.
+      // ground_tex[v] is the palette index for vertex v (NOT cell). The
+      // 4 corners of cell (i, j) live at vertex indices bl, br, tl, tr.
+      // HiveWE's convention: each corner's "owned" tile is what
+      // ground_tex[that-corner-vertex] points to. The bilinear weights
+      // then fade between the 4 corners' tiles across the cell.
+      const pTL = Math.min(t.ground_tex[tl] | 0, numPalettes - 1)
+      const pTR = Math.min(t.ground_tex[tr] | 0, numPalettes - 1)
+      const pBR = Math.min(t.ground_tex[br] | 0, numPalettes - 1)
+      const pBL = Math.min(t.ground_tex[bl] | 0, numPalettes - 1)
 
-        const variation = cellVariation[cell]
-        const subSlot = pickSubTile(extended, variation)
-        // sub-tile column (0..subCols-1) and row (0..3)
-        const sc = subSlot % subCols
-        const sr = Math.floor(subSlot / subCols)
-        const u0 = sc * dU
-        const v0 = sr * dV
-        const u1 = u0 + dU
-        const v1 = v0 + dV
+      // Each corner's own variation chooses its sub-tile slot within its
+      // own palette. Variations are per-corner (ground_var array indexed by
+      // vertex), independent for each owned tile.
+      const vTL = t.ground_var[tl] & 0x1F
+      const vTR = t.ground_var[tr] & 0x1F
+      const vBR = t.ground_var[br] & 0x1F
+      const vBL = t.ground_var[bl] & 0x1F
 
-        // Inset the UVs by half a sub-texel to avoid bleeding from the
-        // adjacent sub-tile during LINEAR filtering at the seams. Using
-        // ~0.5% of the sub-tile width as inset — too little = visible
-        // bleed, too much = duplicated edge artifacts.
-        const inset = Math.min(dU, dV) * 0.01
-        const uL = u0 + inset
-        const uR = u1 - inset
-        const vT = v0 + inset
-        const vB = v1 - inset
+      const slotTL = pickSubTile(rows[pTL].extended, vTL)
+      const slotTR = pickSubTile(rows[pTR].extended, vTR)
+      const slotBR = pickSubTile(rows[pBR].extended, vBR)
+      const slotBL = pickSubTile(rows[pBL].extended, vBL)
 
-        const bl = j * W + i
-        const br = bl + 1
-        const tl = bl + W
-        const tr = tl + 1
+      const rTL = subTileAtlasRect(pTL, slotTL)
+      const rTR = subTileAtlasRect(pTR, slotTR)
+      const rBR = subTileAtlasRect(pBR, slotBR)
+      const rBL = subTileAtlasRect(pBL, slotBL)
 
-        const xL = cx + i * 128
-        const xR = cx + (i + 1) * 128
-        const yB = cy + j * 128
-        const yT = cy + (j + 1) * 128
+      // Shadow UVs.
+      const sBLu = i * invWm1, sBLv = j * invHm1
+      const sBRu = (i + 1) * invWm1, sBRv = sBLv
+      const sTLu = sBLu, sTLv = (j + 1) * invHm1
+      const sTRu = sBRu, sTRv = sTLv
 
-        // Shadow UVs — sample the shadow texture at the vertex's grid
-        // position (smooth bilinear). One float-pair per vertex.
-        const sBLu = i * invWm1, sBLv = j * invHm1
-        const sBRu = (i + 1) * invWm1, sBRv = sBLv
-        const sTLu = sBLu, sTLv = (j + 1) * invHm1
-        const sTRu = sBRu, sTRv = sTLv
+      // Pre-pack the 4 per-corner sub-tile attributes (same across all 4
+      // verts of this cell).
+      const subUV01x = rTL.u0, subUV01y = rTL.v0, subUV01z = rTR.u0, subUV01w = rTR.v0
+      const subUV23x = rBR.u0, subUV23y = rBR.v0, subUV23z = rBL.u0, subUV23w = rBL.v0
+      const subSz01x = rTL.sw, subSz01y = rTL.sh, subSz01z = rTR.sw, subSz01w = rTR.sh
+      const subSz23x = rBR.sw, subSz23y = rBR.sh, subSz23z = rBL.sw, subSz23w = rBL.sh
+      // rowV is unused in the frag shader currently (sub-tile origin already
+      // includes the row's vertical offset) — keep the attribute reserved
+      // for future per-palette work (e.g. cliff cover textures).
+      const rowVx = rTL.rowV, rowVy = rTR.rowV, rowVz = rBR.rowV, rowVw = rBL.rowV
 
-        // Vert order: bl, br, tl, tr. Triangles: (bl, br, tr), (bl, tr, tl).
-        // bottom-left vertex
-        verts[vOff++] = xL; verts[vOff++] = yB; verts[vOff++] = t.heights[bl]
-        verts[vOff++] = uL; verts[vOff++] = vB
-        verts[vOff++] = sBLu; verts[vOff++] = sBLv
-        // bottom-right vertex
-        verts[vOff++] = xR; verts[vOff++] = yB; verts[vOff++] = t.heights[br]
-        verts[vOff++] = uR; verts[vOff++] = vB
-        verts[vOff++] = sBRu; verts[vOff++] = sBRv
-        // top-left vertex
-        verts[vOff++] = xL; verts[vOff++] = yT; verts[vOff++] = t.heights[tl]
-        verts[vOff++] = uL; verts[vOff++] = vT
-        verts[vOff++] = sTLu; verts[vOff++] = sTLv
-        // top-right vertex
-        verts[vOff++] = xR; verts[vOff++] = yT; verts[vOff++] = t.heights[tr]
-        verts[vOff++] = uR; verts[vOff++] = vT
-        verts[vOff++] = sTRu; verts[vOff++] = sTRv
-
-        // Triangles. CCW when viewed from +Z (above).
-        indices[iOff++] = baseVert + 0
-        indices[iOff++] = baseVert + 1
-        indices[iOff++] = baseVert + 3
-        indices[iOff++] = baseVert + 0
-        indices[iOff++] = baseVert + 3
-        indices[iOff++] = baseVert + 2
-        baseVert += 4
+      // Vert layout helper: write one vertex's STRIDE_F floats.
+      // cellUV per vertex: bl=(0,0), br=(1,0), tl=(0,1), tr=(1,1).
+      function writeVert(
+        x: number, y: number, z: number,
+        cellU: number, cellV: number,
+        shU: number, shV: number,
+      ) {
+        verts[vOff++] = x; verts[vOff++] = y; verts[vOff++] = z
+        verts[vOff++] = shU; verts[vOff++] = shV
+        verts[vOff++] = cellU; verts[vOff++] = cellV
+        verts[vOff++] = subUV01x; verts[vOff++] = subUV01y; verts[vOff++] = subUV01z; verts[vOff++] = subUV01w
+        verts[vOff++] = subUV23x; verts[vOff++] = subUV23y; verts[vOff++] = subUV23z; verts[vOff++] = subUV23w
+        verts[vOff++] = subSz01x; verts[vOff++] = subSz01y; verts[vOff++] = subSz01z; verts[vOff++] = subSz01w
+        verts[vOff++] = subSz23x; verts[vOff++] = subSz23y; verts[vOff++] = subSz23z; verts[vOff++] = subSz23w
+        verts[vOff++] = rowVx; verts[vOff++] = rowVy; verts[vOff++] = rowVz; verts[vOff++] = rowVw
       }
+
+      writeVert(xL, yB, t.heights[bl], 0, 0, sBLu, sBLv) // BL
+      writeVert(xR, yB, t.heights[br], 1, 0, sBRu, sBRv) // BR
+      writeVert(xL, yT, t.heights[tl], 0, 1, sTLu, sTLv) // TL
+      writeVert(xR, yT, t.heights[tr], 1, 1, sTRu, sTRv) // TR
+
+      indices[iOff++] = baseVert + 0
+      indices[iOff++] = baseVert + 1
+      indices[iOff++] = baseVert + 3
+      indices[iOff++] = baseVert + 0
+      indices[iOff++] = baseVert + 3
+      indices[iOff++] = baseVert + 2
+      baseVert += 4
     }
-
-    const vbo = gl.createBuffer()!
-    gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
-    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW)
-    const ibo = gl.createBuffer()!
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo)
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
-
-    const fb = t.palette_colors?.[p]
-    const fallbackColor: [number, number, number] = fb
-      ? [fb[0] / 255, fb[1] / 255, fb[2] / 255]
-      : [0.4, 0.4, 0.4]
-
-    buckets.push({
-      paletteIdx: p,
-      vbo,
-      ibo,
-      indexType,
-      triCount: usedCells * 2,
-      glTex: ptx.glTex,
-      fallbackColor,
-    })
   }
 
-  if (buckets.length === 0) {
-    flog('[terrain] no buckets built (every palette had zero cells?)')
-    return null
-  }
+  const vbo = gl.createBuffer()!
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
+  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW)
+  const ibo = gl.createBuffer()!
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo)
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
 
   const prog = buildProgram(gl)
-  const stride = 7 * 4
+  const STRIDE_B = STRIDE_F * 4
+  const triCount = numCells * 2
 
-  const shadowTex = uploadShadowTexture(gl, t.shadow_map, t.shadow_map_width, t.shadow_map_height)
-  if (shadowTex) {
-    flog(`[terrain] shadow map ${t.shadow_map_width}×${t.shadow_map_height} uploaded`)
-  }
+  // war3map.shd is the baked doodad-cast shadow map. HiveWE skips rendering it;
+  // we follow suit because at game-scale viewport zooms the shadows appear as
+  // floating cell-aligned dark blocks without their visible casters.
+  const shadowTex: WebGLTexture | null = null
 
-  // Configure each loaded palette texture for CLAMP_TO_EDGE wrap so the
-  // sub-tile inset doesn't bleed across the full-texture boundary (the
-  // viewer's defaults are REPEAT which is wrong for atlas sampling).
-  for (const b of buckets) {
-    if (!b.glTex) continue
-    gl.bindTexture(gl.TEXTURE_2D, b.glTex)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-    // LINEAR_MIPMAP_LINEAR would be nicer, but viewer.load already generated
-    // mipmaps for BLP/DDS; setting LINEAR-only here avoids mipmap-bleed
-    // between sub-tiles at low zoom (mip levels of the atlas average across
-    // sub-tile boundaries, producing a smudged look). Trade-off: distant
-    // terrain looks slightly aliased.
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-  }
-  gl.bindTexture(gl.TEXTURE_2D, null)
-
-  flog(`[terrain] built ${buckets.length} palette buckets covering ${numCells} cells`)
+  flog(`[terrain] built blended mesh: ${numCells} cells, ${numPalettes} palettes, atlas ${atlasW}×${atlasH}`)
 
   return {
-    drawCallCount: buckets.length,
+    drawCallCount: 1,
     draw(viewProj: Float32Array) {
       gl.useProgram(prog.program)
-
       gl.uniformMatrix4fv(prog.uViewProj, false, viewProj)
+
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, atlas)
+      gl.uniform1i(prog.uAtlas, 0)
 
       if (shadowTex) {
         gl.activeTexture(gl.TEXTURE1)
@@ -528,50 +718,47 @@ export async function buildTerrain(
         gl.uniform1i(prog.uHasShadow, 0)
       }
 
-      // Depth test on; depth write on; no blending — opaque ground.
       gl.enable(gl.DEPTH_TEST)
       gl.depthFunc(gl.LEQUAL)
       gl.depthMask(true)
       gl.disable(gl.BLEND)
       gl.disable(gl.CULL_FACE)
 
-      for (const b of buckets) {
-        gl.bindBuffer(gl.ARRAY_BUFFER, b.vbo)
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, b.ibo)
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo)
 
-        gl.enableVertexAttribArray(prog.aPosition)
-        gl.vertexAttribPointer(prog.aPosition, 3, gl.FLOAT, false, stride, 0)
-        gl.enableVertexAttribArray(prog.aUV)
-        gl.vertexAttribPointer(prog.aUV, 2, gl.FLOAT, false, stride, 3 * 4)
-        if (prog.aShadowUV >= 0) {
-          gl.enableVertexAttribArray(prog.aShadowUV)
-          gl.vertexAttribPointer(prog.aShadowUV, 2, gl.FLOAT, false, stride, 5 * 4)
+      let off = 0
+      function setAttr(loc: number, size: number) {
+        if (loc >= 0) {
+          gl.enableVertexAttribArray(loc)
+          gl.vertexAttribPointer(loc, size, gl.FLOAT, false, STRIDE_B, off)
         }
-
-        if (b.glTex) {
-          gl.activeTexture(gl.TEXTURE0)
-          gl.bindTexture(gl.TEXTURE_2D, b.glTex)
-          gl.uniform1i(prog.uTileTex, 0)
-          gl.uniform1i(prog.uHasTexture, 1)
-        } else {
-          gl.uniform1i(prog.uHasTexture, 0)
-        }
-        gl.uniform3f(prog.uFallbackColor, b.fallbackColor[0], b.fallbackColor[1], b.fallbackColor[2])
-
-        gl.drawElements(gl.TRIANGLES, b.triCount * 3, b.indexType, 0)
+        off += size * 4
       }
+      setAttr(prog.aPosition, 3)
+      setAttr(prog.aShadowUV, 2)
+      setAttr(prog.aCellUV, 2)
+      setAttr(prog.aSubUV01, 4)
+      setAttr(prog.aSubUV23, 4)
+      setAttr(prog.aSubSize01, 4)
+      setAttr(prog.aSubSize23, 4)
+      setAttr(prog.aRowV, 4)
 
-      gl.disableVertexAttribArray(prog.aPosition)
-      gl.disableVertexAttribArray(prog.aUV)
+      gl.drawElements(gl.TRIANGLES, triCount * 3, indexType, 0)
+
+      if (prog.aPosition >= 0) gl.disableVertexAttribArray(prog.aPosition)
       if (prog.aShadowUV >= 0) gl.disableVertexAttribArray(prog.aShadowUV)
+      if (prog.aCellUV >= 0) gl.disableVertexAttribArray(prog.aCellUV)
+      if (prog.aSubUV01 >= 0) gl.disableVertexAttribArray(prog.aSubUV01)
+      if (prog.aSubUV23 >= 0) gl.disableVertexAttribArray(prog.aSubUV23)
+      if (prog.aSubSize01 >= 0) gl.disableVertexAttribArray(prog.aSubSize01)
+      if (prog.aSubSize23 >= 0) gl.disableVertexAttribArray(prog.aSubSize23)
+      if (prog.aRowV >= 0) gl.disableVertexAttribArray(prog.aRowV)
     },
     dispose() {
-      for (const b of buckets) {
-        gl.deleteBuffer(b.vbo)
-        gl.deleteBuffer(b.ibo)
-        // Don't delete b.glTex — owned by viewer.resourceMap, reusable
-        // across map loads.
-      }
+      gl.deleteBuffer(vbo)
+      gl.deleteBuffer(ibo)
+      gl.deleteTexture(atlas)
       if (shadowTex) gl.deleteTexture(shadowTex)
       gl.deleteProgram(prog.program)
     },

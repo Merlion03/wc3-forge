@@ -85,6 +85,7 @@ type Session struct {
 	unitMods         *w3objmod.File // war3map.w3u (parsed for future use)
 	itemMods         *w3objmod.File // war3map.w3t
 	shadowMap        *shd.File      // war3map.shd
+	strings          wts.Strings    // war3map.wts, for TRIGSTR_<n> resolution
 
 	selection      SelectionState
 	listeners      []func(SelectionState)
@@ -248,6 +249,7 @@ func (s *Session) Open(path string) error {
 	s.unitMods = unitMods
 	s.itemMods = itemMods
 	s.shadowMap = shadowMap
+	s.strings = wtsStrings
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
 	if prevSource != nil {
@@ -294,6 +296,7 @@ func (s *Session) Close() {
 	s.unitMods = nil
 	s.itemMods = nil
 	s.shadowMap = nil
+	s.strings = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
 	if prevSource != nil {
@@ -301,6 +304,15 @@ func (s *Session) Close() {
 	}
 	s.notifySelection()
 	s.notifyMapChanged(false)
+}
+
+// Strings returns the parsed war3map.wts trigger-strings table, or nil if
+// the loaded map doesn't ship one. Used to resolve TRIGSTR_<n> references
+// in per-map object modifications.
+func (s *Session) Strings() wts.Strings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.strings
 }
 
 // RawMapBytes returns the raw .w3x file bytes if the current map was opened
@@ -402,6 +414,21 @@ func (s *Session) DestructibleMods() *w3objmod.File {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.destructibleMods
+}
+
+// UnitMods returns the parsed war3map.w3u (per-map unit modifications +
+// new derived types), or nil if absent.
+func (s *Session) UnitMods() *w3objmod.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.unitMods
+}
+
+// ItemMods returns the parsed war3map.w3t, or nil if absent.
+func (s *Session) ItemMods() *w3objmod.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.itemMods
 }
 
 // ShadowMap returns the parsed war3map.shd, or nil if absent.

@@ -79,6 +79,8 @@ interface UnitTypeInfo {
   red: number
   green: number
   blue: number
+  name: string
+  category: string
 }
 
 interface DoodadTypeInfo {
@@ -86,6 +88,8 @@ interface DoodadTypeInfo {
   num_var: number
   fixed_rot: number
   model_scale: number
+  name: string
+  category: string
 }
 
 // Resolve the SLK 'file' column to an asset path. SLK rows for stock
@@ -147,6 +151,8 @@ export interface SceneAPI {
   setReforgedMode(reforged: boolean): void
   /** Current reforged flag — for UI display. */
   isReforged(): boolean
+  /** Move the camera pivot to (x, y) in world XY. Z defaults to 0 (ground plane). */
+  panTo(x: number, y: number, z?: number): void
 }
 
 export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {
@@ -745,5 +751,8 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       }
     },
     isReforged() { return currentReforged },
+    panTo(x: number, y: number, z: number = 0) {
+      camera.setPivot(x, y, z)
+    },
   }
 }

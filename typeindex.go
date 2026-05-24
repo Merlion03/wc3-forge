@@ -10,6 +10,8 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/slk"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3objmod"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/wesstrings"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/wts"
 )
 
 // TypeIndex resolves a FourCC type ID ("Hpal", "ATtr", …) to the data the
@@ -30,6 +32,8 @@ type UnitTypeInfo struct {
 	Red        int     `json:"red"`         // 0..255 vertex tint
 	Green      int     `json:"green"`       // 0..255 vertex tint
 	Blue       int     `json:"blue"`        // 0..255 vertex tint
+	Name       string  `json:"name"`        // resolved display name (e.g. "Paladin"); empty if unknown
+	Category   string  `json:"category"`    // human-readable group (e.g. "Human Hero", "Item")
 }
 
 // DoodadTypeInfo carries everything the JS scene needs to instantiate a
@@ -39,6 +43,8 @@ type DoodadTypeInfo struct {
 	NumVar     int     `json:"num_var"`     // variation count; 1 means no suffix
 	FixedRot   float64 `json:"fixed_rot"`   // terrain-doodad rotation override (degrees)
 	ModelScale float64 `json:"model_scale"` // baseline scale; default 1
+	Name       string  `json:"name"`        // resolved display name (e.g. "Summer Tree Wall"); empty if unknown
+	Category   string  `json:"category"`    // human-readable group (e.g. "Trees/Destructibles")
 }
 
 var (
@@ -46,6 +52,9 @@ var (
 	indexErr  error
 	unitIndex map[string]UnitTypeInfo
 	doodIndex map[string]DoodadTypeInfo
+
+	wesOnce sync.Once
+	wesTab  *wesstrings.Table
 )
 
 func loadSLKs(m *slk.Mapped, names []string) {
@@ -92,6 +101,46 @@ func readBaseAsset(name string) ([]byte, bool, error) {
 	return c.ReadFile(clean)
 }
 
+// wesStrings lazily loads the WC3 stock string table (UI/WorldEditStrings.txt
+// + WorldEditGameStrings.txt). Empty Table if CASC is unavailable.
+func wesStrings() *wesstrings.Table {
+	wesOnce.Do(func() {
+		t := wesstrings.New()
+		for _, name := range []string{
+			"UI/WorldEditStrings.txt",
+			"UI/WorldEditGameStrings.txt",
+		} {
+			data, ok, err := readBaseAsset(name)
+			if err != nil || !ok {
+				log.Printf("typeindex: wes load skip %s: ok=%v err=%v", name, ok, err)
+				continue
+			}
+			if err := t.Load(data); err != nil {
+				log.Printf("typeindex: wes parse %s: %v", name, err)
+			}
+		}
+		wesTab = t
+	})
+	return wesTab
+}
+
+// resolveDisplay normalizes a raw SLK/INI cell value into something a UI can
+// show: dereferences TRIGSTR_<n> (map-local strings) and WESTRING_FOO
+// (WC3 stock strings), strips WC3 color codes (|cAARRGGBB ... |r), trims.
+// A no-op on plain text inputs.
+func resolveDisplay(raw string, mapStrings wts.Strings) string {
+	if raw == "" {
+		return ""
+	}
+	v := raw
+	if strings.HasPrefix(v, "TRIGSTR_") {
+		v = mapStrings.Display(v)
+	} else if strings.HasPrefix(v, "WESTRING_") {
+		v = wesStrings().Resolve(v)
+	}
+	return strings.TrimSpace(wts.StripColorCodes(v))
+}
+
 // buildTypeIndex parses every base SLK we care about. Failures on individual
 // files log a warning but don't abort — partial coverage beats no coverage,
 // and the asset handler will 404 missing models cleanly.
@@ -102,6 +151,11 @@ func readBaseAsset(name string) ([]byte, bool, error) {
 // unit lookup returns a row with no `file` column → nothing renders. The
 // lib only loads them when isReforged=true; we have to load them regardless,
 // because our CASC source IS a Reforged install.
+//
+// The race-specific *UnitStrings.txt / *UnitFunc.txt files are also merged
+// here so each row picks up its proper `Name=Paladin` (the stock SLK only
+// has internal lowercase identifiers like "paladin"). Same with the Doodad/
+// Destructable SkinStrings files for display names.
 func buildTypeIndex() {
 	units := slk.New()
 	loadSLKs(units, []string{
@@ -112,6 +166,13 @@ func buildTypeIndex() {
 	loadINIs(units, []string{
 		"Units/unitSkin.txt",
 		"Units/itemSkin.txt",
+		"Units/HumanUnitStrings.txt",
+		"Units/OrcUnitStrings.txt",
+		"Units/UndeadUnitStrings.txt",
+		"Units/NightElfUnitStrings.txt",
+		"Units/NeutralUnitStrings.txt",
+		"Units/CampaignUnitStrings.txt",
+		"Units/ItemStrings.txt",
 	})
 
 	doodads := slk.New()
@@ -124,6 +185,8 @@ func buildTypeIndex() {
 		"Units/destructableSkin.txt",
 	})
 
+	wes := wesStrings()
+
 	unitIndex = make(map[string]UnitTypeInfo, len(units.Rows))
 	for id, row := range units.Rows {
 		info := UnitTypeInfo{
@@ -133,6 +196,8 @@ func buildTypeIndex() {
 			Red:        int(row.Number("red")),
 			Green:      int(row.Number("green")),
 			Blue:       int(row.Number("blue")),
+			Name:       resolveDisplay(row.String("name"), nil),
+			Category:   unitCategory(row, wes),
 		}
 		// SLKs default to scale 1 when the column is absent; Number returns
 		// 0 in that case which would render the model invisibly small.
@@ -152,6 +217,8 @@ func buildTypeIndex() {
 			// Reforged skin .txt also carries defScale:hd for HD-only sizing
 			// which we ignore (SD-only rendering for now).
 			ModelScale: firstNonZero(row.Number("defScale"), row.Number("modelScale")),
+			Name:       resolveDisplay(row.String("name"), nil),
+			Category:   doodadCategory(row.String("category"), wes),
 		}
 		if info.NumVar <= 0 {
 			info.NumVar = 1
@@ -164,6 +231,94 @@ func buildTypeIndex() {
 
 	log.Printf("typeindex: %d units/items, %d doodads/destructibles indexed",
 		len(unitIndex), len(doodIndex))
+}
+
+// unitCategory derives a human-readable bucket label from the unit row.
+// Heroes use the race + "Hero". Items have a `class` column ("Artifact",
+// "Permanent", "Charged"). Buildings have `isbldg=1`. Everything else
+// falls back to a titlecased `race` column.
+func unitCategory(row slk.MappedRow, wes *wesstrings.Table) string {
+	unitclass := row.String("unitclass")
+	race := strings.TrimSpace(row.String("race"))
+	class := strings.TrimSpace(row.String("class"))
+	isBldg := row.String("isbldg") == "1"
+
+	if class != "" {
+		// Items like ratf carry a class ("Artifact", "Charged", …). Item rows
+		// have no race; class doubles as their category.
+		return "Item · " + class
+	}
+	if strings.Contains(unitclass, "Hero") {
+		return titleRace(race) + " Hero"
+	}
+	if isBldg {
+		return titleRace(race) + " Building"
+	}
+	if race != "" {
+		return titleRace(race)
+	}
+	return ""
+}
+
+// titleRace turns the lowercase race tag in the SLK ("human", "nightelf",
+// "creeps") into a UI-friendly label. WC3 stock races are a small fixed
+// set so we hardcode the pretty names rather than calling into WESTRINGS.
+func titleRace(r string) string {
+	switch strings.ToLower(r) {
+	case "human":
+		return "Human"
+	case "orc":
+		return "Orc"
+	case "undead":
+		return "Undead"
+	case "nightelf":
+		return "Night Elf"
+	case "naga":
+		return "Naga"
+	case "creeps":
+		return "Creep"
+	case "critters":
+		return "Critter"
+	case "commoner":
+		return "Commoner"
+	case "demon":
+		return "Demon"
+	case "other":
+		return "Special"
+	case "":
+		return ""
+	default:
+		return strings.Title(r)
+	}
+}
+
+// doodadCategoryKeys maps the single-letter `category` column in Doodads.slk
+// to the WESTRING_DTYPE_* key in UI/WorldEditGameStrings.txt. Letters come
+// from Blizzard's stock data — verified by enumerating Doodads.slk.
+var doodadCategoryKeys = map[string]string{
+	"B": "WESTRING_DTYPE_BRIDGE",       // Bridges/Ramps
+	"C": "WESTRING_DTYPE_CLIFF",        // Cliff/Terrain
+	"D": "WESTRING_DTYPE_DESTRUCTABLE", // Trees/Destructibles
+	"E": "WESTRING_DTYPE_ENVIRONMENT",  // Environment
+	"O": "WESTRING_DTYPE_PROPS",        // Props
+	"P": "WESTRING_DTYPE_PATHING",      // Pathing Blockers
+	"S": "WESTRING_DTYPE_STRUCTURES",   // Structures
+	"T": "WESTRING_DTYPE_TERRAIN",      // Terrain
+	"W": "WESTRING_DTYPE_WATER",        // Water
+	"Z": "WESTRING_DTYPE_CINEMATIC",    // Cinematic
+}
+
+func doodadCategory(letter string, wes *wesstrings.Table) string {
+	letter = strings.ToUpper(strings.TrimSpace(letter))
+	if letter == "" {
+		return ""
+	}
+	if key, ok := doodadCategoryKeys[letter]; ok {
+		if v := wes.Lookup(key); v != "" {
+			return v
+		}
+	}
+	return letter
 }
 
 func ensureTypeIndex() error {
@@ -212,12 +367,31 @@ var doodadFieldMap = map[string]string{
 	"dvr1": "red",
 	"dvg1": "green",
 	"dvb1": "blue",
+	"dnam": "name",
+	"dcat": "category",
 	// Destructibles (DestructableMetaData.slk)
 	"bfil": "file",
 	"bvar": "numVar",
 	"bmis": "minScale",
 	"bmas": "maxScale",
 	"bfxr": "fixedRot",
+	"bnam": "name",
+	"bcat": "category",
+}
+
+// unitFieldMap maps the field-FourCCs used in war3map.w3u / war3map.w3t to
+// their SLK column names. We only consume display-name overrides for now;
+// expand as the renderer surfaces more fields.
+var unitFieldMap = map[string]string{
+	"unam": "name", // unit name override (w3u)
+	"unsf": "editorsuffix",
+	"utub": "tilesets",
+	"urac": "race",
+	"ucla": "unitclass",
+	"unam2": "name", // item name (w3t variant)
+	"unam_item": "name",
+	"unin": "description",
+	"inam": "name", // item name (w3t)
 }
 
 func resolveColumn(modID string, fields map[string]string) string {
@@ -227,7 +401,7 @@ func resolveColumn(modID string, fields map[string]string) string {
 	return modID
 }
 
-func applyDoodadOverrides(base DoodadTypeInfo, ov w3objmod.Overrides) DoodadTypeInfo {
+func applyDoodadOverrides(base DoodadTypeInfo, ov w3objmod.Overrides, mapStrings wts.Strings) DoodadTypeInfo {
 	out := base
 	for rawCol, val := range ov {
 		col := resolveColumn(rawCol, doodadFieldMap)
@@ -240,6 +414,22 @@ func applyDoodadOverrides(base DoodadTypeInfo, ov w3objmod.Overrides) DoodadType
 			out.ModelScale = parseFloat(val, base.ModelScale)
 		case "fixedrot":
 			out.FixedRot = parseFloat(val, base.FixedRot)
+		case "name":
+			out.Name = resolveDisplay(val, mapStrings)
+		case "category":
+			out.Category = doodadCategory(val, wesStrings())
+		}
+	}
+	return out
+}
+
+func applyUnitOverrides(base UnitTypeInfo, ov w3objmod.Overrides, mapStrings wts.Strings) UnitTypeInfo {
+	out := base
+	for rawCol, val := range ov {
+		col := resolveColumn(rawCol, unitFieldMap)
+		switch strings.ToLower(col) {
+		case "name":
+			out.Name = resolveDisplay(val, mapStrings)
 		}
 	}
 	return out
@@ -276,6 +466,7 @@ func mergeDoodadIndex() map[string]DoodadTypeInfo {
 	for k, v := range doodIndex {
 		out[k] = v
 	}
+	mapStrings := forge.Current.Strings()
 	for _, mods := range []*w3objmod.File{forge.Current.DoodadMods(), forge.Current.DestructibleMods()} {
 		if mods == nil {
 			continue
@@ -285,7 +476,7 @@ func mergeDoodadIndex() map[string]DoodadTypeInfo {
 			if !ok {
 				continue
 			}
-			out[edit.BaseID] = applyDoodadOverrides(base, edit.Overrides)
+			out[edit.BaseID] = applyDoodadOverrides(base, edit.Overrides, mapStrings)
 		}
 		for _, c := range mods.Customs {
 			base, ok := out[c.BaseID]
@@ -293,21 +484,52 @@ func mergeDoodadIndex() map[string]DoodadTypeInfo {
 				log.Printf("typeindex: custom %s missing base %s; skipping", c.ID, c.BaseID)
 				continue
 			}
-			out[c.ID] = applyDoodadOverrides(base, c.Overrides)
+			out[c.ID] = applyDoodadOverrides(base, c.Overrides, mapStrings)
 		}
 	}
 	return out
 }
 
-// GetUnitTypeIndex returns the full FourCC → UnitTypeInfo map. The frontend
-// caches this on first call; subsequent calls hit the in-memory cache.
+// mergeUnitIndex applies per-map w3u (units) + w3t (items) modifications.
+// Currently only display-name overrides flow through — the renderer doesn't
+// consume per-unit SLK overrides for its other fields yet.
+func mergeUnitIndex() map[string]UnitTypeInfo {
+	out := make(map[string]UnitTypeInfo, len(unitIndex))
+	for k, v := range unitIndex {
+		out[k] = v
+	}
+	mapStrings := forge.Current.Strings()
+	for _, mods := range []*w3objmod.File{forge.Current.UnitMods(), forge.Current.ItemMods()} {
+		if mods == nil {
+			continue
+		}
+		for _, edit := range mods.OriginalEdits {
+			base, ok := out[edit.BaseID]
+			if !ok {
+				continue
+			}
+			out[edit.BaseID] = applyUnitOverrides(base, edit.Overrides, mapStrings)
+		}
+		for _, c := range mods.Customs {
+			base, ok := out[c.BaseID]
+			if !ok {
+				log.Printf("typeindex: custom unit %s missing base %s; skipping", c.ID, c.BaseID)
+				continue
+			}
+			out[c.ID] = applyUnitOverrides(base, c.Overrides, mapStrings)
+		}
+	}
+	return out
+}
+
+// GetUnitTypeIndex returns the full FourCC → UnitTypeInfo map. Per-map
+// w3u/w3t modifications layer on top of the stock SLK so display names
+// reflect per-map overrides — JS-side caches this per-map, not per-process.
 func (a *App) GetUnitTypeIndex() (map[string]UnitTypeInfo, error) {
 	if err := ensureTypeIndex(); err != nil {
 		return nil, err
 	}
-	// TODO(units): apply per-map w3u/w3t modifications when units render
-	// path exists end-to-end (Phase 1F).
-	return unitIndex, nil
+	return mergeUnitIndex(), nil
 }
 
 // GetDoodadTypeIndex returns the full FourCC → DoodadTypeInfo map, with

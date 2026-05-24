@@ -4,14 +4,30 @@
     OpenMapDialog, OpenMap, CloseMap, ListUnits, ListDoodads, Status,
     GetSelection, SelectUnit, ClearSelection, GetUnit,
     GetReforgedMode, SetReforgedMode,
+    GetUnitTypeIndex, GetDoodadTypeIndex,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
   import { createScene, type SceneAPI } from './scene-instances'
 
+  // Wails drops struct typedefs from models.ts when they appear as map values,
+  // so the unit/doodad type-index shapes are declared locally here. Must stay
+  // in lockstep with main.UnitTypeInfo / main.DoodadTypeInfo on the Go side.
+  interface UnitTypeInfo {
+    file: string; model_scale: number; move_height: number
+    red: number; green: number; blue: number
+    name: string; category: string
+  }
+  interface DoodadTypeInfo {
+    file: string; num_var: number; fixed_rot: number; model_scale: number
+    name: string; category: string
+  }
+
   let status: main.MapStatus = { loaded: false, unit_count: 0 }
   let units: main.UnitDTO[] = []
   let doodads: main.DoodadDTO[] = []
+  let unitTypes: Record<string, UnitTypeInfo> = {}
+  let doodadTypes: Record<string, DoodadTypeInfo> = {}
   let selectedIds = new Set<number>()
   let primaryEntity: unitsdoo.Entity | null = null
   let error: string = ''
@@ -46,6 +62,8 @@
       } else {
         units = []
         doodads = []
+        unitTypes = {}
+        doodadTypes = {}
         selectedIds = new Set()
         primaryEntity = null
       }
@@ -99,6 +117,9 @@
   async function reloadMap(opts?: { keepCamera?: boolean }) {
     units = await ListUnits()
     doodads = await ListDoodads()
+    // Per-map indexes — overlay (w3u/w3d/w3b/w3t) changes per map.
+    try { unitTypes = (await GetUnitTypeIndex()) as unknown as Record<string, UnitTypeInfo> } catch { unitTypes = {} }
+    try { doodadTypes = (await GetDoodadTypeIndex()) as unknown as Record<string, DoodadTypeInfo> } catch { doodadTypes = {} }
     // The viewport pulls its own data via App.* methods now; no need to
     // marshal the raw .w3x bytes across the boundary.
     await scene?.loadMap(opts)
@@ -147,27 +168,44 @@
 
   async function clickRow(cn: number) { await SelectUnit(cn) }
 
+  function panToUnit(e: Event, u: main.UnitDTO) {
+    e.stopPropagation()  // don't trigger row selection
+    if (u.position && u.position.length >= 2) {
+      scene?.panTo(u.position[0], u.position[1])
+    }
+  }
+
   // ----- Explorer categorization -----
   //
-  // We don't have SLK lookup yet, so we classify by simple heuristics:
+  // Categorization uses the SLK-derived type index when available:
   //   "sloc" → Markers
-  //   FourCC starting with an uppercase ASCII letter → Heroes (Hxxx Human,
-  //     Oxxx Orc, Uxxx Undead, Nxxx Night Elf, Exxx Naga) — matches WC3's
-  //     unit-id naming convention closely enough for this view.
-  //   Everything else → Units & Items
+  //   info.category contains "Hero" → Heroes
+  //   everything else → Units & Items
   //
-  // Future Phase-N will replace this with a real SLK class lookup so that
-  // (e.g.) Goblin Merchant lands under Buildings/Shops, not generic Units.
+  // Display name + category come from unitTypes[type_id]. Falls back to the
+  // FourCC when the row is unknown (custom map types with empty Name fields,
+  // or pre-Reforged retired types) so the entity is still listable.
 
   type Group = { id: string; label: string; entries: main.UnitDTO[] }
-  $: groups = bucket(units)
-  function bucket(us: main.UnitDTO[]): Group[] {
+  $: groups = bucket(units, unitTypes)
+  function unitDisplayName(u: main.UnitDTO): string {
+    const info = unitTypes[u.type_id]
+    return info && info.name ? info.name : u.type_id
+  }
+  function unitCategory(u: main.UnitDTO): string {
+    const info = unitTypes[u.type_id]
+    return info ? info.category : ''
+  }
+  function bucket(us: main.UnitDTO[], types: Record<string, UnitTypeInfo>): Group[] {
     const markers: main.UnitDTO[] = []
     const heroes: main.UnitDTO[] = []
     const others: main.UnitDTO[] = []
     for (const u of us) {
-      if (u.type_id === 'sloc') markers.push(u)
-      else if (u.type_id.length > 0 && u.type_id[0] >= 'A' && u.type_id[0] <= 'Z') heroes.push(u)
+      if (u.type_id === 'sloc') { markers.push(u); continue }
+      const info = types[u.type_id]
+      const isHero = info ? /Hero/i.test(info.category)
+        : u.type_id.length > 0 && u.type_id[0] >= 'A' && u.type_id[0] <= 'Z'
+      if (isHero) heroes.push(u)
       else others.push(u)
     }
     const out: Group[] = []
@@ -242,9 +280,13 @@
             <ul>
               {#each g.entries as u (u.creation_number)}
                 <li class:selected={selectedIds.has(u.creation_number)}
-                    on:click={() => clickRow(u.creation_number)}>
-                  <span class="mono type">{u.type_id}</span>
-                  <span class="dim cn">#{u.creation_number}</span>
+                    on:click={() => clickRow(u.creation_number)}
+                    title="{u.type_id} #{u.creation_number}">
+                  <span class="name">{unitDisplayName(u)}</span>
+                  <span class="cat dim">{unitCategory(u)}</span>
+                  <button class="pan-btn"
+                          on:click={(e) => panToUnit(e, u)}
+                          title="Pan camera to this entity">⊕</button>
                 </li>
               {/each}
             </ul>
@@ -403,22 +445,42 @@
   .explorer .cat-header .count { color: #71717a; font-weight: 400; font-size: 11px; }
   .explorer ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
   .explorer li {
-    display: flex; justify-content: space-between; align-items: center;
+    display: flex; align-items: center; gap: 8px;
     padding: 4px 14px; cursor: pointer; font-size: 12px;
+    min-width: 0;
   }
   .explorer li:hover { background: #1f1f23; }
   .explorer li.selected { background: #1e3a8a; color: #e4e4e7; }
-  .explorer li .type { color: #e4e4e7; }
-  .explorer li .cn { font-size: 11px; }
+  .explorer li .name {
+    color: #e4e4e7; font-weight: 500; flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .explorer li .cat {
+    font-size: 10.5px; flex: 0 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    text-align: right;
+  }
+  .explorer li .pan-btn {
+    flex: 0 0 auto; visibility: hidden;
+    background: transparent; color: #a1a1aa;
+    border: 1px solid #3f3f46; border-radius: 3px;
+    padding: 1px 6px; font-size: 11px; line-height: 1;
+    cursor: pointer;
+  }
+  .explorer li:hover .pan-btn { visibility: visible; }
+  .explorer li .pan-btn:hover { background: #3f3f46; color: #e4e4e7; }
   .doodad-note { padding: 4px 14px 8px; font-size: 11px; color: #71717a; }
 
   /* Properties */
   .properties { overflow-y: auto; }
   .props {
-    display: grid; grid-template-columns: 100px 1fr;
+    display: grid; grid-template-columns: max-content 1fr;
     gap: 4px 12px; padding: 10px 16px; margin: 0; font-size: 12px;
   }
-  .props dt { color: #71717a; font-size: 11px; padding-top: 2px; }
+  .props dt {
+    color: #71717a; font-size: 11px; padding-top: 2px;
+    text-align: left; justify-self: start;
+  }
   .props dt.section {
     grid-column: 1 / -1; color: #a1a1aa; font-weight: 600; font-size: 10px;
     text-transform: uppercase; letter-spacing: 0.06em; margin-top: 8px;
