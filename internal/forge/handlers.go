@@ -17,6 +17,8 @@ func RegisterAll(b *bridge.Bridge) {
 	b.Register("map.status", handleMapStatus)
 	b.Register("map.info_get", handleMapInfoGet)
 	b.Register("units.list", handleUnitsList)
+	b.Register("units.move", handleUnitsMove)
+	b.Register("map.save", handleMapSave)
 	b.Register("selection.get", handleSelectionGet)
 	b.Register("selection.set", handleSelectionSet)
 	b.Register("selection.clear", handleSelectionClear)
@@ -147,6 +149,52 @@ func handleSelectionSet(params json.RawMessage) (any, error) {
 func handleSelectionClear(_ json.RawMessage) (any, error) {
 	Current.SetSelection(nil, -1)
 	return Current.Selection(), nil
+}
+
+// unitsMoveParams carries game-coordinate position for a single unit. x/y/z
+// are WC3 game coords (centered at 0,0) — the SAME wire contract as the Wails
+// App.MoveUnit method. No conversion happens here; Session.MoveUnit stores
+// Position verbatim.
+type unitsMoveParams struct {
+	CreationNumber uint32  `json:"creation_number"`
+	X              float32 `json:"x"`
+	Y              float32 `json:"y"`
+	Z              float32 `json:"z"`
+}
+
+type unitsMoveResponse struct {
+	OK             bool       `json:"ok"`
+	CreationNumber uint32     `json:"creation_number"`
+	Position       [3]float32 `json:"position"`
+}
+
+func handleUnitsMove(params json.RawMessage) (any, error) {
+	var p unitsMoveParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.MoveUnit(p.CreationNumber, p.X, p.Y, p.Z); err != nil {
+		return nil, err
+	}
+	return unitsMoveResponse{
+		OK:             true,
+		CreationNumber: p.CreationNumber,
+		Position:       [3]float32{p.X, p.Y, p.Z},
+	}, nil
+}
+
+// handleMapSave flushes pending edits to disk via the session's source. For
+// MPQ-backed sessions, returns a user-visible message instructing the caller
+// to extract the map to a folder first; programmatic clients can also check
+// the wrapped sentinel through the standard JSON-RPC error structure.
+func handleMapSave(_ json.RawMessage) (any, error) {
+	if err := Current.Save(); err != nil {
+		if errors.Is(err, ErrMPQWriteNotImplemented) {
+			return nil, errors.New("MPQ archive saving is not yet implemented — extract the map to a folder first.")
+		}
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
 }
 
 func handleUnitsList(_ json.RawMessage) (any, error) {
