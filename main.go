@@ -30,6 +30,11 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.SetPrefix("wc3-forge: ")
+	// GUI Wails apps have no console; route Go logs to a file alongside
+	// the binary so asset-handler diagnostics are visible.
+	if logFile, err := os.OpenFile("wc3-forge.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		log.SetOutput(logFile)
+	}
 
 	// Bridge always runs unless explicitly disabled. The GUI and external MCP
 	// clients can coexist — both read/write the same forge.Session.
@@ -42,6 +47,15 @@ func main() {
 		}
 		defer b.Stop()
 		fmt.Printf("wc3-forge: bridge on 127.0.0.1:%d (pid %d)\n", b.Port(), os.Getpid())
+	}
+
+	// Open CASC eagerly so the viewer's first asset requests (which fire
+	// during loadBaseFiles, immediately after the JS bundle initializes)
+	// land on a ready storage. Lazy init introduces a race: the viewer's
+	// loadBaseFiles can complete with errors before CASC finishes opening,
+	// and the viewer doesn't retry on its own.
+	if _, err := getCASC(); err != nil {
+		log.Printf("CASC eager open failed (stock asset paths will 404): %v", err)
 	}
 
 	if openPath != "" {

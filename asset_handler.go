@@ -1,10 +1,14 @@
 package main
 
 import (
+	"log"
 	"net/http"
+	"os"
 	"path"
 	"strings"
+	"sync"
 
+	"github.com/StephenSHorton/wc3-forge/internal/casc"
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
 )
 
@@ -15,15 +19,42 @@ import (
 // Resolution order (first hit wins):
 //  1. The currently-loaded map's archive/folder (custom imports + per-map
 //     overrides + the map's own files like war3map.w3i if requested).
-//  2. (TODO) CASC mount on the user's WC3 install — for stock unit/doodad
+//  2. CASC mount on the user's WC3 install — for stock unit/doodad
 //     models, tileset textures, team-color BLPs, etc.
-//
-// Without (2), most asset requests return 404 and mdx-m3-viewer can't
-// render textured terrain or stock models. That's the next session's work.
 type assetHandler struct{}
 
 func newAssetHandler() http.Handler {
 	return &assetHandler{}
+}
+
+// Lazy-init the WC3 CASC storage. We don't fail wc3-forge to start if
+// CASC isn't available — folder-based maps still work, and the user may
+// not have WC3 installed at the expected path.
+var (
+	cascStorage *casc.Storage
+	cascOnce    sync.Once
+	cascErr     error
+)
+
+func wc3InstallPath() string {
+	if p := os.Getenv("WC3FORGE_WC3_PATH"); p != "" {
+		return p
+	}
+	return `C:\Program Files (x86)\Warcraft III`
+}
+
+func getCASC() (*casc.Storage, error) {
+	cascOnce.Do(func() {
+		path := wc3InstallPath()
+		log.Printf("CASC: opening storage at %q", path)
+		cascStorage, cascErr = casc.Open(path)
+		if cascErr != nil {
+			log.Printf("CASC: open failed: %v", cascErr)
+		} else {
+			log.Printf("CASC: storage open")
+		}
+	})
+	return cascStorage, cascErr
 }
 
 func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -42,6 +73,8 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// lowercase. Backslash <-> forward-slash interchangeable.
 	requested = strings.ToLower(path.Clean(strings.ReplaceAll(requested, "\\", "/")))
 
+	log.Printf("asset: %s", requested)
+
 	// Try the current map's source first.
 	data, ok, err := forge.Current.ReadFile(requested)
 	if err != nil {
@@ -49,12 +82,27 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ok {
+		log.Printf("asset: %s -> map source (%d bytes)", requested, len(data))
 		serveBytes(w, requested, data)
 		return
 	}
 
-	// TODO: try CASC.
+	// CASC fallback for stock WC3 assets.
+	if c, err := getCASC(); err == nil && c != nil {
+		data, ok, err = c.ReadFile(requested)
+		if err != nil {
+			log.Printf("asset: %s -> CASC error: %v", requested, err)
+			http.Error(w, "casc read error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if ok {
+			log.Printf("asset: %s -> CASC (%d bytes)", requested, len(data))
+			serveBytes(w, requested, data)
+			return
+		}
+	}
 
+	log.Printf("asset: %s -> 404", requested)
 	http.NotFound(w, r)
 }
 
