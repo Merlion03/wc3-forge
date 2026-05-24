@@ -461,13 +461,13 @@
     text-align: right;
   }
   .explorer li .pan-btn {
-    flex: 0 0 auto; visibility: hidden;
+    flex: 0 0 auto; display: none;
     background: transparent; color: #a1a1aa;
     border: 1px solid #3f3f46; border-radius: 3px;
     padding: 1px 6px; font-size: 11px; line-height: 1;
     cursor: pointer;
   }
-  .explorer li:hover .pan-btn { visibility: visible; }
+  .explorer li:hover .pan-btn { display: inline-flex; }
   .explorer li .pan-btn:hover { background: #3f3f46; color: #e4e4e7; }
   .doodad-note { padding: 4px 14px 8px; font-size: 11px; color: #71717a; }
 
