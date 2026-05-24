@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/StephenSHorton/wc3-forge/internal/bridge"
+	"github.com/StephenSHorton/wc3-forge/internal/forge"
 )
 
 func main() {
@@ -25,7 +26,7 @@ func main() {
 	}
 
 	b := bridge.New()
-	bridge.RegisterDefaults(b)
+	forge.RegisterAll(b)
 
 	if err := b.Start(); err != nil {
 		log.Fatalf("bridge start failed: %v", err)
