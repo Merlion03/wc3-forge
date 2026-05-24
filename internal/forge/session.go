@@ -13,6 +13,7 @@ import (
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/mpq"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/shd"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3e"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
@@ -83,6 +84,7 @@ type Session struct {
 	destructibleMods *w3objmod.File // war3map.w3b
 	unitMods         *w3objmod.File // war3map.w3u (parsed for future use)
 	itemMods         *w3objmod.File // war3map.w3t
+	shadowMap        *shd.File      // war3map.shd
 
 	selection      SelectionState
 	listeners      []func(SelectionState)
@@ -184,6 +186,28 @@ func (s *Session) Open(path string) error {
 		return err
 	}
 
+	// war3map.shd — OPTIONAL static shadow map. Dimensions are derived
+	// from the terrain we just parsed; depends on `terrain` being non-nil.
+	var shadowMap *shd.File
+	if terrain != nil {
+		shdBytes, ok, err := src.read("war3map.shd")
+		if err != nil {
+			return fmt.Errorf("read war3map.shd: %w", err)
+		}
+		if ok {
+			sm, perr := shd.Parse(shdBytes, int(terrain.Width), int(terrain.Height))
+			if perr != nil {
+				// Recoverable: shd.Parse returns a usable zero-fill File along
+				// with the warning. Log and proceed.
+				if sm != nil {
+					shadowMap = sm
+				}
+			} else {
+				shadowMap = sm
+			}
+		}
+	}
+
 	// war3map.w3{d,b,u,t} — OPTIONAL object-modification tables. Custom
 	// type IDs ("D006") + stock-row edits ("ATtr scale = 1.5") live here.
 	// The renderer's type indices apply these on top of the base SLK.
@@ -223,6 +247,7 @@ func (s *Session) Open(path string) error {
 	s.destructibleMods = destructibleMods
 	s.unitMods = unitMods
 	s.itemMods = itemMods
+	s.shadowMap = shadowMap
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
 	if prevSource != nil {
@@ -268,6 +293,7 @@ func (s *Session) Close() {
 	s.destructibleMods = nil
 	s.unitMods = nil
 	s.itemMods = nil
+	s.shadowMap = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
 	if prevSource != nil {
@@ -376,6 +402,13 @@ func (s *Session) DestructibleMods() *w3objmod.File {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.destructibleMods
+}
+
+// ShadowMap returns the parsed war3map.shd, or nil if absent.
+func (s *Session) ShadowMap() *shd.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.shadowMap
 }
 
 // Selection returns the current selection. Safe to call before a map is loaded

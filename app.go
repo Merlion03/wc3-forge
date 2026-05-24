@@ -192,6 +192,17 @@ type TerrainDTO struct {
 	WaterZ    []float32  `json:"water_z"`
 	HasWater  []uint32   `json:"has_water"`
 	Water     WaterInfo  `json:"water"`
+	// Static shadow map (war3map.shd). 4× resolution per terrain tile —
+	// dimensions are (Width-1)*4 × (Height-1)*4. Empty array when the map
+	// doesn't ship a war3map.shd. Encoded as base64 by Wails since it's
+	// []byte; JS decodes it (Uint8Array.from(atob(s), c => c.charCodeAt(0)))
+	// before uploading to a GL texture. We deliberately keep the []byte
+	// type — at 320KB for a typical map, the base64 wire is ~430KB which
+	// is fine; expanding to []uint32 quadruples that for no benefit since
+	// JS needs Uint8Array for gl.texImage2D anyway.
+	ShadowMap       []byte `json:"shadow_map"`
+	ShadowMapWidth  int    `json:"shadow_map_width"`
+	ShadowMapHeight int    `json:"shadow_map_height"`
 }
 
 // GetTerrain returns the terrain grid for rendering. Empty if no map loaded or
@@ -232,6 +243,17 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			hasWater[i] = 1
 		}
 	}
+
+	// Shadow map: optional. Empty + 0 dims when absent. The byte slice
+	// rides as base64 (Go encoding/json's []byte default) — JS knows to
+	// decode it before uploading as a GL texture.
+	var shadowBytes []byte
+	var shadowW, shadowH int
+	if sm := forge.Current.ShadowMap(); sm != nil {
+		shadowBytes = sm.Cells
+		shadowW = sm.Width
+		shadowH = sm.Height
+	}
 	return TerrainDTO{
 		Width:         t.Width,
 		Height:        t.Height,
@@ -249,6 +271,9 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		WaterZ:        waterZ,
 		HasWater:      hasWater,
 		Water:         WaterColors(t.Tileset),
+		ShadowMap:       shadowBytes,
+		ShadowMapWidth:  shadowW,
+		ShadowMapHeight: shadowH,
 	}, nil
 }
 

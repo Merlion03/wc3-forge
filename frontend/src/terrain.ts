@@ -23,6 +23,11 @@ interface TerrainDTO {
   /** Real per-tile RGB (0..255), sampled from the WC3 tileset BLP/DDS in
    *  CASC via Terrain.slk. Same length as `palette`. */
   palette_colors: [number, number, number][]
+  /** war3map.shd as base64 (Wails encodes []byte that way). Empty string
+   *  when the map ships no shadow map. */
+  shadow_map: string
+  shadow_map_width: number
+  shadow_map_height: number
 }
 
 // Convert a Go-side palette color triplet (0..255) to GL float (0..1).
@@ -35,19 +40,38 @@ function paletteColorToGL(rgb: [number, number, number]): [number, number, numbe
 const VERT_SHADER = `
 attribute vec3 a_position;
 attribute vec3 a_color;
+attribute vec2 a_shadowUV;
 uniform mat4 u_viewProj;
 varying vec3 v_color;
+varying vec2 v_shadowUV;
 void main() {
   v_color = a_color;
+  v_shadowUV = a_shadowUV;
   gl_Position = u_viewProj * vec4(a_position, 1.0);
 }
 `.trim()
 
+// Shadow map: single-channel texture sampled at the per-vertex shadow UV
+// (computed at build time from each vertex's grid position). WC3's shadow
+// bytes are effectively binary in practice — 0x00 = lit, 0x80+ = shadowed.
+// With LINEAR filtering on the texture the edges get smooth interpolation,
+// but the core values still drive the lit/shadowed branch.
 const FRAG_SHADER = `
 precision mediump float;
+uniform sampler2D u_shadowTex;
+uniform bool u_hasShadow;
 varying vec3 v_color;
+varying vec2 v_shadowUV;
 void main() {
-  gl_FragColor = vec4(v_color, 1.0);
+  vec3 col = v_color;
+  if (u_hasShadow) {
+    float shadow = texture2D(u_shadowTex, v_shadowUV).r;
+    // Darken by up to 45% in fully-shadowed cells. Editor visibility
+    // matters more than perfect WC3 mood lighting — we want the user to
+    // still see what's under a shadow.
+    col *= 1.0 - shadow * 0.45;
+  }
+  gl_FragColor = vec4(col, 1.0);
 }
 `.trim()
 
@@ -63,12 +87,7 @@ function compileShader(gl: WebGLRenderingContext, type: number, source: string):
   return sh
 }
 
-function buildProgram(gl: WebGLRenderingContext): {
-  program: WebGLProgram
-  aPosition: number
-  aColor: number
-  uViewProj: WebGLUniformLocation
-} {
+function buildProgram(gl: WebGLRenderingContext) {
   const program = gl.createProgram()!
   gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, VERT_SHADER))
   gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, FRAG_SHADER))
@@ -78,10 +97,47 @@ function buildProgram(gl: WebGLRenderingContext): {
     gl.deleteProgram(program)
     throw new Error('terrain program link: ' + log)
   }
-  const aPosition = gl.getAttribLocation(program, 'a_position')
-  const aColor = gl.getAttribLocation(program, 'a_color')
-  const uViewProj = gl.getUniformLocation(program, 'u_viewProj')!
-  return { program, aPosition, aColor, uViewProj }
+  return {
+    program,
+    aPosition: gl.getAttribLocation(program, 'a_position'),
+    aColor: gl.getAttribLocation(program, 'a_color'),
+    aShadowUV: gl.getAttribLocation(program, 'a_shadowUV'),
+    uViewProj: gl.getUniformLocation(program, 'u_viewProj')!,
+    uShadowTex: gl.getUniformLocation(program, 'u_shadowTex')!,
+    uHasShadow: gl.getUniformLocation(program, 'u_hasShadow')!,
+  }
+}
+
+// Decode the base64 shadow map and upload as a single-channel GL texture.
+// Returns null if the map shipped no shadow data. Uses GL_LUMINANCE for
+// WebGL1 compatibility (gl.RED + GL_R8 needs WebGL2 / EXT_texture_rg).
+function uploadShadowTexture(
+  gl: WebGLRenderingContext, b64: string, w: number, h: number,
+): WebGLTexture | null {
+  if (!b64 || w <= 0 || h <= 0) return null
+  // Wails serialises []byte as a base64 string with no padding tricks; the
+  // browser atob produces a binary string we then read by char-code.
+  const bin = atob(b64)
+  if (bin.length !== w * h) {
+    flog(`[terrain shadow] size mismatch (got ${bin.length}, want ${w}*${h}=${w * h})`)
+    return null
+  }
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+
+  const tex = gl.createTexture()
+  if (!tex) return null
+  gl.bindTexture(gl.TEXTURE_2D, tex)
+  // LUMINANCE: shader reads .r and gets the byte value (replicated across
+  // R/G/B). Linear filter gives smooth shadow edges instead of pixelated
+  // 4×4 cell blocks; clamp-to-edge avoids wrap-around at map boundaries.
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, w, h, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, bytes)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+  return tex
 }
 
 export interface TerrainMesh {
@@ -128,14 +184,20 @@ export function buildTerrain(gl: WebGLRenderingContext, t: TerrainDTO): TerrainM
   const palCols = (t.palette_colors ?? []).map(paletteColorToGL)
   const defaultCol: [number, number, number] = [0.4, 0.4, 0.4]
 
-  // Vertex layout: vec3 position + vec3 color, interleaved. 6 floats per vertex.
-  const verts = new Float32Array(N * 6)
+  // Vertex layout: vec3 position + vec3 color + vec2 shadowUV, interleaved.
+  // 8 floats per vertex. Shadow UV maps each vertex to its position in the
+  // shadow texture's [0..1] space — vertex (i, j) → (i/(W-1), j/(H-1)).
+  // With LINEAR filter on the shadow texture, the fragment shader gets a
+  // smooth interpolation between the 4×4 shadow cells per tile.
+  const verts = new Float32Array(N * 8)
   const cx = t.center_offset[0]
   const cy = t.center_offset[1]
+  const invWm1 = 1 / Math.max(1, W - 1)
+  const invHm1 = 1 / Math.max(1, H - 1)
   for (let j = 0; j < H; j++) {
     for (let i = 0; i < W; i++) {
       const k = j * W + i
-      const o = k * 6
+      const o = k * 8
       verts[o + 0] = cx + i * 128
       verts[o + 1] = cy + j * 128
       verts[o + 2] = t.heights[k]
@@ -144,6 +206,8 @@ export function buildTerrain(gl: WebGLRenderingContext, t: TerrainDTO): TerrainM
       verts[o + 3] = col[0]
       verts[o + 4] = col[1]
       verts[o + 5] = col[2]
+      verts[o + 6] = i * invWm1
+      verts[o + 7] = j * invHm1
     }
   }
 
@@ -176,7 +240,12 @@ export function buildTerrain(gl: WebGLRenderingContext, t: TerrainDTO): TerrainM
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
 
   const prog = buildProgram(gl)
-  const stride = 6 * 4
+  const stride = 8 * 4
+
+  const shadowTex = uploadShadowTexture(gl, t.shadow_map, t.shadow_map_width, t.shadow_map_height)
+  if (shadowTex) {
+    flog(`[terrain] shadow map ${t.shadow_map_width}×${t.shadow_map_height} uploaded`)
+  }
 
   return {
     draw(viewProj: Float32Array) {
@@ -188,8 +257,20 @@ export function buildTerrain(gl: WebGLRenderingContext, t: TerrainDTO): TerrainM
       gl.vertexAttribPointer(prog.aPosition, 3, gl.FLOAT, false, stride, 0)
       gl.enableVertexAttribArray(prog.aColor)
       gl.vertexAttribPointer(prog.aColor, 3, gl.FLOAT, false, stride, 3 * 4)
+      if (prog.aShadowUV >= 0) {
+        gl.enableVertexAttribArray(prog.aShadowUV)
+        gl.vertexAttribPointer(prog.aShadowUV, 2, gl.FLOAT, false, stride, 6 * 4)
+      }
 
       gl.uniformMatrix4fv(prog.uViewProj, false, viewProj)
+      if (shadowTex) {
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, shadowTex)
+        gl.uniform1i(prog.uShadowTex, 0)
+        gl.uniform1i(prog.uHasShadow, 1)
+      } else {
+        gl.uniform1i(prog.uHasShadow, 0)
+      }
 
       // Depth test on; depth write on; no blending — opaque ground.
       gl.enable(gl.DEPTH_TEST)
@@ -207,10 +288,12 @@ export function buildTerrain(gl: WebGLRenderingContext, t: TerrainDTO): TerrainM
       // but this is cheap insurance.
       gl.disableVertexAttribArray(prog.aPosition)
       gl.disableVertexAttribArray(prog.aColor)
+      if (prog.aShadowUV >= 0) gl.disableVertexAttribArray(prog.aShadowUV)
     },
     dispose() {
       gl.deleteBuffer(vbo)
       gl.deleteBuffer(ibo)
+      if (shadowTex) gl.deleteTexture(shadowTex)
       gl.deleteProgram(prog.program)
     },
   }
