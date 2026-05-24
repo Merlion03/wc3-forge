@@ -1,0 +1,34 @@
+# Go build artifacts
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# wc3-forge runtime state (per-pid MCP lockfiles, etc.)
+/.wc3-forge/
+
+# Local notes that shouldn't ship
+/scratch/
+/notes-local/
