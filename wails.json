@@ -9,5 +9,8 @@
   "author": {
     "name": "StephenSHorton",
     "email": "4stephenhorton@gmail.com"
+  },
+  "postBuildHooks": {
+    "windows/*": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/postbuild-copy-dlls.ps1 ${bin}"
   }
 }

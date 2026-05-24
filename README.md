@@ -75,6 +75,19 @@ Pure-Go parsers in `internal/formats/`:
   comment, the editor will not regenerate it on save. External build
   pipelines can own the script file.
 
+## Building
+
+```
+wails build
+```
+
+The compiled binary lands in `build/bin/wc3-forge.exe`. A
+`postBuildHooks` entry in `wails.json` copies the vendored CASC DLLs
+(`scripts/casclib/CascLib.dll`, `scripts/casclib/zlib1.dll`) next to the
+binary so the build output is self-contained — `internal/casc` loads
+CascLib via `syscall.NewLazyDLL` and expects to find the DLLs in the
+executable's directory.
+
 ## License
 
 MIT.
