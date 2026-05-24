@@ -31,9 +31,11 @@ import * as MV_ns from 'mdx-m3-viewer'
 import { flog } from './debuglog'
 import {
   ListUnits, ListDoodads, GetUnitTypeIndex, GetDoodadTypeIndex, GetTerrain,
+  GetPathingMap,
 } from '../wailsjs/go/main/App.js'
 import { buildTerrain, type TerrainMesh } from './terrain'
 import { buildWater, type WaterMesh } from './water'
+import { buildPathingOverlay, type PathingOverlay } from './pathing'
 import { createCamera, type RTSCamera } from './camera'
 import { computeCliffPlacements, renderCliffs, type CliffRendering } from './cliffs'
 import {
@@ -221,6 +223,10 @@ export interface SceneAPI {
    * Routed in from App.SetUnitAnimation via Wails event.
    */
   setUnitAnimation(creationNumber: number, animName: string): boolean
+  /** Toggle the pathing-map overlay. Defaults to off. */
+  setPathingVisible(visible: boolean): void
+  /** Current pathing-overlay visibility — for UI display. */
+  isPathingVisible(): boolean
 }
 
 export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {
@@ -290,6 +296,11 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   let water: WaterMesh | null = null
   let cliffs: CliffRendering | null = null
   let slocRenderer: SlocRenderer | null = null
+  let pathing: PathingOverlay | null = null
+  // Pathing overlay visibility — toggled from the header pill. Default off
+  // to match HiveWE; users opt in when debugging unit placement / arena
+  // boundaries.
+  let pathingVisible = false
   // Tracks the current selection so we can paint a tint on selected unit
   // instances on every render-applicable state change (selection arrives via
   // setSelected; the tint persists across loadMap since we re-apply on every
@@ -375,6 +386,11 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // pillars per frame is cheap enough that we don't bother with any
         // visibility culling.
         if (slocRenderer) slocRenderer.draw(scene.camera.viewProjectionMatrix, selectedSet)
+        // Pathing overlay — alpha-blended, depth-test on, depth-write off
+        // (see pathing.ts). Drawn after slocs so it shades the markers' base
+        // too, before water so submerged pathing flags stay readable under
+        // shallow water.
+        if (pathing && pathingVisible) pathing.draw(scene.camera.viewProjectionMatrix)
         // Water is translucent — must render LAST so it alpha-blends on top
         // of terrain + cliffs + opaque model passes. The lib's translucent
         // pass already ran inside viewer.render(); water sits above that.
@@ -520,6 +536,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     if (cliffs) {
       cliffs.dispose()
       cliffs = null
+    }
+    if (pathing) {
+      pathing.dispose()
+      pathing = null
     }
   }
 
@@ -887,6 +907,18 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         if (water) {
           flog(`[water] ${water.triCount} triangles, ${water.frameCount} animation frames`)
         }
+        // Pathing overlay. Built unconditionally so the toggle is
+        // instant — the per-frame cost when invisible is one branch.
+        // Empty pathing DTOs (map without war3map.wpm) return null and
+        // the toggle becomes a no-op for that map.
+        try {
+          const p = await GetPathingMap()
+          if (p && p.width > 0 && p.height > 0) {
+            pathing = buildPathingOverlay(gl, p as unknown as any, t as unknown as any)
+          }
+        } catch (e) {
+          flog('[pathing load]', e instanceof Error ? e.message : String(e))
+        }
       } catch (e) {
         flog('[terrain load]', e instanceof Error ? e.message : String(e))
       }
@@ -1101,6 +1133,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         flog(`[setUnitAnimation] cn=${cn} -> ${normalized} ok=false (no matching sequence)`)
       }
       return ok
+    },
+    setPathingVisible(visible: boolean) {
+      pathingVisible = visible
+    },
+    isPathingVisible() {
+      return pathingVisible
     },
   }
 }

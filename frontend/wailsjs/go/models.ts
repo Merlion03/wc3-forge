@@ -190,6 +190,22 @@ export namespace main {
 	        this.texture_rate = source["texture_rate"];
 	    }
 	}
+	export class PathingMapDTO {
+	    width: number;
+	    height: number;
+	    cells: number[];
+
+	    static createFrom(source: any = {}) {
+	        return new PathingMapDTO(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.width = source["width"];
+	        this.height = source["height"];
+	        this.cells = source["cells"];
+	    }
+	}
 	export class TerrainDTO {
 	    width: number;
 	    height: number;

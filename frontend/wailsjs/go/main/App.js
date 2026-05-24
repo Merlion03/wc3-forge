@@ -22,6 +22,10 @@ export function GetMapBytes() {
   return window['go']['main']['App']['GetMapBytes']();
 }
 
+export function GetPathingMap() {
+  return window['go']['main']['App']['GetPathingMap']();
+}
+
 export function GetReforgedMode() {
   return window['go']['main']['App']['GetReforgedMode']();
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3e"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3objmod"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/wpm"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wts"
 )
 
@@ -85,6 +86,7 @@ type Session struct {
 	unitMods         *w3objmod.File // war3map.w3u (parsed for future use)
 	itemMods         *w3objmod.File // war3map.w3t
 	shadowMap        *shd.File      // war3map.shd
+	pathingMap       *wpm.File      // war3map.wpm
 	strings          wts.Strings    // war3map.wts, for TRIGSTR_<n> resolution
 
 	selection      SelectionState
@@ -209,6 +211,15 @@ func (s *Session) Open(path string) error {
 		}
 	}
 
+	// war3map.wpm — OPTIONAL static pathing map. Independent of terrain
+	// dimensions (file declares its own width/height) so we don't gate on
+	// `terrain != nil`. Pathing exists for terrainless maps in principle,
+	// though every real map ships terrain.
+	pathingMap, err := readOpt(src, "war3map.wpm", wpm.Parse)
+	if err != nil {
+		return err
+	}
+
 	// war3map.w3{d,b,u,t} — OPTIONAL object-modification tables. Custom
 	// type IDs ("D006") + stock-row edits ("ATtr scale = 1.5") live here.
 	// The renderer's type indices apply these on top of the base SLK.
@@ -249,6 +260,7 @@ func (s *Session) Open(path string) error {
 	s.unitMods = unitMods
 	s.itemMods = itemMods
 	s.shadowMap = shadowMap
+	s.pathingMap = pathingMap
 	s.strings = wtsStrings
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
@@ -296,6 +308,7 @@ func (s *Session) Close() {
 	s.unitMods = nil
 	s.itemMods = nil
 	s.shadowMap = nil
+	s.pathingMap = nil
 	s.strings = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
@@ -436,6 +449,13 @@ func (s *Session) ShadowMap() *shd.File {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.shadowMap
+}
+
+// PathingMap returns the parsed war3map.wpm, or nil if absent.
+func (s *Session) PathingMap() *wpm.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pathingMap
 }
 
 // Selection returns the current selection. Safe to call before a map is loaded

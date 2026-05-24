@@ -40,6 +40,7 @@
   let error: string = ''
   let busy: boolean = false
   let reforged: boolean = false
+  let pathingVisible: boolean = false
 
   let canvas: HTMLCanvasElement
   let scene: SceneAPI | null = null
@@ -54,6 +55,7 @@
       // any persistent setting once we add one. Currently session-only.
       try { reforged = await GetReforgedMode() } catch { reforged = false }
       scene = createScene(canvas, reforged)
+      scene.setPathingVisible(pathingVisible)
       scene.onPick(handlePick)
       // Devtools / screenshot-automation hook: lets external test drivers
       // pump scene-level operations without needing keyboard simulation.
@@ -203,6 +205,11 @@
     // The viewport pulls its own data via App.* methods now; no need to
     // marshal the raw .w3x bytes across the boundary.
     await scene?.loadMap(opts)
+  }
+
+  function togglePathing() {
+    pathingVisible = !pathingVisible
+    scene?.setPathingVisible(pathingVisible)
   }
 
   async function toggleReforged() {
@@ -408,6 +415,12 @@
       {/if}
     </div>
     <div class="actions">
+      <button on:click={togglePathing}
+              class="mode-toggle"
+              class:on={pathingVisible}
+              title="Toggle the static pathing-map overlay (red=unwalkable, blue=unflyable, yellow=unbuildable).">
+        Pathing{pathingVisible ? ' ✓' : ''}
+      </button>
       <button on:click={toggleReforged} disabled={busy}
               class="mode-toggle"
               class:on={reforged}

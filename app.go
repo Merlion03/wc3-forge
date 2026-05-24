@@ -416,6 +416,36 @@ func (a *App) SetUnitAnimation(creationNumber uint32, animName string) {
 	})
 }
 
+// PathingMapDTO is the JS-facing pathing-map shape. Cells carry one byte
+// per quarter-cell (4× terrain tile resolution); each byte's bits flag
+// movement constraints (unwalkable / unflyable / unbuildable / …).
+//
+// Cells is []uint32 (not []uint8) because Go's encoding/json base64-encodes
+// []byte fields. The same trap caught us with TerrainDTO.GroundTex — see
+// project memory `project-wc3-forge`. Wire cost at typical sizes (~256²) is
+// 256 KB which is fine for a JSON array; the JS side packs it back into a
+// Uint8Array before uploading to a GL texture.
+type PathingMapDTO struct {
+	Width  int      `json:"width"`
+	Height int      `json:"height"`
+	Cells  []uint32 `json:"cells"`
+}
+
+// GetPathingMap returns the parsed war3map.wpm for the loaded map, or an
+// empty DTO (width=height=0, nil cells) when the map didn't ship a .wpm
+// — the renderer treats that as "no overlay to draw".
+func (a *App) GetPathingMap() PathingMapDTO {
+	p := forge.Current.PathingMap()
+	if p == nil {
+		return PathingMapDTO{}
+	}
+	cells := make([]uint32, len(p.Cells))
+	for i, b := range p.Cells {
+		cells[i] = uint32(b)
+	}
+	return PathingMapDTO{Width: p.Width, Height: p.Height, Cells: cells}
+}
+
 // GetUnit returns the full Entity for one creation_number. Properties panel
 // uses this to render the heavier fields (inventory, ability mods, hero
 // stats, item drops) that aren't included in the lighter ListUnits payload.
