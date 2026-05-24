@@ -169,6 +169,7 @@ export namespace main {
 	    shallow_max: number[];
 	    deep_min: number[];
 	    deep_max: number[];
+	    texture_file: string;
 	    num_textures: number;
 	    texture_rate: number;
 	
@@ -184,6 +185,7 @@ export namespace main {
 	        this.shallow_max = source["shallow_max"];
 	        this.deep_min = source["deep_min"];
 	        this.deep_max = source["deep_max"];
+	        this.texture_file = source["texture_file"];
 	        this.num_textures = source["num_textures"];
 	        this.texture_rate = source["texture_rate"];
 	    }

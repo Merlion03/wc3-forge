@@ -128,14 +128,20 @@ func PaletteColors(palette []string) [][3]uint8 {
 // the water surface sitting at slightly different heights above the
 // raw `corner_water_height`. (Lordaeron: -0.5 typical; Icecrown: ice level.)
 type WaterInfo struct {
-	OK           bool      `json:"ok"`            // false if Water.slk lookup failed; JS uses fallback colors
-	Offset       float64   `json:"offset"`        // added to per-vertex water_z (HiveWE units; JS multiplies by 128 for studs)
-	ShallowMin   [4]uint8  `json:"shallow_min"`   // shallow water color at zero depth
-	ShallowMax   [4]uint8  `json:"shallow_max"`   // shallow water color near the deeplevel boundary
-	DeepMin      [4]uint8  `json:"deep_min"`      // deep water color just below deeplevel
-	DeepMax      [4]uint8  `json:"deep_max"`      // deep water color at full saturation
-	NumTextures  int       `json:"num_textures"`  // animation frame count (unused in v1)
-	TextureRate  int       `json:"texture_rate"`  // animation rate (unused in v1)
+	OK          bool     `json:"ok"`           // false if Water.slk lookup failed; JS uses fallback colors
+	Offset      float64  `json:"offset"`       // added to per-vertex water_z (HiveWE units; JS multiplies by 128 for studs)
+	ShallowMin  [4]uint8 `json:"shallow_min"`  // shallow water color at zero depth
+	ShallowMax  [4]uint8 `json:"shallow_max"`  // shallow water color near the deeplevel boundary
+	DeepMin     [4]uint8 `json:"deep_min"`     // deep water color just below deeplevel
+	DeepMax     [4]uint8 `json:"deep_max"`     // deep water color at full saturation
+	// TextureFile is the base path of the animated water frames; each frame is
+	// `<TextureFile>NN.blp` (or .dds) where NN is the zero-padded 2-digit
+	// frame index 0..NumTextures-1. e.g. "ReplaceableTextures\\Water\\LSWat"
+	// → "ReplaceableTextures\\Water\\LSWat00.blp" through "...44.blp" for
+	// Lordaeron (45 frames).
+	TextureFile string `json:"texture_file"`
+	NumTextures int    `json:"num_textures"` // animation frame count
+	TextureRate int    `json:"texture_rate"` // frames per second
 }
 
 var (
@@ -202,6 +208,7 @@ func WaterColors(tileset byte) WaterInfo {
 		ShallowMax:  rgba("smax"),
 		DeepMin:     rgba("dmin"),
 		DeepMax:     rgba("dmax"),
+		TextureFile: row.String("texfile"),
 		NumTextures: int(row.Number("numtex")),
 		TextureRate: int(row.Number("texrate")),
 	}

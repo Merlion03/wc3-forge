@@ -1,15 +1,18 @@
 // Water surface: per-cell quad mesh at per-corner water heights, tinted by
-// a depth-based blend matching HiveWE's `data/shaders/water.frag` + `water.vert`.
+// a depth-based blend × an animated wave texture. Mirrors HiveWE's
+// `data/shaders/water.{vert,frag}`.
 //
 // Per-corner attributes:
 //   - position (x, y, water_z + tileset_offset)
 //   - color (vec4 — premultiplied at build-time from shallow/deep colors
 //     blended by depth-above-ground)
 //
-// Cells with no water (none of the 4 corners has HasWater set) emit no
-// triangles. Cells with partial water still emit a full quad — corners
-// without water get their corner_height as a fallback so the quad slopes
-// down to dry ground rather than floating.
+// Texture animation: Water.slk's `texfile` column points at a base path;
+// individual frames live at `<texfile>00.blp` … `<texfile><NN>.blp` where
+// NN ranges over `num_textures`. Each frame is a 128×128 BLP (or DDS in
+// Reforged CASC; the asset-handler's BLP↔DDS fallback covers either).
+// `texrate` is the playback rate in frames per second; current_frame =
+// floor(time_seconds * texrate) % numTextures.
 //
 // Drawn after viewer.render() in the RAF loop with depth-test ON +
 // depth-write OFF + alpha blending ON, so it occludes anything below the
@@ -31,33 +34,48 @@ interface WaterDataDTO {
     shallow_max: [number, number, number, number]
     deep_min: [number, number, number, number]
     deep_max: [number, number, number, number]
+    texture_file: string
+    num_textures: number
+    texture_rate: number
   }
 }
 
+// Vertex shader passes world XY through so the fragment shader can compute
+// per-cell UVs via `fract(worldXY/128)` — that gives one texture-repeat per
+// cell, matching HiveWE's per-cell-quad UV [0..1] layout, without needing
+// per-vertex UV attributes (which would require duplicating corner vertices
+// since adjacent cells need different UV values at the shared corner).
 const VERT_SHADER = `
 attribute vec3 a_position;
 attribute vec4 a_color;
 uniform mat4 u_viewProj;
 varying vec4 v_color;
+varying vec2 v_worldXY;
 void main() {
   v_color = a_color;
+  v_worldXY = a_position.xy;
   gl_Position = u_viewProj * vec4(a_position, 1.0);
 }
 `.trim()
 
+// Texture * depth-blend color. The depth-blend already has alpha pre-baked,
+// so we trust v_color.a as the final opacity envelope — the texture only
+// contributes RGB modulation (multiply with rgb, keep alpha from color).
+// Matches HiveWE's water.frag: outColor = texture(...) * Color.
 const FRAG_SHADER = `
 precision mediump float;
+uniform sampler2D u_waterTex;
+uniform bool u_hasTexture;
 varying vec4 v_color;
+varying vec2 v_worldXY;
 void main() {
-  gl_FragColor = v_color;
+  vec2 uv = fract(v_worldXY / 128.0);
+  vec4 tex = u_hasTexture ? texture2D(u_waterTex, uv) : vec4(1.0);
+  gl_FragColor = tex * v_color;
 }
 `.trim()
 
 // HiveWE's depth-blend thresholds. Values in HiveWE units (1 cell = 128 studs).
-// At depth ≤ min_depth: water is too shallow to render with shallow_min (corner
-// gets fully transparent contribution). Between min_depth and deeplevel: lerp
-// shallow_min → shallow_max. Between deeplevel and maxdepth: lerp deep_min →
-// deep_max. Beyond maxdepth: deep_max.
 const MIN_DEPTH = 10 / 128
 const DEEPLEVEL = 64 / 128
 const MAXDEPTH = 72 / 128
@@ -89,6 +107,8 @@ function buildProgram(gl: WebGLRenderingContext) {
     aPosition: gl.getAttribLocation(program, 'a_position'),
     aColor: gl.getAttribLocation(program, 'a_color'),
     uViewProj: gl.getUniformLocation(program, 'u_viewProj')!,
+    uWaterTex: gl.getUniformLocation(program, 'u_waterTex')!,
+    uHasTexture: gl.getUniformLocation(program, 'u_hasTexture')!,
   }
 }
 
@@ -97,11 +117,18 @@ export interface WaterMesh {
   draw(viewProj: Float32Array): void
   /** Triangle count for stats. */
   triCount: number
+  /** Number of loaded animation frames (0 if textures are static). */
+  frameCount: number
   /** Release GL resources. */
   dispose(): void
 }
 
-export function buildWater(gl: WebGLRenderingContext, t: WaterDataDTO): WaterMesh | null {
+export async function buildWater(
+  gl: WebGLRenderingContext,
+  viewer: any,
+  pathSolver: any,
+  t: WaterDataDTO,
+): Promise<WaterMesh | null> {
   if (!t || !t.water_z || !t.has_water) return null
 
   const W = t.width
@@ -120,7 +147,6 @@ export function buildWater(gl: WebGLRenderingContext, t: WaterDataDTO): WaterMes
   const sMin = t.water.shallow_min, sMax = t.water.shallow_max
   const dMin = t.water.deep_min, dMax = t.water.deep_max
   for (let k = 0; k < W * H; k++) {
-    // Depth is in HiveWE units (1 cell = 128 studs).
     const depthStuds = (t.water_z[k] + offsetStuds) - t.heights[k]
     const depth = Math.max(0, Math.min(1, depthStuds / 128))
     let r: number, g: number, b: number, a: number
@@ -144,13 +170,10 @@ export function buildWater(gl: WebGLRenderingContext, t: WaterDataDTO): WaterMes
     cornerColor[o + 3] = a / 255
   }
 
-  // Build per-corner vertex array. Only emit indices for cells whose 4
-  // corners include at least one HasWater — matches HiveWE's
-  // is_water-per-cell check in water.vert. Vertices are emitted once per
-  // corner (shared between cells); indexing keeps the buffer small.
+  // Per-corner vertex array (one vertex per corner, shared by up to 4 cells).
   const cx = t.center_offset[0]
   const cy = t.center_offset[1]
-  const verts = new Float32Array(W * H * 7) // pos(3) + color(4)
+  const verts = new Float32Array(W * H * 7)
   for (let j = 0; j < H; j++) {
     for (let i = 0; i < W; i++) {
       const k = j * W + i
@@ -165,17 +188,13 @@ export function buildWater(gl: WebGLRenderingContext, t: WaterDataDTO): WaterMes
     }
   }
 
-  // Index buffer: 6 indices per water cell (2 triangles per quad).
-  // Uint16 caps at 65535 vertices — a 256x256 map is 65k corners, right at
-  // the limit. Larger maps would need OES_element_index_uint or chunking.
-  // For now, log and skip past the limit.
+  // uint16 indices cap at 65535 corners (~256×256 maps). Out of scope = no water.
   const N = W * H
   if (N > 65535) {
     flog(`[water] vertex count ${N} exceeds 16-bit index limit; water disabled`)
     return null
   }
 
-  // Count + emit indices for water cells only.
   let cellCount = 0
   for (let j = 0; j < H - 1; j++) {
     for (let i = 0; i < W - 1; i++) {
@@ -199,7 +218,6 @@ export function buildWater(gl: WebGLRenderingContext, t: WaterDataDTO): WaterMes
       const tl = bl + W
       const tr = tl + 1
       if (!(t.has_water[bl] || t.has_water[br] || t.has_water[tl] || t.has_water[tr])) continue
-      // CCW from above. Same winding as terrain mesh.
       indices[idxPos++] = bl
       indices[idxPos++] = br
       indices[idxPos++] = tr
@@ -220,8 +238,34 @@ export function buildWater(gl: WebGLRenderingContext, t: WaterDataDTO): WaterMes
   const prog = buildProgram(gl)
   const stride = 7 * 4
 
+  // Load animation frames in parallel. Each frame is a Texture resource —
+  // the lib's BLP/DDS handlers auto-pick by magic bytes, and the asset
+  // handler's BLP↔DDS extension fallback covers Reforged-only-DDS installs.
+  const frameTextures: (WebGLTexture | null)[] = []
+  if (t.water.texture_file && t.water.num_textures > 0) {
+    const promises: Promise<WebGLTexture | null>[] = []
+    for (let i = 0; i < t.water.num_textures; i++) {
+      const num = i.toString().padStart(2, '0')
+      const path = `${t.water.texture_file}${num}.blp`
+      promises.push(
+        viewer.load(path, pathSolver).then((res: any) => {
+          if (!res) return null
+          return (res.webglResource ?? null) as WebGLTexture | null
+        }).catch(() => null),
+      )
+    }
+    const loaded = await Promise.all(promises)
+    for (const tex of loaded) frameTextures.push(tex)
+    const ok = loaded.filter(Boolean).length
+    flog(`[water] loaded ${ok}/${t.water.num_textures} frame textures from ${t.water.texture_file}`)
+  }
+
+  const texRate = Math.max(1, t.water.texture_rate || 12)
+  const t0 = performance.now()
+
   return {
     triCount: cellCount * 2,
+    frameCount: frameTextures.filter(Boolean).length,
     draw(viewProj: Float32Array) {
       gl.useProgram(prog.program)
       gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
@@ -234,9 +278,23 @@ export function buildWater(gl: WebGLRenderingContext, t: WaterDataDTO): WaterMes
 
       gl.uniformMatrix4fv(prog.uViewProj, false, viewProj)
 
-      // Translucent pass: keep depth-TEST on so water is occluded by ground
-      // / structures above, but depth-WRITE off so multiple transparent
-      // pixels at the same Z don't fight. Standard alpha blend.
+      // Pick the current animation frame and bind to texture unit 0. If no
+      // frames loaded, fall back to the static color-only render.
+      let currentTex: WebGLTexture | null = null
+      if (frameTextures.length > 0) {
+        const elapsed = (performance.now() - t0) / 1000
+        const idx = Math.floor(elapsed * texRate) % frameTextures.length
+        currentTex = frameTextures[idx]
+      }
+      if (currentTex) {
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, currentTex)
+        gl.uniform1i(prog.uWaterTex, 0)
+        gl.uniform1i(prog.uHasTexture, 1)
+      } else {
+        gl.uniform1i(prog.uHasTexture, 0)
+      }
+
       gl.enable(gl.DEPTH_TEST)
       gl.depthFunc(gl.LEQUAL)
       gl.depthMask(false)
@@ -255,6 +313,8 @@ export function buildWater(gl: WebGLRenderingContext, t: WaterDataDTO): WaterMes
       gl.deleteBuffer(vbo)
       gl.deleteBuffer(ibo)
       gl.deleteProgram(prog.program)
+      // We don't delete the frame textures — they're owned by the
+      // viewer.resourceMap and may be reused on the next map open.
     },
   }
 }

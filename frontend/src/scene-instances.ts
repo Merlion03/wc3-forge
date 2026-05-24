@@ -468,12 +468,13 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
           cliffs = await renderCliffs(viewer as any, scene, pathSolver, cliffPlacements)
         }
         // Water surface. Per-cell quad mesh with HiveWE-style depth-blended
-        // color from Water.slk. Rendered after viewer.render() in the RAF
-        // loop with alpha blending — depth-test ON, depth-write OFF so
-        // multiple translucent pixels at the same Z don't fight.
-        water = buildWater(gl, t as unknown as any)
+        // color × animated wave texture from Water.slk. Rendered after
+        // viewer.render() in the RAF loop with alpha blending — depth-test
+        // ON, depth-write OFF so multiple translucent pixels at the same Z
+        // don't fight.
+        water = await buildWater(gl, viewer as any, pathSolver, t as unknown as any)
         if (water) {
-          flog(`[water] ${water.triCount} triangles`)
+          flog(`[water] ${water.triCount} triangles, ${water.frameCount} animation frames`)
         }
       } catch (e) {
         flog('[terrain load]', e instanceof Error ? e.message : String(e))
