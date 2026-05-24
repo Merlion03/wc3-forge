@@ -39,6 +39,7 @@
 
   const SEL_EVENT = 'wc3-forge:selection-changed'
   const MAP_EVENT = 'wc3-forge:map-changed'
+  const DEV_ANIM_EVENT = 'wc3-forge:dev-set-anim'
 
   onMount(async () => {
     try {
@@ -68,6 +69,11 @@
         primaryEntity = null
       }
     })
+    // Dev-only animation poke from App.SetUnitAnimation (devtools / MCP).
+    // Payload: { creation_number: number, anim_name: string }
+    EventsOn(DEV_ANIM_EVENT, (payload: { creation_number: number; anim_name: string }) => {
+      scene?.setUnitAnimation(payload.creation_number, payload.anim_name)
+    })
     EventsOn(SEL_EVENT, async (s: main.SelectionDTO) => {
       const ids = new Set<number>()
       for (const item of s.items || []) {
@@ -96,6 +102,7 @@
   onDestroy(() => {
     EventsOff(SEL_EVENT)
     EventsOff(MAP_EVENT)
+    EventsOff(DEV_ANIM_EVENT)
     scene?.dispose()
   })
 

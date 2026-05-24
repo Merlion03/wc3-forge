@@ -18,6 +18,7 @@ import (
 const (
 	eventSelectionChanged = "wc3-forge:selection-changed"
 	eventMapChanged       = "wc3-forge:map-changed"
+	eventDevSetAnim       = "wc3-forge:dev-set-anim"
 )
 
 // App is the Wails-bindable surface exposed to the frontend. Every method
@@ -400,6 +401,19 @@ func (a *App) GetMapBytes() string {
 		return ""
 	}
 	return base64.StdEncoding.EncodeToString(b)
+}
+
+// SetUnitAnimation is a dev-only hook for poking unit animations from the JS
+// devtools console (or any MCP client). Forwards (creationNumber, animName)
+// to the frontend via Wails event; the scene-instances renderer matches the
+// name against the unit's MDX sequences using the same rarity-weighted picker
+// used for idle stand reroll. animName of "" or "stand" returns the unit to
+// the idle reroll loop. Not exposed in the UI.
+func (a *App) SetUnitAnimation(creationNumber uint32, animName string) {
+	runtime.EventsEmit(a.ctx, eventDevSetAnim, map[string]any{
+		"creation_number": creationNumber,
+		"anim_name":       animName,
+	})
 }
 
 // GetUnit returns the full Entity for one creation_number. Properties panel

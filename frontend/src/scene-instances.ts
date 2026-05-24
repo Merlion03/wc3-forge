@@ -110,20 +110,55 @@ function quatZ(angle: number): number[] {
   return [0, 0, Math.sin(h), Math.cos(h)]
 }
 
-// Inline replacement for handlers/w3x/standsequence so we don't depend on
-// that file's deep import path. Sequences in MDX models are loose — names
-// often look like "Stand", "Stand - 1", "Stand Ready", etc. The lib's
-// rarity-weighted pick is nice-to-have; first-match is fine for now.
-function setStandSequence(instance: any): void {
-  const seqs = instance?.model?.sequences
-  if (!Array.isArray(seqs)) return
-  for (let i = 0; i < seqs.length; i++) {
-    const name = String(seqs[i]?.name ?? '').toLowerCase()
-    if (name === 'stand' || name.startsWith('stand ') || name.startsWith('stand-')) {
-      instance.setSequence(i)
-      return
-    }
+// Rarity-weighted sequence picker ported from
+// mdx-m3-viewer/src/viewer/handlers/w3x/standsequence.ts (default export).
+// The lib doesn't re-export it from its index, so we inline the algorithm.
+// Parameterized on `type` since walk/death/etc. follow the same rules.
+//
+// Algorithm: normalize each sequence's name ("Stand - 1" → "stand"), sort
+// the filtered list by ascending rarity, then walk: rarity 0 sequences form
+// the "common" pool; rarity ≥ 1 sequences are each accepted with probability
+// (rarity / 10). First acceptance wins; if none, uniform-random over the
+// remaining (rarity-0) common pool. MDX `rarity` ranges 0..10 in practice.
+function filterSequencesByType(
+  type: string,
+  sequences: ReadonlyArray<{ name: string; rarity: number }>,
+): { index: number; rarity: number }[] {
+  const filtered: { index: number; rarity: number }[] = []
+  for (let i = 0; i < sequences.length; i++) {
+    const s = sequences[i]
+    if (!s) continue
+    const normalized = String(s.name).split('-')[0].replace(/\d/g, '').trim().toLowerCase()
+    if (normalized === type) filtered.push({ index: i, rarity: s.rarity })
   }
+  return filtered
+}
+
+function selectSequenceIndex(
+  type: string,
+  sequences: ReadonlyArray<{ name: string; rarity: number }>,
+): number {
+  const filtered = filterSequencesByType(type, sequences)
+  if (filtered.length === 0) return -1
+  filtered.sort((a, b) => a.rarity - b.rarity)
+  let i = 0
+  for (; i < filtered.length; i++) {
+    const rarity = filtered[i].rarity
+    if (rarity === 0) break
+    if (Math.random() * 10 > rarity) return filtered[i].index
+  }
+  const sequencesLeft = filtered.length - i
+  if (sequencesLeft <= 0) return filtered[filtered.length - 1].index
+  return filtered[i + Math.floor(Math.random() * sequencesLeft)].index
+}
+
+function rollSequence(instance: any, type: string): boolean {
+  const seqs = instance?.model?.sequences
+  if (!Array.isArray(seqs)) return false
+  const idx = selectSequenceIndex(type, seqs)
+  if (idx < 0) return false
+  instance.setSequence(idx)
+  return true
 }
 
 export interface SceneAPI {
@@ -153,6 +188,13 @@ export interface SceneAPI {
   isReforged(): boolean
   /** Move the camera pivot to (x, y) in world XY. Z defaults to 0 (ground plane). */
   panTo(x: number, y: number, z?: number): void
+  /**
+   * Dev-only: pin a unit to a named animation (e.g. 'Walk', 'Death'). Empty
+   * string or 'stand' returns the unit to the idle reroll loop. Unknown names
+   * are ignored. Returns true if a sequence matching `animName` was found.
+   * Routed in from App.SetUnitAnimation via Wails event.
+   */
+  setUnitAnimation(creationNumber: number, animName: string): boolean
 }
 
 export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {
@@ -229,6 +271,19 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // render loop's first invocation) to satisfy TDZ — the loop closure
   // captures the binding name and would crash on first invocation otherwise.
   let selectedSet: Set<number> = new Set()
+  // Creation numbers whose animation is being driven manually via the dev
+  // SetUnitAnimation hook. The per-frame stand re-roll skips these so a
+  // user-pinned 'Walk' or 'Death' doesn't get clobbered on the next idle tick.
+  // Doodads aren't keyed by creation_number on our side (we don't track them
+  // by ID), so the dev hook is units-only — doodads always idle-reroll.
+  let manualAnimCns: Set<number> = new Set()
+  // Active instances we placed during the most recent loadMap. Keyed by
+  // creation_number so selection events can highlight individually. Models
+  // remain cached in viewer.resourceMap across loads — only instances are
+  // dropped on re-open. Hoisted here (before the render loop's first
+  // invocation) so the per-frame stand-reroll's iteration doesn't trip TDZ.
+  const unitInstances = new Map<number, any>()
+  const doodadInstances: any[] = []
 
   // Sloc-marker renderer. Owns its own shader + box geometry. Failure to
   // build is non-fatal: we just won't have visible markers. Built here
@@ -262,6 +317,20 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         //   4. scene.render — units render on top, depth-tested vs terrain
         const gl = (viewer as any).gl as WebGLRenderingContext
         viewer.update(1000 / 60)
+        // Re-roll stand variation when a non-looping idle finishes. Mirrors
+        // mdx-m3-viewer's Widget.update (handlers/w3x/widget.ts): MDX models
+        // typically have N stand variations marked nonLooping=1, so most
+        // tick once then leave `sequenceEnded=true` for us to pick a new one.
+        // Units pinned to a manual sequence (via setUnitAnimation) are skipped
+        // so the user's poke isn't overwritten. Doodads have no per-instance
+        // ID on our side, so they always idle-reroll.
+        for (const [cn, inst] of unitInstances) {
+          if (manualAnimCns.has(cn)) continue
+          if (inst.sequence === -1 || inst.sequenceEnded) rollSequence(inst, 'stand')
+        }
+        for (const inst of doodadInstances) {
+          if (inst.sequence === -1 || inst.sequenceEnded) rollSequence(inst, 'stand')
+        }
         gl.viewport(0, 0, canvas.width, canvas.height)
         gl.depthMask(true)
         gl.clearColor(bg[0], bg[1], bg[2], 1)
@@ -290,15 +359,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   const ro = new ResizeObserver(sizeToBox)
   ro.observe(canvas)
 
-  // Active instances we placed during the most recent loadMap. Keyed by
-  // creation_number so selection events can highlight individually. Models
-  // remain cached in viewer.resourceMap across loads — only instances are
-  // dropped on re-open.
-  const unitInstances = new Map<number, any>()
-  const doodadInstances: any[] = []
   let pickCallback: ((cn: number) => void) | null = null
-  // Note: selectedSet is declared earlier in this function (before the
-  // render loop runs) to avoid a TDZ trap; see comment up there.
+  // Note: selectedSet, unitInstances, doodadInstances are declared earlier in
+  // this function (before the render loop runs) to avoid a TDZ trap.
   const SELECT_TINT: [number, number, number, number] = [1.2, 1.4, 0.6, 1] // warm yellow boost
 
   // Unit type index: stock-only and process-stable (we don't yet apply
@@ -342,7 +405,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       inst.setVertexColor([info.red / 255, info.green / 255, info.blue / 255, 1])
     }
     inst.setScene(scene)
-    setStandSequence(inst)
+    rollSequence(inst, 'stand')
     if (selectedSet.has(unit.creation_number)) {
       inst.setVertexColor(SELECT_TINT)
     }
@@ -391,11 +454,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     inst.rotateLocal(quatZ(d.rotation))
     inst.uniformScale((d.scale[0] || 1) * (info.model_scale || 1))
     inst.setScene(scene)
-    setStandSequence(inst)
+    rollSequence(inst, 'stand')
     return inst
   }
 
   function clearInstances() {
+    // Manual-anim pins are scoped to a loaded map — drop them so a fresh
+    // map opens with all units back in the idle-reroll pool.
+    manualAnimCns.clear()
     for (const inst of unitInstances.values()) {
       try { inst.detach() } catch { /* already detached */ }
     }
@@ -753,6 +819,29 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     isReforged() { return currentReforged },
     panTo(x: number, y: number, z: number = 0) {
       camera.setPivot(x, y, z)
+    },
+    setUnitAnimation(cn: number, animName: string): boolean {
+      const inst = unitInstances.get(cn)
+      if (!inst) {
+        flog(`[setUnitAnimation] no unit for cn=${cn}`)
+        return false
+      }
+      const normalized = animName.trim().toLowerCase()
+      // Empty / 'stand' → release manual control and reroll an idle.
+      if (normalized === '' || normalized === 'stand') {
+        manualAnimCns.delete(cn)
+        const ok = rollSequence(inst, 'stand')
+        flog(`[setUnitAnimation] cn=${cn} -> stand (release manual) ok=${ok}`)
+        return ok
+      }
+      const ok = rollSequence(inst, normalized)
+      if (ok) {
+        manualAnimCns.add(cn)
+        flog(`[setUnitAnimation] cn=${cn} -> ${normalized} ok=true`)
+      } else {
+        flog(`[setUnitAnimation] cn=${cn} -> ${normalized} ok=false (no matching sequence)`)
+      }
+      return ok
     },
   }
 }
