@@ -10,6 +10,10 @@ export function CloseMap() {
   return window['go']['main']['App']['CloseMap']();
 }
 
+export function GetDoodad(arg1) {
+  return window['go']['main']['App']['GetDoodad'](arg1);
+}
+
 export function GetSelection() {
   return window['go']['main']['App']['GetSelection']();
 }
@@ -20,6 +24,10 @@ export function GetTerrain() {
 
 export function GetUnit(arg1) {
   return window['go']['main']['App']['GetUnit'](arg1);
+}
+
+export function ListDoodads() {
+  return window['go']['main']['App']['ListDoodads']();
 }
 
 export function ListUnits() {

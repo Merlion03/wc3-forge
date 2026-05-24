@@ -1,5 +1,102 @@
+export namespace doodadsdoo {
+	
+	export class ItemDrop {
+	    ItemID: string;
+	    Chance: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ItemDrop(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ItemID = source["ItemID"];
+	        this.Chance = source["Chance"];
+	    }
+	}
+	export class Doodad {
+	    TypeID: string;
+	    Variation: number;
+	    Position: number[];
+	    Rotation: number;
+	    Scale: number[];
+	    SkinID: string;
+	    Flags: number;
+	    Life: number;
+	    MapItemTable: number;
+	    ItemDrops: ItemDrop[];
+	    CreationNumber: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Doodad(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.TypeID = source["TypeID"];
+	        this.Variation = source["Variation"];
+	        this.Position = source["Position"];
+	        this.Rotation = source["Rotation"];
+	        this.Scale = source["Scale"];
+	        this.SkinID = source["SkinID"];
+	        this.Flags = source["Flags"];
+	        this.Life = source["Life"];
+	        this.MapItemTable = source["MapItemTable"];
+	        this.ItemDrops = this.convertValues(source["ItemDrops"], ItemDrop);
+	        this.CreationNumber = source["CreationNumber"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace main {
 	
+	export class DoodadDTO {
+	    creation_number: number;
+	    type_id: string;
+	    skin_id: string;
+	    position: number[];
+	    rotation: number;
+	    scale: number[];
+	    variation: number;
+	    life: number;
+	    flags: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DoodadDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.creation_number = source["creation_number"];
+	        this.type_id = source["type_id"];
+	        this.skin_id = source["skin_id"];
+	        this.position = source["position"];
+	        this.rotation = source["rotation"];
+	        this.scale = source["scale"];
+	        this.variation = source["variation"];
+	        this.life = source["life"];
+	        this.flags = source["flags"];
+	    }
+	}
 	export class MapStatus {
 	    loaded: boolean;
 	    path?: string;

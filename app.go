@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -207,6 +208,55 @@ func (a *App) SelectUnit(creationNumber uint32) SelectionDTO {
 func (a *App) ClearSelection() SelectionDTO {
 	forge.Current.SetSelection(nil, -1)
 	return a.GetSelection()
+}
+
+// DoodadDTO is the JS-facing doodad shape (trimmed for list view, like UnitDTO).
+type DoodadDTO struct {
+	CreationNumber uint32     `json:"creation_number"`
+	TypeID         string     `json:"type_id"`
+	SkinID         string     `json:"skin_id"`
+	Position       [3]float32 `json:"position"`
+	Rotation       float32    `json:"rotation"`
+	Scale          [3]float32 `json:"scale"`
+	Variation      uint32     `json:"variation"`
+	Life           uint8      `json:"life"` // 0..100 for destructibles; 0xFF = N/A
+	Flags          uint8      `json:"flags"`
+}
+
+func (a *App) ListDoodads() []DoodadDTO {
+	dd := forge.Current.Doodads()
+	if dd == nil {
+		return []DoodadDTO{}
+	}
+	out := make([]DoodadDTO, 0, len(dd.Doodads))
+	for _, d := range dd.Doodads {
+		out = append(out, DoodadDTO{
+			CreationNumber: d.CreationNumber,
+			TypeID:         d.TypeID,
+			SkinID:         d.SkinID,
+			Position:       d.Position,
+			Rotation:       d.Rotation,
+			Scale:          d.Scale,
+			Variation:      d.Variation,
+			Life:           d.Life,
+			Flags:          d.Flags,
+		})
+	}
+	return out
+}
+
+// GetDoodad returns the full Doodad for one creation_number.
+func (a *App) GetDoodad(creationNumber uint32) (*doodadsdoo.Doodad, error) {
+	dd := forge.Current.Doodads()
+	if dd == nil {
+		return nil, fmt.Errorf("no map loaded")
+	}
+	for i := range dd.Doodads {
+		if dd.Doodads[i].CreationNumber == creationNumber {
+			return &dd.Doodads[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no doodad with creation_number %d", creationNumber)
 }
 
 // GetUnit returns the full Entity for one creation_number. Properties panel

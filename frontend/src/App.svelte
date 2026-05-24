@@ -1,15 +1,16 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
   import {
-    OpenMapDialog, OpenMap, CloseMap, ListUnits, Status, GetTerrain,
+    OpenMapDialog, OpenMap, CloseMap, ListUnits, ListDoodads, Status, GetTerrain,
     GetSelection, SelectUnit, ClearSelection, GetUnit,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
-  import { createScene, type SceneAPI, type TerrainData, type UnitData } from './scene'
+  import { createScene, type SceneAPI, type TerrainData, type UnitData, type DoodadData } from './scene'
 
   let status: main.MapStatus = { loaded: false, unit_count: 0 }
   let units: main.UnitDTO[] = []
+  let doodads: main.DoodadDTO[] = []
   let selectedIds = new Set<number>()
   let primaryEntity: unitsdoo.Entity | null = null
   let error: string = ''
@@ -77,6 +78,7 @@
 
   async function reloadMap() {
     units = await ListUnits()
+    doodads = await ListDoodads()
     try {
       const terrain = await GetTerrain() as TerrainData
       scene?.setTerrain(terrain)
@@ -90,6 +92,13 @@
       position: u.position,
       scale: u.scale,
     } as UnitData)))
+    scene?.setDoodads(doodads.map(d => ({
+      creation_number: d.creation_number,
+      type_id: d.type_id,
+      position: d.position,
+      rotation: d.rotation,
+      scale: d.scale,
+    } as DoodadData)))
   }
 
   async function close() {
@@ -97,8 +106,10 @@
     try {
       status = await CloseMap()
       units = []
+      doodads = []
       scene?.setTerrain(null)
       scene?.setUnits([])
+      scene?.setDoodads([])
       selectedIds = new Set()
       primaryEntity = null
     } finally {
@@ -137,6 +148,9 @@
     if (markers.length) out.push({ id: 'markers', label: 'Markers', entries: markers })
     return out
   }
+
+  // Doodad count for Explorer header.
+  $: doodadCount = doodads.length
 
   // ----- Properties helpers -----
 
@@ -202,6 +216,12 @@
             </ul>
           </div>
         {/each}
+        {#if doodadCount > 0}
+          <div class="category">
+            <header class="cat-header">Doodads <span class="count">{doodadCount}</span></header>
+            <div class="dim doodad-note">Decorative — visible in viewport; clicking not yet wired.</div>
+          </div>
+        {/if}
       {/if}
     </aside>
 
@@ -349,6 +369,7 @@
   .explorer li.selected { background: #1e3a8a; color: #e4e4e7; }
   .explorer li .type { color: #e4e4e7; }
   .explorer li .cn { font-size: 11px; }
+  .doodad-note { padding: 4px 14px 8px; font-size: 11px; color: #71717a; }
 
   /* Properties */
   .properties { overflow-y: auto; }

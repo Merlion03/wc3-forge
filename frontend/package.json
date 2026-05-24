@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@types/three": "^0.184.1",
-    "three": "^0.184.0"
+    "three": "^0.184.0",
+    "war3-model": "^4.0.1"
   }
 }

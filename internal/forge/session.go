@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3e"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
@@ -29,6 +30,7 @@ type Session struct {
 	path    string
 	info    *w3i.Info
 	units   *unitsdoo.File
+	doodads *doodadsdoo.File
 	terrain *w3e.File
 
 	selection SelectionState
@@ -113,6 +115,23 @@ func (s *Session) Open(path string) error {
 		return fmt.Errorf("read war3mapUnits.doo: %w", err)
 	}
 
+	// war3map.doo — placed doodads + destructibles. Optional in principle
+	// (some maps have none); modern maps almost always have one.
+	var doodads *doodadsdoo.File
+	ddPath := filepath.Join(abs, "war3map.doo")
+	ddBytes, err := os.ReadFile(ddPath)
+	switch {
+	case err == nil:
+		doodads, err = doodadsdoo.Parse(ddBytes)
+		if err != nil {
+			return fmt.Errorf("parse war3map.doo: %w", err)
+		}
+	case errors.Is(err, os.ErrNotExist):
+		doodads = &doodadsdoo.File{}
+	default:
+		return fmt.Errorf("read war3map.doo: %w", err)
+	}
+
 	// war3map.w3e — required for 3D viewport rendering, but a map without one
 	// is still openable (we just can't render terrain). Treat missing as
 	// non-fatal; downstream code checks for nil.
@@ -136,6 +155,7 @@ func (s *Session) Open(path string) error {
 	s.path = abs
 	s.info = info
 	s.units = units
+	s.doodads = doodads
 	s.terrain = terrain
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
@@ -150,6 +170,7 @@ func (s *Session) Close() {
 	s.path = ""
 	s.info = nil
 	s.units = nil
+	s.doodads = nil
 	s.terrain = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	s.mu.Unlock()
@@ -183,6 +204,13 @@ func (s *Session) Units() *unitsdoo.File {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.units
+}
+
+// Doodads returns the parsed war3map.doo, or nil if no map is loaded.
+func (s *Session) Doodads() *doodadsdoo.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.doodads
 }
 
 // Terrain returns the parsed war3map.w3e, or nil if no map is loaded or the

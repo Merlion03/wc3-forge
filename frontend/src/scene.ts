@@ -24,9 +24,18 @@ export interface UnitData {
   scale: [number, number, number]
 }
 
+export interface DoodadData {
+  creation_number: number
+  type_id: string
+  position: [number, number, number]
+  rotation: number
+  scale: [number, number, number]
+}
+
 export interface SceneAPI {
   setTerrain(t: TerrainData | null): void
   setUnits(units: UnitData[]): void
+  setDoodads(doodads: DoodadData[]): void
   setSelection(creationNumbers: number[]): void
   onPick(cb: (creationNumber: number | null) => void): void
   dispose(): void
@@ -92,8 +101,13 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
   const unitOriginalColor = new Map<number, number>()
   const selected = new Set<number>()
 
-  // Shared unit geometry (cheaper than per-unit Box).
+  // Shared geometries.
   const unitGeom = new THREE.BoxGeometry(80, 160, 80)
+  // Doodads are decorative — usually MANY per map (enfos: 578). Single
+  // InstancedMesh keeps draw-call count to 1.
+  const doodadGeom = new THREE.BoxGeometry(48, 96, 48)
+  const doodadMat = new THREE.MeshLambertMaterial({ color: 0x3f5a2a })
+  let doodadInstanced: THREE.InstancedMesh | null = null
 
   // Raycaster for click picking.
   const raycaster = new THREE.Raycaster()
@@ -154,6 +168,13 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
     unitMeshes.clear()
     unitOriginalColor.clear()
     selected.clear()
+  }
+
+  function clearDoodads() {
+    if (!doodadInstanced) return
+    scene.remove(doodadInstanced)
+    doodadInstanced.dispose()
+    doodadInstanced = null
   }
 
   function applyUnitColor(cn: number) {
@@ -243,6 +264,34 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
       }
     },
 
+    setDoodads(doodads) {
+      clearDoodads()
+      if (doodads.length === 0) return
+      doodadInstanced = new THREE.InstancedMesh(doodadGeom, doodadMat, doodads.length)
+      const matrix = new THREE.Matrix4()
+      const pos = new THREE.Vector3()
+      const quat = new THREE.Quaternion()
+      const sca = new THREE.Vector3()
+      const yAxis = new THREE.Vector3(0, 1, 0)
+      for (let i = 0; i < doodads.length; i++) {
+        const d = doodads[i]
+        // game (x, y, z) → three (x, z + half-height, -y)
+        pos.set(d.position[0], d.position[2] + 48, -d.position[1])
+        // Doodad rotation in the file is radians around the game-Z axis,
+        // which is Three's Y. Negate to match the (x, z, -y) handedness.
+        quat.setFromAxisAngle(yAxis, -d.rotation)
+        // Doodad scale fields map: game (x, y, z) → three (x, z, y).
+        sca.set(d.scale[0], d.scale[2], d.scale[1])
+        matrix.compose(pos, quat, sca)
+        doodadInstanced.setMatrixAt(i, matrix)
+      }
+      doodadInstanced.instanceMatrix.needsUpdate = true
+      // Doodads are not pickable (yet) — they're decorative and selection
+      // for a 500+ instanced mesh needs per-instance hit testing. Skipping
+      // for now; the geometry just renders.
+      scene.add(doodadInstanced)
+    },
+
     setSelection(creationNumbers) {
       const next = new Set(creationNumbers)
       // Restore previously selected items.
@@ -271,7 +320,10 @@ export function createScene(canvas: HTMLCanvasElement): SceneAPI {
       canvas.removeEventListener('click', onCanvasClick)
       clearTerrain()
       clearUnits()
+      clearDoodads()
       unitGeom.dispose()
+      doodadGeom.dispose()
+      doodadMat.dispose()
       renderer.dispose()
     },
   }
