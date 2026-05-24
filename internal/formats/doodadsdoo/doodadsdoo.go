@@ -154,7 +154,7 @@ func Parse(data []byte) (*File, error) {
 
 	f.Doodads = make([]Doodad, 0, count)
 	for i := uint32(0); i < count; i++ {
-		d, err := readDoodad(r, f.Version, f.SubVersion)
+		d, err := readDoodad(r, f.Version)
 		if err != nil {
 			return nil, fmt.Errorf("doodad %d: %w", i, err)
 		}
@@ -187,7 +187,7 @@ func Parse(data []byte) (*File, error) {
 	return f, nil
 }
 
-func readDoodad(r *reader, version uint32, subversion uint32) (Doodad, error) {
+func readDoodad(r *reader, version uint32) (Doodad, error) {
 	var d Doodad
 	var err error
 
@@ -225,23 +225,28 @@ func readDoodad(r *reader, version uint32, subversion uint32) (Doodad, error) {
 		}
 	}
 
-	// skin_id — same ambiguous-Reforged-field treatment as unitsdoo.
+	// skin_id — ambiguous Reforged-era field. HiveWE keys this off
+	// war3map.w3i's game_version (>= 1.32 → read), NOT the .doo subversion.
+	// We don't have access to w3i here, so we rely on a peek-and-validate
+	// heuristic that works regardless of subversion.
 	//
-	// At subversion >= 11: always present, always read.
-	// At subversion == 9: MAY be present (Reforged re-saved map) or MAY be
-	//   absent (untouched pre-Reforged map). Peek 4 bytes; if they look like
-	//   a printable FourCC (each byte in 0x20-0x7E), consume as skin_id.
-	//   Otherwise leave them for the next field.
+	// The peek is sound because the byte at the would-be skin_id position is
+	// disjoint between the two cases:
+	//   - skin_id present  → first byte is a printable FourCC byte (0x20..0x7E);
+	//                        WC3 FourCCs are always ASCII letters/digits.
+	//   - skin_id absent   → first byte is the `flags` field, enumerated as
+	//                        {0, 1, 2} — always below 0x20.
+	// A printable first byte is conclusive evidence of skin_id presence.
 	//
-	// Ported verbatim from HiveWE src/base/doodads.ixx (~lines 85-95).
-	readSkinID := subversion >= 11
-	if !readSkinID {
-		peek := r.peek(4)
-		if len(peek) == 4 && isPrintableFourCC(peek) {
-			readSkinID = true
-		}
-	}
-	if readSkinID {
+	// Historically this heuristic was applied only at subversion 9 (the
+	// "Reforged re-saved an old map" case). X_Hero_Reborn_1.3.w3x is a
+	// real-world counter-example: subversion 11 with NO skin_id (its w3i
+	// game_version is pre-1.32). Applying the peek at all subversions
+	// handles that variant without losing any subver-11 maps that DO carry
+	// skin_id.
+	//
+	// Ref: HiveWE src/base/doodads.ixx (`game_version_major*100 + minor >= 132`).
+	if peek := r.peek(4); len(peek) == 4 && isPrintableFourCC(peek) {
 		if d.SkinID, err = r.readFourCC(); err != nil {
 			return d, fmt.Errorf("skin_id: %w", err)
 		}
@@ -267,6 +272,17 @@ func readDoodad(r *reader, version uint32, subversion uint32) (Doodad, error) {
 		if err != nil {
 			return d, fmt.Errorf("item_drop_set_count: %w", err)
 		}
+		// Sanity-cap drop-set / per-set item counts. Real maps top out at a
+		// handful of sets per doodad and a few items per set. A bogus value
+		// here usually means we're misaligned (e.g., consumed a phantom
+		// skin_id when none was present) and would otherwise wander far past
+		// the buffer before erroring. Cap is generous: any realistic
+		// authored data fits.
+		const maxDropSets = 256
+		const maxItemsPerSet = 256
+		if setCount > maxDropSets {
+			return d, fmt.Errorf("item_drop_set_count %d exceeds sanity cap %d (likely misalignment)", setCount, maxDropSets)
+		}
 		// Flatten all sets into a single []ItemDrop. Same rationale as
 		// unitsdoo: wc3-forge's current use case is read-only inspection;
 		// add a [][]ItemDrop layer only if round-trip writers need it.
@@ -274,6 +290,9 @@ func readDoodad(r *reader, version uint32, subversion uint32) (Doodad, error) {
 			itemCount, err := r.readU32()
 			if err != nil {
 				return d, fmt.Errorf("drop_set[%d] count: %w", s, err)
+			}
+			if itemCount > maxItemsPerSet {
+				return d, fmt.Errorf("drop_set[%d] item_count %d exceeds sanity cap %d (likely misalignment)", s, itemCount, maxItemsPerSet)
 			}
 			for it := uint32(0); it < itemCount; it++ {
 				var drop ItemDrop
