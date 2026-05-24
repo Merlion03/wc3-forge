@@ -14,6 +14,7 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3e"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/wts"
 )
 
 // Session holds the currently-loaded map. Phase 1 only supports folder-based
@@ -76,6 +77,26 @@ func (s *Session) Open(path string) error {
 	if err != nil {
 		return fmt.Errorf("parse war3map.w3i: %w", err)
 	}
+
+	// war3map.wts (trigger strings) is optional. When present, resolve all
+	// TRIGSTR_<n> references in Info so map name / author / player names
+	// surface as their display values instead of bare reference tokens.
+	var strings wts.Strings
+	wtsBytes, err := os.ReadFile(filepath.Join(abs, "war3map.wts"))
+	switch {
+	case err == nil:
+		strings, err = wts.Parse(wtsBytes)
+		if err != nil {
+			// Don't fail the whole open over a wts parse error — UI just
+			// shows the raw TRIGSTR refs as a fallback.
+			strings = nil
+		}
+	case errors.Is(err, os.ErrNotExist):
+		// No wts — older maps and some protected maps lack one. That's fine.
+	default:
+		return fmt.Errorf("read war3map.wts: %w", err)
+	}
+	info.ResolveStrings(strings.Display)
 
 	var units *unitsdoo.File
 	udPath := filepath.Join(abs, "war3mapUnits.doo")

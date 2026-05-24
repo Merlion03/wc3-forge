@@ -323,6 +323,47 @@ type Info struct {
 	TruncatedAt *string `json:",omitempty"`
 }
 
+// ResolveStrings substitutes TRIGSTR_<n> references throughout the Info
+// in place, using resolve as the lookup. Callers typically pass
+// wts.Strings.Resolve; the resolve func itself is expected to be a no-op
+// for non-TRIGSTR inputs (so it's safe to apply over fields that already
+// contain literal strings).
+//
+// resolve may be nil, in which case this is a no-op.
+func (i *Info) ResolveStrings(resolve func(string) string) {
+	if i == nil || resolve == nil {
+		return
+	}
+	i.Name = resolve(i.Name)
+	i.Author = resolve(i.Author)
+	i.Description = resolve(i.Description)
+	i.SuggestedPlayers = resolve(i.SuggestedPlayers)
+	i.CustomSoundEnv = resolve(i.CustomSoundEnv)
+
+	i.LoadingScreen.Model = resolve(i.LoadingScreen.Model)
+	i.LoadingScreen.Text = resolve(i.LoadingScreen.Text)
+	i.LoadingScreen.Title = resolve(i.LoadingScreen.Title)
+	i.LoadingScreen.Subtitle = resolve(i.LoadingScreen.Subtitle)
+
+	i.Prologue.Model = resolve(i.Prologue.Model)
+	i.Prologue.Text = resolve(i.Prologue.Text)
+	i.Prologue.Title = resolve(i.Prologue.Title)
+	i.Prologue.Subtitle = resolve(i.Prologue.Subtitle)
+
+	for k := range i.Players {
+		i.Players[k].Name = resolve(i.Players[k].Name)
+	}
+	for k := range i.Forces {
+		i.Forces[k].Name = resolve(i.Forces[k].Name)
+	}
+	for k := range i.RandomUnitTables {
+		i.RandomUnitTables[k].Name = resolve(i.RandomUnitTables[k].Name)
+	}
+	for k := range i.RandomItemTables {
+		i.RandomItemTables[k].Name = resolve(i.RandomItemTables[k].Name)
+	}
+}
+
 // reader is an internal helper around a fixed byte slice with a cursor.
 type reader struct {
 	buf []byte
