@@ -622,17 +622,37 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			} else if i > 0 && j > 0 && cellCliff[idx-W-1] {
 				anyCliff = true
 			}
-			anyRamp := t.Tiles[idx].HasRamp()
-			if i > 0 && t.Tiles[idx-1].HasRamp() {
-				anyRamp = true
+			// HiveWE's `a_romp` ORs `corner_romp[]`, NOT the raw per-corner
+			// `corner_ramp` flag from war3map.w3e. `corner_romp` is set TRUE
+			// only when a corner is part of an ACTUALLY-RENDERED ramp
+			// clifftrans piece — much narrower than "any corner with the
+			// ramp flag set."
+			//
+			// We previously used `t.Tiles[idx-N].HasRamp()` here (corner_ramp),
+			// which over-fired the remap on plateau-interior corners adjacent
+			// to ramp-flagged corners that are NOT part of a renderable ramp
+			// span (e.g. the spear-tip plateau on Enfo's FFB at cells
+			// (11..13, 67) — all flagged ramp=true but never matched by
+			// HiveWE's vertical/horizontal ramp pre-pass because of the
+			// `rBL != rBR` asymmetry requirement). The result: every plateau
+			// corner touching one of those false-positive ramp corners got
+			// remapped to Irbk, hiding the Itbk overlay that's supposed to
+			// frame the cliff border with rune-brick. Symptom: cells (11,68)
+			// and (12,68) rendered as flat Irbk in wc3-forge but as
+			// Irbk-frame-with-Itbk-interior in HiveWE.
+			//
+			// Mirrors terrain.ixx::real_tile_texture line 755-768.
+			anyRomp := cornerRomp[idx]
+			if i > 0 && cornerRomp[idx-1] {
+				anyRomp = true
 			}
-			if j > 0 && t.Tiles[idx-W].HasRamp() {
-				anyRamp = true
+			if j > 0 && cornerRomp[idx-W] {
+				anyRomp = true
 			}
-			if i > 0 && j > 0 && t.Tiles[idx-W-1].HasRamp() {
-				anyRamp = true
+			if i > 0 && j > 0 && cornerRomp[idx-W-1] {
+				anyRomp = true
 			}
-			if !anyRamp && !(anyCliff && !t.Tiles[idx].HasRamp()) {
+			if !anyRomp && !(anyCliff && !t.Tiles[idx].HasRamp()) {
 				continue
 			}
 			// Ramp continuity fix: when THIS corner is itself a ramp corner,
