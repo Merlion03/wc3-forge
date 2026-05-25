@@ -127,8 +127,12 @@ export function pickTerrainCell(
   // screenToWorldRay → near + far points (6 floats: vec3 + vec3).
   const out = new Float32Array(6)
   const vp = (scene as any).viewport as Float32Array
-  // mdx-m3-viewer screen Y is canvas-bottom-origin; DOM event Y is top.
-  const screen = new Float32Array([px, canvas.clientHeight - py])
+  // mdx-m3-viewer's screenToWorldRay → unproject() expects DOM-top-origin Y
+  // (its `y_ndc = 1 - 2*v[1]/h` formula gives y_ndc=+1 for v[1]=0). The
+  // earlier "flip with canvas.clientHeight - py" mirrored cell picks around
+  // the canvas midpoint — same bug as the entity ray-pick. Pass DOM coords
+  // through directly.
+  const screen = new Float32Array([px, py])
   scene.camera.screenToWorldRay(out, screen, vp)
   const ox = out[0], oy = out[1], oz = out[2]
   const dx = out[3] - ox, dy = out[4] - oy, dz = out[5] - oz

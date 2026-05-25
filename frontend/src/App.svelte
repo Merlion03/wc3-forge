@@ -175,6 +175,15 @@
     EventsOn(DEV_ANIM_EVENT, (payload: { creation_number: number; anim_name: string }) => {
       scene?.setUnitAnimation(payload.creation_number, payload.anim_name)
     })
+    // Verification harness. Triggered by Go-side --pick-self-test flag (which
+    // emits this event ~4s after startup so map load + assets settle). The
+    // scene runs a project-then-pick round-trip across every visible instance;
+    // results land in wc3-forge.log via flog. WebView2 drops synthetic mouse
+    // input so this is the only viable external entrypoint for pick verification.
+    EventsOn('wc3-forge:pick-self-test', () => {
+      const run = (scene as any)?.__runPickSelfTest
+      if (typeof run === 'function') run()
+    })
     let startupSpec: { x: number; y: number; z: number; distance: number } | null = null
     EventsOn('wc3-forge:startup-camera', (payload: { spec: string }) => {
       const m = (payload?.spec || '').match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:,(-?\d+(?:\.\d+)?))?(?:,(\d+(?:\.\d+)?))?$/)

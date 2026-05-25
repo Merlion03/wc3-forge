@@ -25,6 +25,14 @@ var assets embed.FS
 // "no override; use whatever framing reloadMap chose".
 var startupCameraSpec string
 
+// startupPickSelfTest holds the value of --pick-self-test. When true, App.startup
+// fires a "wc3-forge:pick-self-test" event after map-load; the JS side runs the
+// project-every-instance-then-rayPick verification and logs results via flog.
+// Pure diagnostic affordance — WebView2 drops synthetic mouse input, so the
+// only way to drive a pick from an external test is to have the JS side run
+// the test against its own state. Defaults to false.
+var startupPickSelfTest bool
+
 func main() {
 	var headless bool
 	var noBridge bool
@@ -41,8 +49,11 @@ func main() {
 	// Plumbed into the JS via a Wails event in App.startup so the frontend
 	// can apply it on the first map-load.
 	flag.StringVar(&cameraSpec, "camera", "", "initial camera spec 'x,y,z,distance' (z+distance optional)")
+	var pickSelfTest bool
+	flag.BoolVar(&pickSelfTest, "pick-self-test", false, "run a pick-correctness self-test after map load (logs to wc3-forge.log)")
 	flag.Parse()
 	startupCameraSpec = cameraSpec
+	startupPickSelfTest = pickSelfTest
 
 	if startReforged {
 		reforgedMode.Store(true)

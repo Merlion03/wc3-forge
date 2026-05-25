@@ -925,9 +925,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   function groundPlaneXY(px: number, py: number): [number, number] | null {
     const out = new Float32Array(6)
     const vp = (scene as any).viewport as Float32Array
-    // mdx-m3-viewer screen Y origin is at canvas BOTTOM; DOM event Y is from
-    // the top — flip before handing to screenToWorldRay (matches rayPick).
-    const screen = new Float32Array([px, canvas.clientHeight - py])
+    // mdx-m3-viewer's Camera.screenToWorldRay() calls into unproject() which
+    // expects DOM-top-origin Y (it does `y_ndc = 1 - 2*v[1]/h` internally, so
+    // v[1]=0 → top of NDC). The old "screen Y is at canvas BOTTOM" comment
+    // was wrong — flipping py here mirrored picks around the canvas midpoint,
+    // exactly matching the user-reported "click top selects bottom" bug.
+    // Cross-check: worldToCanvasPx() (the inverse) also lives in DOM-top
+    // coords, and the rubber-band picker that uses it has always worked.
+    const screen = new Float32Array([px, py])
     scene.camera.screenToWorldRay(out, screen, vp)
     const nx = out[0], ny = out[1], nz = out[2]
     const dx = out[3] - nx, dy = out[4] - ny, dz = out[5] - nz
@@ -942,9 +947,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // screenToWorldRay outputs near + far points (vec3 + vec3 = 6 floats).
     const out = new Float32Array(6)
     const vp = (scene as any).viewport as Float32Array
-    // mdx-m3-viewer convention: screen Y origin at canvas BOTTOM. DOM events
-    // give Y from the top, so flip.
-    const screen = new Float32Array([px, canvas.clientHeight - py])
+    // mdx-m3-viewer's screenToWorldRay → unproject() uses DOM-top-origin Y
+    // (`y_ndc = 1 - 2*v[1]/h`). Pass canvas-relative DOM coords AS-IS. The
+    // earlier "flip with canvas.clientHeight - py" mirrored picks around the
+    // canvas midpoint — that was the user-visible "vice versa" bug. See
+    // worldToCanvasPx() (the inverse projection): it also lives in DOM-top
+    // space and rubber-band picking — which uses only worldToCanvasPx, no
+    // ray-cast — has always worked, confirming the convention.
+    const screen = new Float32Array([px, py])
     scene.camera.screenToWorldRay(out, screen, vp)
     const ox = out[0], oy = out[1], oz = out[2]
     const dx = out[3] - ox, dy = out[4] - oy, dz = out[5] - oz
@@ -1829,5 +1839,68 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       }
     },
     getDoodadCategories() { return [...doodadCategoriesPresent] },
+    // Pick-correctness self-test. For each unit and doodad instance, project
+    // its world-space bound-center to canvas pixels (via worldToCanvasPx),
+    // then call rayPick at that pixel and compare the returned hit's id+kind
+    // to the instance's own creation_number. A correctly-configured pick
+    // pipeline returns the same instance for every visible-on-screen entity;
+    // off-screen or behind-camera entities (worldToCanvasPx returns null) are
+    // skipped. Results are logged via flog for external inspection.
+    __runPickSelfTest(): { tested: number; matched: number; mismatched: number; skipped: number; nearMatchDist: number } {
+      let tested = 0, matched = 0, mismatched = 0, skipped = 0
+      // Cumulative distance (canvas px) between the cursor-projected center
+      // of the queried instance and the cursor-projected center of whatever
+      // instance rayPick returned. With a CORRECT pick pipeline, this should
+      // be near zero for "matched" hits (it always is) AND small for
+      // "mismatched" hits when the mismatch is just occlusion in a dense
+      // cluster (the picked instance's projection sits ~near the click).
+      // With a Y-MIRRORED pick pipeline, even non-null mismatches project
+      // far from the cursor (across the canvas height). So this metric is
+      // a clean discriminator: small avg dist for mismatches = density,
+      // large = math bug.
+      let mismatchDistSum = 0
+      const sample: string[] = []
+      const consider = (cn: number, kind: 'unit' | 'doodad', inst: any) => {
+        const wb = instanceWorldBounds(inst)
+        if (!wb) { skipped++; return }
+        const px = worldToCanvasPx(wb.cx, wb.cy, wb.cz)
+        if (!px) { skipped++; return }
+        if (px.x < 0 || px.y < 0 || px.x > canvas.clientWidth || px.y > canvas.clientHeight) {
+          skipped++; return
+        }
+        tested++
+        const hit = rayPick(px.x, px.y)
+        const ok = !!hit && hit.kind === kind && hit.id === cn
+        if (ok) matched++
+        else {
+          mismatched++
+          // Distance from query cursor to the picked instance's canvas
+          // projection. Falls back to "way off" sentinel when hit is null.
+          let dist = 99999
+          if (hit) {
+            const m = hit.kind === 'unit' ? unitInstances : doodadInstances
+            const other = m.get(hit.id)
+            if (other) {
+              const wb2 = instanceWorldBounds(other)
+              if (wb2) {
+                const px2 = worldToCanvasPx(wb2.cx, wb2.cy, wb2.cz)
+                if (px2) dist = Math.hypot(px.x - px2.x, px.y - px2.y)
+              }
+            }
+          }
+          mismatchDistSum += dist
+          if (sample.length < 5) {
+            sample.push(`${kind}#${cn} at canvas(${px.x.toFixed(0)},${px.y.toFixed(0)}) → ` +
+              (hit ? `${hit.kind}#${hit.id} dist=${dist.toFixed(0)}px` : 'null'))
+          }
+        }
+      }
+      for (const [cn, inst] of unitInstances) consider(cn, 'unit', inst)
+      for (const [cn, inst] of doodadInstances) consider(cn, 'doodad', inst)
+      const nearMatchDist = mismatched > 0 ? mismatchDistSum / mismatched : 0
+      const result = { tested, matched, mismatched, skipped, nearMatchDist }
+      flog(`[pick-self-test] ${JSON.stringify(result)} sample-mismatches=${JSON.stringify(sample)}`)
+      return result
+    },
   }
 }
