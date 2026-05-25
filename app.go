@@ -68,6 +68,16 @@ func (a *App) startup(ctx context.Context) {
 			})
 		}()
 	}
+	if startupPickSelfTest {
+		// Fire after a longer delay than the camera spec so map-load + asset
+		// streaming have had time to settle. The JS handler walks every
+		// unit+doodad instance, projects its bound-center to canvas pixels,
+		// calls rayPick at that pixel, and reports per-instance success/mismatch.
+		go func() {
+			time.Sleep(4 * time.Second)
+			runtime.EventsEmit(a.ctx, "wc3-forge:pick-self-test", map[string]any{})
+		}()
+	}
 	// Forward Go-side selection changes to the frontend.
 	forge.Current.OnSelectionChanged(func(s forge.SelectionState) {
 		runtime.EventsEmit(a.ctx, eventSelectionChanged, s)
