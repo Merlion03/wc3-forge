@@ -246,6 +246,17 @@ type TerrainDTO struct {
 	ShadowMap       []byte `json:"shadow_map"`
 	ShadowMapWidth  int    `json:"shadow_map_width"`
 	ShadowMapHeight int    `json:"shadow_map_height"`
+	// CellSkip is a per-cell flag (1 = skip terrain quad). Length =
+	// (Width-1)*(Height-1), row-major (cell (i,j) at index j*(Width-1)+i).
+	// Mirrors HiveWE's `gpu_ground_exists_data == 0` test — a cell is
+	// "skipped" when it's a cliff cell (any 4-corner layer_height mismatch)
+	// AND NOT a ramp entrance (all 4 corners ramp-flagged with non-
+	// symmetric layer-height diagonals). On skipped cells, the cliff MDX
+	// alone covers the vertical face; rendering the terrain quad there
+	// produces diagonal slopes that poke through the cliff geometry —
+	// the bug Problem 1 fixes. Stored as []uint32 for the same
+	// base64-marshal-trap reason as GroundTex.
+	CellSkip []uint32 `json:"cell_skip"`
 }
 
 // GetTerrain returns the terrain grid for rendering. Empty if no map loaded or
@@ -329,6 +340,39 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			}
 		}
 	}
+
+	// Compute per-cell "skip terrain quad" mask, mirroring HiveWE's
+	// update_ground_exists logic. A cell is skipped (terrain quad NOT
+	// rendered) when it's a cliff cell AND not a ramp entrance. Cliff MDX
+	// covers these cells — rendering the terrain quad on top produces
+	// diagonal Z-interpolated slopes that poke through the vertical cliff
+	// face. HiveWE's cliff.vert/terrain.vert split lets the cliff cover
+	// these cells exclusively.
+	//
+	// A "ramp entrance" cell has all 4 corners HasRamp() AND the corner
+	// layer heights aren't diagonal-symmetric (TL==BR && TR==BL); see
+	// HiveWE terrain.ixx is_corner_ramp_entrance. Ramp entrance cells DO
+	// render their terrain quad — the ramp clifftrans MDX needs the quad
+	// to blend into the surrounding ground.
+	numCells := (W - 1) * (H - 1)
+	cellSkip := make([]uint32, numCells)
+	for j := 0; j < H-1; j++ {
+		for i := 0; i < W-1; i++ {
+			bl := j*W + i
+			if !cellCliff[bl] {
+				continue
+			}
+			// Ramp entrance check
+			br := bl + 1
+			tl := bl + W
+			tr := tl + 1
+			allRamp := t.Tiles[bl].HasRamp() && t.Tiles[br].HasRamp() && t.Tiles[tl].HasRamp() && t.Tiles[tr].HasRamp()
+			isRampEntrance := allRamp && !(t.Tiles[bl].LayerHeight == t.Tiles[tr].LayerHeight && t.Tiles[tl].LayerHeight == t.Tiles[br].LayerHeight)
+			if !isRampEntrance {
+				cellSkip[j*(W-1)+i] = 1
+			}
+		}
+	}
 	for j := 0; j < H; j++ {
 		for i := 0; i < W; i++ {
 			idx := j*W + i
@@ -408,6 +452,7 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		ShadowMap:       shadowBytes,
 		ShadowMapWidth:  shadowW,
 		ShadowMapHeight: shadowH,
+		CellSkip:        cellSkip,
 	}, nil
 }
 
