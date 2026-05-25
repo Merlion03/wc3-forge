@@ -25,6 +25,13 @@
 import { flog } from './debuglog'
 import type { ModelViewer } from 'mdx-m3-viewer'
 
+// Axis-angle quaternion for -π/2 rotation around +Z (game-space yaw).
+// Used to "unrotate" cliff MDX meshes — see comment at the application site
+// in renderCliffs() below.
+//   q = [x, y, z, w] with axis = (0,0,1), angle = -π/2
+//   x=0, y=0, z=sin(-π/4)=-√2/2, w=cos(-π/4)=√2/2
+const CLIFF_UNROTATE_QUAT: number[] = [0, 0, -Math.SQRT1_2, Math.SQRT1_2]
+
 interface TerrainCliffData {
   width: number   // vertex count along X
   height: number  // vertex count along Y
@@ -286,6 +293,14 @@ export async function renderCliffs(
     for (const p of group) {
       const inst = model.addInstance()
       inst.move(p.pos)
+      // WC3 cliff meshes carry a baked-in 90° yaw vs world-space — HiveWE's
+      // cliff.vert "unrotates" them at the vertex stage via
+      // `(vPosition.y, -vPosition.x, vPosition.z)`. That swap is a -90°
+      // rotation around +Z (right-hand rule): (x,y,z)→(y,-x,z). We don't
+      // have a custom vertex shader for cliffs in wc3-forge; instead we
+      // rotate every cliff instance -π/2 around +Z so the lib's standard
+      // MDX shader produces the same result.
+      inst.rotateLocal(CLIFF_UNROTATE_QUAT)
       inst.setScene(scene)
       instances.push(inst)
       placed++
