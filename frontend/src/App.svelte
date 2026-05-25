@@ -262,9 +262,62 @@
     const dpct = (dy / h) * 100
     const next = Math.max(RIGHT_MIN_PCT, Math.min(RIGHT_MAX_PCT, rightExplorerPct + dpct))
     rightExplorerPct = next
-    // Canvas size depends on the viewport's clientWidth (constant here, since
-    // the right column has a fixed width) and clientHeight (also constant;
-    // only the right column resizes vertically). No camera-aspect bump needed.
+    // Canvas size depends on the viewport's clientWidth (constant during this
+    // drag — only the right-column SECTIONS resize vertically). No camera
+    // aspect bump needed here; the viewport-width drag (rightColWidthPx)
+    // handles that separately.
+  }
+
+  // ----- Right-column WIDTH (horizontal drag-resize between viewport + right col) -----
+  //
+  // The right column was a fixed 340px. Now it's user-resizable via a vertical
+  // splitter on its LEFT edge. Width is tracked in pixels, persisted to
+  // localStorage, and clamped to [MIN, MAX]. On window resize we re-clamp so
+  // the viewport never gets squashed below ~400px of usable horizontal space.
+  //
+  // Why pixels (not percent)? The right column hosts the Explorer + Properties
+  // panels — content has natural width requirements (labels, mono values).
+  // The user sizing the column to "fit my Properties panel" is the dominant
+  // use; relative-to-window resizing would re-shrink the panel on every window
+  // resize. The viewport (left/center) flexes to absorb the remaining space.
+  const RIGHT_COL_LS_KEY = 'wc3-forge:rightColWidth'
+  const RIGHT_COL_MIN_PX = 240
+  const RIGHT_COL_MAX_PX = 600
+  const RIGHT_COL_DEFAULT_PX = 340
+  // Minimum horizontal space we reserve for the viewport. If the window gets
+  // narrow enough that (viewport width = window - rightColWidth) would drop
+  // below this, we shrink the right column to keep the viewport usable.
+  const VIEWPORT_MIN_PX = 400
+  let rightColWidthPx: number = $state((() => {
+    try {
+      const raw = localStorage.getItem(RIGHT_COL_LS_KEY)
+      if (raw === null) return RIGHT_COL_DEFAULT_PX
+      const n = parseFloat(raw)
+      if (!Number.isFinite(n)) return RIGHT_COL_DEFAULT_PX
+      return Math.max(RIGHT_COL_MIN_PX, Math.min(RIGHT_COL_MAX_PX, n))
+    } catch { return RIGHT_COL_DEFAULT_PX }
+  })())
+  function clampRightColWidth(px: number): number {
+    let n = Math.max(RIGHT_COL_MIN_PX, Math.min(RIGHT_COL_MAX_PX, px))
+    // Don't let the viewport drop below VIEWPORT_MIN_PX on narrow windows.
+    // Subtract the splitter strip (4px) so the math matches reality.
+    const winW = (typeof window !== 'undefined') ? window.innerWidth : 1200
+    const maxByViewport = winW - VIEWPORT_MIN_PX - 4
+    if (maxByViewport >= RIGHT_COL_MIN_PX && n > maxByViewport) n = maxByViewport
+    return n
+  }
+  function onRightColWidthDrag(dx: number) {
+    // The splitter is on the LEFT edge of the right column. Dragging RIGHT
+    // (positive dx) makes the right column NARROWER; dragging LEFT (negative
+    // dx) makes it WIDER. Hence the minus.
+    rightColWidthPx = clampRightColWidth(rightColWidthPx - dx)
+  }
+  function onRightColWidthDragEnd() {
+    try { localStorage.setItem(RIGHT_COL_LS_KEY, String(Math.round(rightColWidthPx))) } catch {}
+  }
+  function onWindowResize() {
+    const next = clampRightColWidth(rightColWidthPx)
+    if (next !== rightColWidthPx) rightColWidthPx = next
   }
 
   // ----- Explorer accordion state -----
@@ -412,6 +465,7 @@
     ingestSelection(sel)
     try { dirty = await IsDirty() } catch { dirty = false }
     window.addEventListener('keydown', onGlobalKeyDown)
+    window.addEventListener('resize', onWindowResize)
     // Test-driver hook: receives commands from Go's App.EmitTestCommand so
     // verification automation can drive UI state without needing to simulate
     // clicks (WebView2 can drop synthetic input — see memory). Subscribed
@@ -455,6 +509,15 @@
         case 'splitter.set': {
           const pct = parseFloat(args[0])
           if (isFinite(pct) && pct > 0 && pct < 100) rightExplorerPct = pct
+          break
+        }
+        case 'rightcol.width': {
+          // Args: width in pixels. Sets + persists, same as a drag-end.
+          const px = parseFloat(args[0])
+          if (isFinite(px)) {
+            rightColWidthPx = clampRightColWidth(px)
+            onRightColWidthDragEnd()
+          }
           break
         }
         case 'mapinfo.open':
@@ -643,6 +706,7 @@
     EventsOff(ENTITY_EVENT)
     EventsOff(DEV_ANIM_EVENT)
     window.removeEventListener('keydown', onGlobalKeyDown)
+    window.removeEventListener('resize', onWindowResize)
     if (systemMQ) {
       try { systemMQ.removeEventListener('change', onSystemThemeChange) } catch {}
       systemMQ = null
@@ -1199,16 +1263,21 @@
 
   {#if error}<div class="error"><pre>{error}</pre></div>{/if}
 
-  <!-- 2-column layout: viewport (left/center, big) + right column (Explorer
-       stacked above Properties with vertical splitter between).
-       Right column is fixed-width; viewport gets all remaining space. -->
-  <div class="grid min-h-0 flex-1" style="grid-template-columns: 1fr 340px;">
+  <!-- 3-column layout: viewport (left/center, flexes) + vertical splitter +
+       right column (Explorer stacked above Properties with internal horizontal
+       splitter between). The right column's width is user-resizable via the
+       vertical splitter on its LEFT edge (persisted to localStorage). -->
+  <div class="grid min-h-0 flex-1" style="grid-template-columns: 1fr 4px {rightColWidthPx}px;">
     <section class="viewport">
       <canvas bind:this={canvas}></canvas>
       {#if showMinimap}
         <Minimap {scene} {mapLoadGen} />
       {/if}
     </section>
+
+    <Splitter direction="vertical"
+              onDrag={onRightColWidthDrag}
+              onDragEnd={onRightColWidthDragEnd} />
 
     <div class="flex min-h-0 flex-col bg-card" bind:this={rightColEl}>
       <aside class="flex min-h-0 flex-none flex-col overflow-hidden border-b border-border"

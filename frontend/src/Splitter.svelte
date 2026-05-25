@@ -1,51 +1,64 @@
 <script lang="ts">
-  // Horizontal drag-resize handle for stacked vertical sections. Sits between
-  // two flex children inside a column flexbox; while dragged, calls onDrag(dy)
-  // each frame with the pointer's delta since the last call. Parent owns the
-  // pixel sizes and decides how to apportion the delta — this component is
-  // purely the gesture surface.
+  // Drag-resize splitter handle. Defaults to the original "horizontal bar that
+  // drags vertically" mode (between stacked sections in a column flexbox) and
+  // also supports a "vertical bar that drags horizontally" mode (between
+  // side-by-side sections in a row layout, e.g. between the viewport and the
+  // right column).
+  //
+  // The component is purely the gesture surface — the parent owns the pixel
+  // sizes and decides how to apportion the delta.
   //
   // Design choices:
-  //  - 4px tall strip; visible 1px centerline that brightens on hover/drag
+  //  - 4px thick strip; visible 1px centerline that brightens on hover/drag
   //    so the drag affordance is obvious-but-not-loud (matches VS Code's
   //    sidebar-section dividers).
-  //  - cursor: ns-resize on the strip + globally during drag (so the cursor
-  //    doesn't flicker when the pointer briefly leaves the 4px strip while
-  //    dragging fast).
+  //  - cursor: ns-resize / ew-resize on the strip + globally during drag (so
+  //    the cursor doesn't flicker when the pointer briefly leaves the 4px
+  //    strip while dragging fast).
   //  - PointerEvents (not Mouse) — captures the pointer so move/up fire even
   //    if the cursor leaves the window. setPointerCapture is critical: without
   //    it, Wails/WebView2 stops delivering pointer events outside the strip
   //    bounds when the drag goes fast.
+  //
+  // Direction prop:
+  //  - 'horizontal' (default): the SEPARATOR line is horizontal, drag axis is
+  //    vertical (ns-resize). Callback receives dy.
+  //  - 'vertical': the separator line is vertical, drag axis is horizontal
+  //    (ew-resize). Callback receives dx.
 
   interface Props {
-    onDrag: (dy: number) => void;
+    onDrag: (delta: number) => void;
     // Optional callback fired on drag-end so consumers can persist final sizes
-    // (e.g. snap-to-min, save to localStorage). Not used yet but cheap to plumb.
+    // (e.g. snap-to-min, save to localStorage).
     onDragEnd?: () => void;
+    direction?: 'horizontal' | 'vertical';
   }
 
-  let { onDrag, onDragEnd }: Props = $props();
+  let { onDrag, onDragEnd, direction = 'horizontal' }: Props = $props();
 
   let dragging = $state(false);
-  let lastY = 0;
+  let lastCoord = 0;
+
+  const cursor = $derived(direction === 'vertical' ? 'ew-resize' : 'ns-resize');
 
   function handlePointerDown(e: PointerEvent) {
     if (e.button !== 0) return;
     dragging = true;
-    lastY = e.clientY;
+    lastCoord = direction === 'vertical' ? e.clientX : e.clientY;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     // Lock cursor + disable text-selection during drag so the user doesn't
     // accidentally select panel text while dragging. Cleared on pointerup.
-    document.body.style.cursor = 'ns-resize';
+    document.body.style.cursor = cursor;
     document.body.style.userSelect = 'none';
     e.preventDefault();
   }
 
   function handlePointerMove(e: PointerEvent) {
     if (!dragging) return;
-    const dy = e.clientY - lastY;
-    lastY = e.clientY;
-    if (dy !== 0) onDrag(dy);
+    const cur = direction === 'vertical' ? e.clientX : e.clientY;
+    const d = cur - lastCoord;
+    lastCoord = cur;
+    if (d !== 0) onDrag(d);
   }
 
   function handlePointerUp(e: PointerEvent) {
@@ -60,17 +73,34 @@
   }
 </script>
 
-<div
-  class="relative z-[2] h-1 flex-none cursor-ns-resize group"
-  role="separator"
-  aria-orientation="horizontal"
-  data-dragging={dragging ? '' : undefined}
-  onpointerdown={handlePointerDown}
-  onpointermove={handlePointerMove}
-  onpointerup={handlePointerUp}
-  onpointercancel={handlePointerUp}
->
+{#if direction === 'vertical'}
   <div
-    class="absolute inset-x-0 top-1/2 h-px -translate-y-px bg-border transition-colors group-hover:bg-foreground/40 group-data-[dragging]:bg-foreground/60"
-  ></div>
-</div>
+    class="relative z-[2] w-1 flex-none cursor-ew-resize self-stretch group"
+    role="separator"
+    aria-orientation="vertical"
+    data-dragging={dragging ? '' : undefined}
+    onpointerdown={handlePointerDown}
+    onpointermove={handlePointerMove}
+    onpointerup={handlePointerUp}
+    onpointercancel={handlePointerUp}
+  >
+    <div
+      class="absolute inset-y-0 left-1/2 w-px -translate-x-px bg-border transition-colors group-hover:bg-foreground/40 group-data-[dragging]:bg-foreground/60"
+    ></div>
+  </div>
+{:else}
+  <div
+    class="relative z-[2] h-1 flex-none cursor-ns-resize group"
+    role="separator"
+    aria-orientation="horizontal"
+    data-dragging={dragging ? '' : undefined}
+    onpointerdown={handlePointerDown}
+    onpointermove={handlePointerMove}
+    onpointerup={handlePointerUp}
+    onpointercancel={handlePointerUp}
+  >
+    <div
+      class="absolute inset-x-0 top-1/2 h-px -translate-y-px bg-border transition-colors group-hover:bg-foreground/40 group-data-[dragging]:bg-foreground/60"
+    ></div>
+  </div>
+{/if}
