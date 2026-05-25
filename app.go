@@ -697,32 +697,26 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			if i > 0 && j > 0 && cornerRomp[idx-W-1] {
 				anyRomp = true
 			}
-			if !anyRomp && !(anyCliff && !t.Tiles[idx].HasRamp()) {
+			// Widened outer gate (vs HiveWE's literal rule): enter the remap
+			// block whenever ANY adjacent cell is a cliff or ramp, regardless
+			// of this corner's own ramp flag. The narrowed b64fe4e exemption
+			// below then surgically skips remap only for the corners that
+			// should inherit the floor tile (ramp-flagged AND no cliff
+			// adjacency). Cliff-edge ramp corners — the bottom-vertical edge
+			// of a plateau where the ramp's "shoulder" meets the cliff face —
+			// get the Irbk frame that HiveWE renders there.
+			if !anyRomp && !anyCliff {
 				continue
 			}
-			// Ramp continuity fix: when THIS corner is itself a ramp corner,
-			// leave its stored ground_texture intact instead of remapping to
-			// the cliff palette's groundtile. This makes the ramp's top
-			// surface inherit the surrounding floor's tile pattern.
-			//
-			// HiveWE's `real_tile_texture` (terrain.ixx line 770) does remap
-			// every ramp-affected corner to `cliff_to_ground_texture[texture]`
-			// — but in stock Blizzard maps the cliff palette's groundtile
-			// happens to match the adjacent base floor (e.g. CIrb→Irbk, which
-			// IS the typical Icecrown base tile), so the discontinuity is
-			// invisible. Custom-tileset maps (like Enfo's FFB which mixes
-			// Icecrown cliffs over a Cityscape brick floor) make the gap
-			// obvious — the ramp top renders as a uniform tile of the cliff
-			// palette's stand-in instead of continuing the surrounding
-			// patterned brick.
-			//
-			// We preserve HiveWE's behavior for PURE-CLIFF corners (the
-			// `anyCliff && !corner_ramp` branch entered this block — the
-			// next-line `continue` keeps that path firing). We only skip the
-			// remap when the corner is itself a ramp-flagged vertex, which
-			// means the rendered cell here IS the ramp's top surface and
-			// the user's expectation is that floor tiles continue across.
-			if t.Tiles[idx].HasRamp() {
+			// Ramp continuity fix (narrowed b64fe4e): when this corner is on
+			// a ramp AND has NO cliff adjacency, keep the raw floor texture
+			// for ramp-surface continuity. When it's on a ramp AND ALSO on
+			// the cliff edge (the typical ramp-shoulder corner where ramp
+			// meets cliff face), DO remap so the Irbk frame matches HiveWE's
+			// visual. This catches the bottom-vertical edge of plateau
+			// columns where the user previously saw a flat-Itbk gap instead
+			// of the lighter rune-brick outline.
+			if t.Tiles[idx].HasRamp() && !anyCliff {
 				continue
 			}
 			// Resolve the cliff palette index for this corner.
