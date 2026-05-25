@@ -1,7 +1,4 @@
 <script lang="ts">
-  import { run, nonpassive, createBubbler, preventDefault } from 'svelte/legacy';
-
-  const bubble = createBubbler();
   // Tiny standalone ModelViewer for the Properties panel — loads one MDX for
   // the currently-selected unit/doodad and renders it on a small canvas with
   // orbit controls + a reset button. Independent of the main scene; uses its
@@ -11,13 +8,10 @@
   // instance is detached). Changing `reforged` rebuilds the viewer so the
   // MDX handler picks up the new mode.
 
-  import { onMount, onDestroy } from 'svelte'
   import * as MV_ns from 'mdx-m3-viewer'
   import { pathSolver } from './scene-instances'
   import { patchMdxParser } from './mdx-parser-patch'
 
-  
-  
   interface Props {
     modelPath?: string | null;
     reforged?: boolean;
@@ -45,7 +39,7 @@
   const MV: any = (MV_ns as any).default ?? MV_ns
   patchMdxParser() // idempotent guard inside
 
-  let canvas: HTMLCanvasElement = $state()
+  let canvas: HTMLCanvasElement = $state(null!)
   let viewer: any = $state(null)
   let scene: any = null
   let instance: any = null
@@ -56,7 +50,12 @@
   let disposed = false
   let loadToken = 0
   let error = $state('')
-  let currentReforged = $state(reforged)
+  // Tracks the `reforged` value the viewer was last (re)built with. Not a
+  // rune — pure internal bookkeeping, only read/written inside effects and
+  // init/teardown. Keeping it as a plain `let` (vs `$state(reforged)`) avoids
+  // the Svelte 5 `state_referenced_locally` warning that fires when a $state
+  // is initialised from a $props() value and then captured at module scope.
+  let currentReforged: boolean = reforged
   // Real-dt tracking for viewer.update(). Mirrors the main scene's tick logic
   // (scene-instances.ts) — mdx-m3-viewer's `update(dt)` wants MILLISECONDS
   // elapsed since last update, but viewer.updateAndRender's DEFAULT is a
@@ -212,8 +211,6 @@
     reset()
   }
 
-
-
   function rebuildViewer() {
     teardownViewer()
     initViewer()
@@ -276,10 +273,14 @@
   const PITCH_MIN = -Math.PI / 2 + 0.05
   const PITCH_MAX = Math.PI / 2 - 0.05
 
-  function onDown(e: MouseEvent) {
+  function onDown(e: PointerEvent) {
     dragging = true
     lastX = e.clientX; lastY = e.clientY
     e.preventDefault()
+    // CRITICAL for WebView2/Wails: setPointerCapture ensures move/up events
+    // continue to fire even when the cursor leaves the canvas bounds. Without
+    // it, dragging "stalls" the moment the pointer exits the small preview.
+    try { (e.target as Element)?.setPointerCapture?.(e.pointerId) } catch { /* non-fatal */ }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
   }
@@ -306,70 +307,59 @@
     distance = Math.max(minD, Math.min(maxD, distance * factor))
   }
 
-  onMount(() => {
+  // Mount: init viewer + attach non-passive wheel listener (Svelte 5 strips
+  // the legacy `use:nonpassive` action, and standard on:wheel registers as
+  // passive — preventDefault() inside would be a no-op without this manual
+  // addEventListener with { passive: false }).
+  $effect(() => {
     initViewer()
+    canvas?.addEventListener('wheel', onWheel, { passive: false })
+    return () => {
+      disposed = true
+      canvas?.removeEventListener('wheel', onWheel)
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      teardownViewer()
+    }
   })
 
-  onDestroy(() => {
-    disposed = true
-    window.removeEventListener('mousemove', onMove)
-    window.removeEventListener('mouseup', onUp)
-    teardownViewer()
+  // Reactive reload on modelPath / fallbacks change. Guard against null/empty
+  // path; skip during a reforged-driven rebuild (currentReforged !== reforged
+  // means the rebuild effect below will run loadModel itself).
+  $effect(() => {
+    // Track the deps explicitly so this fires when either changes.
+    const path = modelPath
+    void modelPathFallbacks
+    if (!viewer || currentReforged !== reforged) return
+    if (path) void loadModel(path)
+    else clearInstance()
   })
-  // Reactive reload on path/reforged change. Guard against null/empty path.
-  run(() => {
-    if (viewer && currentReforged === reforged) {
-      if (modelPath) void loadModel(modelPath)
-      else clearInstance()
-    }
-  });
+
   // Reforged toggle: rebuild the viewer so the MDX handler re-registers with
   // the new flag. Cheap enough — the preview holds at most one model.
-  run(() => {
+  $effect(() => {
     if (viewer && currentReforged !== reforged) {
       rebuildViewer()
     }
-  });
+  })
 </script>
 
-<div class="preview">
-  <canvas bind:this={canvas}
-          onmousedown={onDown}
-          use:nonpassive={['wheel', () => onWheel]}
-          oncontextmenu={preventDefault(bubble('contextmenu'))}></canvas>
-  <button class="reset" onclick={reset} title="Reset view">Reset</button>
-  {#if error}<div class="error">{error}</div>{/if}
+<div class="relative w-full overflow-hidden bg-card border-b border-border flex-none aspect-[4/3]">
+  <canvas
+    bind:this={canvas}
+    class="block w-full h-full cursor-grab active:cursor-grabbing"
+    onpointerdown={onDown}
+    oncontextmenu={(e) => e.preventDefault()}
+  ></canvas>
+  <button
+    type="button"
+    onclick={reset}
+    title="Reset view"
+    class="absolute top-1.5 right-1.5 rounded-sm border border-border bg-background/85 px-2 py-0.5 text-[11px] text-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+  >Reset</button>
+  {#if error}
+    <div class="absolute bottom-1.5 left-1.5 right-1.5 rounded-sm bg-destructive/90 text-destructive-foreground px-1.5 py-0.5 text-[11px] font-mono">
+      {error}
+    </div>
+  {/if}
 </div>
-
-<style>
-  .preview {
-    position: relative;
-    width: 100%;
-    aspect-ratio: 4 / 3;
-    background: #0e0e10;
-    border-bottom: 1px solid #27272a;
-    overflow: hidden;
-    flex: 0 0 auto;
-  }
-  canvas {
-    display: block;
-    width: 100%;
-    height: 100%;
-    cursor: grab;
-  }
-  canvas:active { cursor: grabbing; }
-  .reset {
-    position: absolute; top: 6px; right: 6px;
-    background: rgba(24, 24, 27, 0.85); color: #d4d4d8;
-    border: 1px solid #3f3f46; border-radius: 3px;
-    padding: 2px 8px; font-size: 11px; cursor: pointer;
-  }
-  .reset:hover { background: rgba(63, 63, 70, 0.95); color: #fff; }
-  .error {
-    position: absolute; bottom: 6px; left: 6px; right: 6px;
-    background: rgba(127, 29, 29, 0.9); color: #fecaca;
-    padding: 3px 6px; font-size: 11px;
-    font-family: 'Cascadia Mono', Consolas, monospace;
-    border-radius: 2px;
-  }
-</style>
