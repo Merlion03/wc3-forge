@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
@@ -23,6 +24,22 @@ const (
 	eventDirtyChanged     = "wc3-forge:dirty-changed"
 	eventEntityChanged    = "wc3-forge:entity-changed"
 	eventDevSetAnim       = "wc3-forge:dev-set-anim"
+	// eventBridgeCall streams every MCP-handler dispatch to the in-page Agent
+	// Console (frontend/src/BridgeConsole.svelte). Fired AFTER the handler
+	// completes — payload carries timestamp, method, params summary, result
+	// summary, error, and duration_micros (see forge.BridgeCallEvent).
+	eventBridgeCall       = "wc3-forge:bridge-call"
+	// eventTestCommand is reused by the bridge UI-command bus: MCP handlers
+	// like view.set_mode emit a UI-command string through Session.EmitUICommand,
+	// App forwards it on this event, and the existing App.svelte test-driver
+	// hook applies the change. Same channel used by the verification automation,
+	// so the contract is mature.
+	eventTestCommand      = "wc3-forge:test-command"
+	// eventStartupCamera carries a camera spec ("x,y,z,distance"). Used by the
+	// --camera CLI flag at startup AND by the camera.set_view MCP handler at
+	// runtime. The JS receiver pans + sets distance via the existing
+	// startup-camera handler in App.svelte.
+	eventStartupCamera    = "wc3-forge:startup-camera"
 )
 
 // App is the Wails-bindable surface exposed to the frontend. Every method
@@ -115,6 +132,29 @@ func (a *App) startup(ctx context.Context) {
 	// camel-case-not (the tags are lowercase: kind/id/field/position).
 	forge.Current.OnEntityChanged(func(c forge.EntityChange) {
 		runtime.EventsEmit(a.ctx, eventEntityChanged, c)
+	})
+	// Bridge-call observability — every MCP handler dispatch fires through
+	// here. Forwarded to the in-page Agent Console (BridgeConsole.svelte) so
+	// the user can see, live, what every connected agent is doing.
+	forge.Current.OnBridgeCall(func(c forge.BridgeCallEvent) {
+		runtime.EventsEmit(a.ctx, eventBridgeCall, c)
+	})
+	// UI-command bus — bridge handlers (view.set_mode, view.set_doodad_…,
+	// camera.set_view) emit a free-form command string through here. The App
+	// layer routes camera commands to the startup-camera event (the JS-side
+	// camera-spec handler) and other commands to the test-command event (the
+	// existing test-driver dispatch). Single layer of forwarding keeps the
+	// forge package Wails-free while still letting bridge handlers reach
+	// JS-owned state.
+	forge.Current.OnUICommand(func(cmd string) {
+		if a.ctx == nil {
+			return
+		}
+		if rest, ok := strings.CutPrefix(cmd, "camera.set "); ok {
+			runtime.EventsEmit(a.ctx, eventStartupCamera, map[string]any{"spec": rest})
+			return
+		}
+		runtime.EventsEmit(a.ctx, eventTestCommand, map[string]any{"cmd": cmd})
 	})
 }
 
@@ -985,6 +1025,41 @@ func (a *App) MapInfoGet() (*w3i.Info, error) {
 		return nil, fmt.Errorf("no map loaded")
 	}
 	return info, nil
+}
+
+// BridgeInfo is the JS-facing identity card for the running MCP bridge. The
+// Agent Console panel (BridgeConsole.svelte) renders this in its top bar so
+// the user can see at a glance WHICH wc3-forge window they're looking at
+// when multiple instances are running side-by-side.
+//
+// Token is the SHORTENED token (first 8 hex chars) — we intentionally never
+// surface the full secret in UI that might be screenshotted or screen-shared.
+type BridgeInfo struct {
+	PID        int    `json:"pid"`
+	Port       int    `json:"port"`
+	TokenShort string `json:"token_short"`
+	MapName    string `json:"map_name"`
+	MapPath    string `json:"map_path"`
+}
+
+// GetBridgeInfo returns the running bridge's identity card (pid, port,
+// shortened auth token, currently-loaded map). Reads live from
+// forge.BridgeIdentity (captured in RegisterAll) so port/token reflect the
+// post-Start values, not zeros from before listen.
+func (a *App) GetBridgeInfo() BridgeInfo {
+	pid, port, tokenShort := forge.BridgeIdentity()
+	out := BridgeInfo{
+		PID:        pid,
+		Port:       port,
+		TokenShort: tokenShort,
+	}
+	if forge.Current.IsLoaded() {
+		out.MapPath = forge.Current.Path()
+		if info := forge.Current.Info(); info != nil {
+			out.MapName = info.Name
+		}
+	}
+	return out
 }
 
 // MapInfoApply applies a partial update DTO to the in-memory war3map.w3i.

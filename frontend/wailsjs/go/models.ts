@@ -69,6 +69,26 @@ export namespace doodadsdoo {
 
 export namespace main {
 	
+	export class BridgeInfo {
+	    pid: number;
+	    port: number;
+	    token_short: string;
+	    map_name: string;
+	    map_path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BridgeInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pid = source["pid"];
+	        this.port = source["port"];
+	        this.token_short = source["token_short"];
+	        this.map_name = source["map_name"];
+	        this.map_path = source["map_path"];
+	    }
+	}
 	export class DoodadDTO {
 	    creation_number: number;
 	    type_id: string;

@@ -20,6 +20,7 @@
   import ViewMenu from './ViewMenu.svelte'
   import AssetPreview from './AssetPreview.svelte'
   import MapInfoEditor from './MapInfoEditor.svelte'
+  import BridgeConsole from './BridgeConsole.svelte'
   import { showToast } from './toast'
   import { loadIconURL } from './icon-loader'
   import { TEAM_COLORS_RGB } from './sloc-markers'
@@ -127,6 +128,20 @@
     } finally {
       launching = false
     }
+  }
+
+  // ----- Agent Console panel (bottom dock) -----
+  //
+  // Streams every MCP bridge-call dispatched against this wc3-forge instance
+  // so the user can see, live, what every connected agent is doing. State is
+  // owned here so the header toggle button + Ctrl+` hotkey can drive it.
+  // Persisted to localStorage so reload preserves open/closed state.
+  const LS_BRIDGE_CONSOLE_OPEN = 'wc3forge.bridge-console.open'
+  let bridgeConsoleOpen: boolean = (() => {
+    try { return localStorage.getItem(LS_BRIDGE_CONSOLE_OPEN) === '1' } catch { return false }
+  })()
+  function toggleBridgeConsole() {
+    bridgeConsoleOpen = !bridgeConsoleOpen
   }
 
   // ----- Map Info Editor modal -----
@@ -373,6 +388,15 @@
         case 'mapinfo.close':
           closeMapInfoEditor()
           break
+        case 'bridge_console.toggle':
+          toggleBridgeConsole()
+          break
+        case 'bridge_console.open':
+          bridgeConsoleOpen = true
+          break
+        case 'bridge_console.close':
+          bridgeConsoleOpen = false
+          break
       }
     })
     // Test-driver hook (also exposed on window for in-page console use):
@@ -412,6 +436,14 @@
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.key === 'I' || e.key === 'i')) {
       e.preventDefault()
       openMapInfoEditor()
+    }
+    // Agent Console toggle: Ctrl+` (backtick). Doesn't collide with browser
+    // shortcuts inside WebView2; not used by anything else in wc3-forge.
+    // `e.key` for a literal backtick is `'`'` regardless of layout (US/UK);
+    // `e.code === 'Backquote'` is the physical-key fallback for safety.
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === '`' || e.code === 'Backquote')) {
+      e.preventDefault()
+      toggleBridgeConsole()
     }
   }
 
@@ -999,6 +1031,12 @@
         Reforged Graphics{reforged ? ' ✓' : ''}
       </button>
       <span class="header-divider" aria-hidden="true"></span>
+      <button on:click={toggleBridgeConsole}
+              class="mode-toggle"
+              class:on={bridgeConsoleOpen}
+              title="Toggle the Agent Console (Ctrl+`) — live stream of every MCP bridge call.">
+        Agent Console{bridgeConsoleOpen ? ' ✓' : ''}
+      </button>
       <button on:click={launchTestMap}
               disabled={testMapDisabled}
               class="test-map"
@@ -1337,6 +1375,8 @@
       </aside>
     </div>
   </div>
+
+  <BridgeConsole bind:open={bridgeConsoleOpen} />
 
   {#if showMapInfoEditor}
     <MapInfoEditor open={showMapInfoEditor} on:close={closeMapInfoEditor} />

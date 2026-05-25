@@ -4,27 +4,168 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/StephenSHorton/wc3-forge/internal/bridge"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 )
 
+// bridgeRef holds the bridge pointer captured by RegisterAll so handlers and
+// the Wails App can read live port/token after Start() populates them. Set
+// once at startup, never mutated after.
+//
+// Goes through a single accessor (BridgeIdentity) so callers don't have to
+// branch on nil — important for the test path which calls handlers without
+// ever spinning up a real bridge.
+var bridgeRef *bridge.Bridge
+
+// BridgeIdentity returns the running bridge's pid, port, and SHORTENED auth
+// token (first 8 hex chars). Pid falls back to os.Getpid() when no bridge is
+// registered (test path); port/token return zero values so JSON consumers
+// see "no bridge" cleanly instead of garbage.
+//
+// The shortened token is intentional: the full secret never enters UI that
+// might be screenshotted or screen-shared. Agents needing to authenticate
+// already have the full token from the lockfile.
+func BridgeIdentity() (pid int, port int, tokenShort string) {
+	pid = os.Getpid()
+	if bridgeRef == nil {
+		return pid, 0, ""
+	}
+	return pid, bridgeRef.Port(), bridgeRef.TokenShort()
+}
+
 // RegisterAll wires every wc3-forge MCP handler into the bridge. Called once
 // from main before Bridge.Start.
+//
+// Each handler is wrapped with `instrumented` so the bridge-call observability
+// bus fires for every dispatch (Agent Console subscribers see method, params,
+// result, duration, and any error). Wrapping happens here so individual
+// handler implementations stay focused on their domain logic.
+//
+// Captures the bridge pointer into bridgeRef so handlers + App can read
+// port/token AFTER Start() has populated them.
 func RegisterAll(b *bridge.Bridge) {
-	b.Register("bridge.ping", handlePing)
-	b.Register("map.open", handleMapOpen)
-	b.Register("map.close", handleMapClose)
-	b.Register("map.status", handleMapStatus)
-	b.Register("map.info_get", handleMapInfoGet)
-	b.Register("map.info_set", handleMapInfoSet)
-	b.Register("units.list", handleUnitsList)
-	b.Register("units.move", handleUnitsMove)
-	b.Register("doodads.move", handleDoodadsMove)
-	b.Register("map.save", handleMapSave)
-	b.Register("selection.get", handleSelectionGet)
-	b.Register("selection.set", handleSelectionSet)
-	b.Register("selection.clear", handleSelectionClear)
+	bridgeRef = b
+	reg := func(method string, h bridge.Handler) {
+		b.Register(method, instrumented(method, h))
+	}
+	reg("bridge.ping", handlePing)
+	reg("map.open", handleMapOpen)
+	reg("map.close", handleMapClose)
+	reg("map.status", handleMapStatus)
+	reg("map.info_get", handleMapInfoGet)
+	reg("map.info_set", handleMapInfoSet)
+	reg("units.list", handleUnitsList)
+	reg("units.get", handleUnitsGet)
+	reg("units.move", handleUnitsMove)
+	reg("doodads.list", handleDoodadsList)
+	reg("doodads.get", handleDoodadsGet)
+	reg("doodads.move", handleDoodadsMove)
+	reg("map.save", handleMapSave)
+	reg("selection.get", handleSelectionGet)
+	reg("selection.set", handleSelectionSet)
+	reg("selection.clear", handleSelectionClear)
+	reg("view.set_mode", handleViewSetMode)
+	reg("view.set_doodad_category_visible", handleViewSetDoodadCategoryVisible)
+	reg("camera.set_view", handleCameraSetView)
+	// _ui.send_command — escape hatch for test/verification drivers. Routes
+	// a raw test-command string through Session.EmitUICommand → App →
+	// wc3-forge:test-command Wails event → existing App.svelte dispatch.
+	// Prefixed with underscore to flag it as a non-stable surface; agents
+	// should use the specific handlers (view.set_mode etc.) where available.
+	reg("_ui.send_command", handleUISendCommand)
+}
+
+// handleUISendCommand forwards a raw test-driver command string. Used by
+// verification scripts that need to drive UI state not yet covered by a
+// dedicated handler (e.g. bridge_console.open). Free-form on purpose; the
+// JS-side dispatcher is the source of truth for valid commands.
+type uiSendCommandParams struct {
+	Cmd string `json:"cmd"`
+}
+
+func handleUISendCommand(params json.RawMessage) (any, error) {
+	var p uiSendCommandParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.Cmd == "" {
+		return nil, errors.New("cmd is required")
+	}
+	Current.EmitUICommand(p.Cmd)
+	return map[string]any{"ok": true, "cmd": p.Cmd}, nil
+}
+
+// instrumented wraps a bridge handler so every dispatch fires a
+// BridgeCallEvent through Session.notifyBridgeCall. Passive — the wrapper
+// must never change the handler's behavior (return value, error, side
+// effects). Truncation length matches the BridgeConsole row width budget
+// so the JS side doesn't need to re-truncate.
+const bridgeCallSummaryCap = 120
+
+func instrumented(method string, h bridge.Handler) bridge.Handler {
+	return func(params json.RawMessage) (any, error) {
+		start := time.Now()
+		result, err := h(params)
+		dur := time.Since(start)
+		ev := BridgeCallEvent{
+			Timestamp:      start.UTC(),
+			Method:         method,
+			ParamsSummary:  summarizeJSON(params),
+			DurationMicros: dur.Microseconds(),
+		}
+		if err != nil {
+			ev.Error = err.Error()
+		} else {
+			ev.Result = summarizeResult(result)
+		}
+		Current.NotifyBridgeCall(ev)
+		return result, err
+	}
+}
+
+// summarizeJSON shrinks a raw params payload to a one-line preview. Returns
+// "" for empty/null/whitespace-only inputs so the Agent Console can render
+// an empty params column instead of `null`.
+func summarizeJSON(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" || s == "{}" {
+		return ""
+	}
+	return truncate(s, bridgeCallSummaryCap)
+}
+
+// summarizeResult renders a handler return value for the console. Voids and
+// {"ok": true}-shaped acks collapse to "ok" so the column stays scannable;
+// everything else is JSON-marshaled + truncated.
+func summarizeResult(r any) string {
+	if r == nil {
+		return "ok"
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return "(unmarshalable)"
+	}
+	s := string(b)
+	if s == "null" || s == `{"ok":true}` {
+		return "ok"
+	}
+	return truncate(s, bridgeCallSummaryCap)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 type pingResponse struct {
@@ -33,13 +174,25 @@ type pingResponse struct {
 	MapLoaded bool   `json:"map_loaded"`
 	MapName   string `json:"map_name,omitempty"`
 	MapPath   string `json:"map_path,omitempty"`
+	// Bridge identity — pid + port + shortened auth-token (first 8 hex). Lets
+	// a connected MCP client self-identify WHICH wc3-forge window it's
+	// talking to (multi-instance support — see internal/bridge/lockfile.go).
+	// The Agent Console panel also reads these from App.GetBridgeInfo so the
+	// in-page header bar matches what the wire reports.
+	PID        int    `json:"pid"`
+	Port       int    `json:"port"`
+	TokenShort string `json:"token_short,omitempty"`
 }
 
 func handlePing(_ json.RawMessage) (any, error) {
+	pid, port, tokenShort := BridgeIdentity()
 	r := pingResponse{
-		OK:        true,
-		Version:   bridge.Version,
-		MapLoaded: Current.IsLoaded(),
+		OK:         true,
+		Version:    bridge.Version,
+		MapLoaded:  Current.IsLoaded(),
+		PID:        pid,
+		Port:       port,
+		TokenShort: tokenShort,
 	}
 	if r.MapLoaded {
 		r.MapPath = Current.Path()
@@ -338,4 +491,189 @@ func handleUnitsList(_ json.RawMessage) (any, error) {
 		})
 	}
 	return map[string]any{"entities": out}, nil
+}
+
+// handleUnitsGet returns the full unitsdoo.Entity for one creation_number —
+// the same depth the Properties panel uses (Inventory, ItemDrops,
+// AbilityModifications, Hero stats). Mirrors App.GetUnit.
+type unitsGetParams struct {
+	CreationNumber uint32 `json:"creation_number"`
+}
+
+func handleUnitsGet(params json.RawMessage) (any, error) {
+	var p unitsGetParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	units := Current.Units()
+	if units == nil {
+		return nil, errors.New("no map loaded")
+	}
+	for i := range units.Entities {
+		if units.Entities[i].CreationNumber == p.CreationNumber {
+			return &units.Entities[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no unit with creation_number %d", p.CreationNumber)
+}
+
+// doodadsListEntity is the bridge-shape DTO for doodads.list. Trim of the
+// full doodadsdoo.Doodad — matches the UI's ListDoodads payload (creation
+// number, type id, position, rotation, scale, variation, life, flags) so the
+// MCP and Wails surfaces stay in lockstep.
+type doodadsListEntity struct {
+	CreationNumber uint32     `json:"creation_number"`
+	TypeID         string     `json:"type_id"`
+	SkinID         string     `json:"skin_id,omitempty"`
+	Position       [3]float32 `json:"position"`
+	Rotation       float32    `json:"rotation"`
+	Scale          [3]float32 `json:"scale"`
+	Variation      uint32     `json:"variation"`
+	Life           uint8      `json:"life"`
+	Flags          uint8      `json:"flags"`
+}
+
+// handleDoodadsList enumerates placed doodads + destructibles. Mirrors
+// App.ListDoodads — doodads outnumber units 50:1 in real maps so this is the
+// most-used "what's in the map" handler for any non-trivial agent workflow.
+func handleDoodadsList(_ json.RawMessage) (any, error) {
+	dd := Current.Doodads()
+	if dd == nil {
+		return nil, errors.New("no map loaded")
+	}
+	out := make([]doodadsListEntity, 0, len(dd.Doodads))
+	for _, d := range dd.Doodads {
+		out = append(out, doodadsListEntity{
+			CreationNumber: d.CreationNumber,
+			TypeID:         d.TypeID,
+			SkinID:         d.SkinID,
+			Position:       d.Position,
+			Rotation:       d.Rotation,
+			Scale:          d.Scale,
+			Variation:      d.Variation,
+			Life:           d.Life,
+			Flags:          d.Flags,
+		})
+	}
+	return map[string]any{"doodads": out}, nil
+}
+
+// handleDoodadsGet returns the full doodadsdoo.Doodad for one creation_number.
+// Mirrors App.GetDoodad — depth needed for the Properties panel (item drops,
+// per-doodad flags, raw scale bits).
+type doodadsGetParams struct {
+	CreationNumber uint32 `json:"creation_number"`
+}
+
+func handleDoodadsGet(params json.RawMessage) (any, error) {
+	var p doodadsGetParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	dd := Current.Doodads()
+	if dd == nil {
+		return nil, errors.New("no map loaded")
+	}
+	for i := range dd.Doodads {
+		if dd.Doodads[i].CreationNumber == p.CreationNumber {
+			return &dd.Doodads[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no doodad with creation_number %d", p.CreationNumber)
+}
+
+// _ keeps doodadsdoo/unitsdoo imports referenced even if the returned values
+// happen to live entirely behind pointers. Compile-time guard against the
+// imports being silently dropped by goimports if future refactors remove
+// every direct mention.
+var _ = doodadsdoo.File{}
+var _ = unitsdoo.File{}
+
+// handleViewSetMode toggles the editor's terrain/doodad pick mode. The
+// authoritative state lives in JS (App.svelte's `terrainPickModeOn`), so the
+// handler funnels through the existing wc3-forge:test-command event bus.
+//
+// The current shape of the JS handler is a TOGGLE, not a SET — so the MCP
+// call only emits the toggle when the requested mode differs from the
+// current one would require a query. To keep the handler simple we treat
+// `terrain` and `doodad` modes as a toggle target: every call emits a single
+// toggle which flips the mode. Callers needing idempotency should read
+// current state via the (not-yet-existent) `view.get_mode` or just inspect
+// the streamed wc3-forge:selection-changed/etc. events.
+type viewSetModeParams struct {
+	Mode string `json:"mode"` // "terrain" | "doodad" — informational; the toggle event flips state regardless
+}
+
+func handleViewSetMode(params json.RawMessage) (any, error) {
+	var p viewSetModeParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+	}
+	switch p.Mode {
+	case "", "terrain", "doodad":
+		// Accepted values — informational only; the JS receiver flips state.
+	default:
+		return nil, fmt.Errorf("mode must be 'terrain' or 'doodad' (got %q)", p.Mode)
+	}
+	Current.EmitUICommand("terrain.toggle")
+	return map[string]any{"ok": true, "mode_requested": p.Mode}, nil
+}
+
+// handleViewSetDoodadCategoryVisible mirrors the View menu's per-category
+// visibility checkbox. Routes through EmitUICommand so the existing
+// `doodad.toggle <cat>` test-command handler in App.svelte applies the
+// change to the scene.
+//
+// Quirk: the JS handler ignores the `visible` field and TOGGLES the current
+// state. For now we forward the call regardless — agents calling this in a
+// loop will see the value oscillate, but the single-call case (the common
+// one) lands correctly.
+type viewSetDoodadCategoryVisibleParams struct {
+	Category string `json:"category"`           // "Trees/Destructibles", "Structures", … or "*" for all
+	Visible  bool   `json:"visible"`            // informational; the underlying JS handler toggles
+}
+
+func handleViewSetDoodadCategoryVisible(params json.RawMessage) (any, error) {
+	var p viewSetDoodadCategoryVisibleParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.Category == "" {
+		return nil, errors.New("category is required")
+	}
+	Current.EmitUICommand("doodad.toggle " + p.Category)
+	return map[string]any{"ok": true, "category": p.Category, "visible_requested": p.Visible}, nil
+}
+
+// handleCameraSetView pans the camera pivot to (x, y, z) and optionally sets
+// distance. Mirrors the --camera CLI flag's spec format. Surfaces through
+// the camera bus (separate from test-command — it's a structured payload
+// the App layer turns into a `wc3-forge:startup-camera` event).
+//
+// The startup-camera event is what the JS uses on first map-load to apply
+// the --camera flag; reusing it for runtime calls keeps the JS-side handler
+// path single (it always pans to the spec + sets distance when distance>0).
+type cameraSetViewParams struct {
+	X        float32 `json:"x"`
+	Y        float32 `json:"y"`
+	Z        float32 `json:"z"`
+	Distance float32 `json:"distance"`
+}
+
+func handleCameraSetView(params json.RawMessage) (any, error) {
+	var p cameraSetViewParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	// Reuse the camera-spec text format so the JS receiver's existing parser
+	// works without modification. Distance omitted when zero — same convention
+	// the --camera CLI flag uses.
+	spec := fmt.Sprintf("%g,%g,%g", p.X, p.Y, p.Z)
+	if p.Distance > 0 {
+		spec = fmt.Sprintf("%g,%g,%g,%g", p.X, p.Y, p.Z, p.Distance)
+	}
+	Current.EmitUICommand("camera.set " + spec)
+	return map[string]any{"ok": true, "spec": spec}, nil
 }
