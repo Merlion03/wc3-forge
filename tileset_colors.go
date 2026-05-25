@@ -210,6 +210,37 @@ func loadCliffTypesSLK() (*slk.Mapped, error) {
 	return cliffTypesSLK, cliffTypesSLKErr
 }
 
+// CliffPaletteTexturePaths returns the `texdir/texfile` asset path stem (no
+// extension) for each cliff palette FourCC, suitable for
+// `viewer.load(path + ".dds", solver)` on the JS side. Empty string when the
+// CliffTypes.slk lookup fails. HiveWE assembles a 2D-texture-array of these
+// (one layer per palette entry) and the cliff vertex shader picks via
+// vOffset.a (the corner_cliff_texture index). WebGL1 lacks sampler2DArray, so
+// we hand back one path per palette entry and let the JS side load + bind
+// them separately.
+func CliffPaletteTexturePaths(palette []string) []string {
+	out := make([]string, len(palette))
+	m, err := loadCliffTypesSLK()
+	if err != nil || m == nil {
+		return out
+	}
+	for i, fc := range palette {
+		row := m.Row(fc)
+		if row == nil {
+			log.Printf("cliff tex paths: %s not in CliffTypes.slk", fc)
+			continue
+		}
+		dir := row.String("texdir")
+		file := row.String("texfile")
+		if dir == "" || file == "" {
+			log.Printf("cliff tex paths: %s missing texdir/texfile in CliffTypes.slk", fc)
+			continue
+		}
+		out[i] = dir + "/" + file
+	}
+	return out
+}
+
 // CliffToGroundTexture returns, for each cliff FourCC in cliffPalette, the
 // matching ground-palette index inside groundPalette. The mapping is sourced
 // from TerrainArt/CliffTypes.slk's "groundtile" column.

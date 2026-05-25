@@ -493,6 +493,11 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         gl.clearColor(bg[0], bg[1], bg[2], 1)
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
         if (terrain) terrain.draw(scene.camera.viewProjectionMatrix)
+        // Cliffs render AFTER terrain (so terrain's depth buffer is up so cliff
+        // back-faces clip correctly) but BEFORE viewer.render() (so MDX units
+        // depth-test correctly against cliff faces). Like terrain, this is a
+        // custom-shader pass — the cache-invalidation below covers both.
+        if (cliffs) cliffs.draw(scene.camera.viewProjectionMatrix)
         // **CRITICAL**: terrain.draw calls gl.useProgram(terrainProg) directly,
         // bypassing mdx-m3-viewer's webgl.useShader() state cache. The cache
         // still thinks the LAST-USED MDX shader is bound. On the next frame,
@@ -1341,7 +1346,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // for each cell with a layer-height transition.
         const cliffPlacements = computeCliffPlacements(t as unknown as any)
         if (cliffPlacements.length > 0) {
-          cliffs = await renderCliffs(viewer as any, scene, pathSolver, cliffPlacements)
+          cliffs = await renderCliffs(gl, viewer as any, pathSolver, cliffPlacements, t as unknown as any)
         }
         // Water surface. Per-cell quad mesh with HiveWE-style depth-blended
         // color × animated wave texture from Water.slk. Rendered after
