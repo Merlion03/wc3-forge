@@ -170,19 +170,24 @@ type Session struct {
 }
 
 // EntityChange is the payload for OnEntityChanged. Kind/ID identify which
-// entity changed; Field names the conceptual property that moved ("position"
-// today, room for "rotation"/"type"/etc. as more mutators land). Position
-// rides on the event for Field=="position" so subscribers don't need a
-// callback fetch to repaint the scene — the new value is right there.
+// entity changed; Field names the conceptual property that moved. Convention:
+// one event per changed channel — "position" | "rotation" | "scale" | "transform".
+// A single mutator that changes only one channel fires one event with that
+// channel's Field tag; the other fields are zero-valued and ignored by
+// subscribers that don't care. A future "transform" field may carry all three
+// simultaneously if a mutator needs to atomically change position+rotation
+// (e.g. orbit around centroid fires two separate events today — one MoveUnit
+// + one RotateUnit — which is fine and keeps the event shape self-documenting).
 //
-// Forward-compatible by design: new mutators add new Field strings, and the
-// Position field stays a [3]float32 (zero-valued + ignored by non-position
-// subscribers).
+// Forward-compatible by design: new mutators add new Field strings; existing
+// subscribers branching on Field safely ignore unknown tags.
 type EntityChange struct {
-	Kind     string     `json:"kind"`     // "unit" today; "doodad"/etc. forward-compatible
+	Kind     string     `json:"kind"`     // "unit" | "doodad" | "info" | ...
 	ID       uint32     `json:"id"`       // creation_number (per-kind in WC3)
-	Field    string     `json:"field"`    // "position" today; "rotation"/"type"/etc. later
-	Position [3]float32 `json:"position"` // game coords for Field=="position", else zero
+	Field    string     `json:"field"`    // "position" | "rotation" | "scale" | "transform"
+	Position [3]float32 `json:"position"` // valid when Field == "position" or "transform"
+	Rotation float32    `json:"rotation"` // valid when Field == "rotation" or "transform" (radians, Z-axis only)
+	Scale    [3]float32 `json:"scale"`    // valid when Field == "scale" or "transform"
 }
 
 // SelectionState is the editor's current selection. Items are entity IDs in
@@ -726,6 +731,198 @@ func (s *Session) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 		ID:       creationNumber,
 		Field:    "position",
 		Position: [3]float32{x, y, z},
+	})
+	return nil
+}
+
+// RotateUnit sets the facing angle (radians, Z-axis only) of the unit with the
+// given creation_number. Mirrors MoveUnit's shape: no-op short-circuit when
+// unchanged, dirty-flip on first edit, entity-changed event after unlock.
+//
+// WC3 units store a single float32 Rotation (radians around Z). X/Y rotation
+// has no on-disk storage — this mutator only accepts Z-axis values.
+func (s *Session) RotateUnit(creationNumber uint32, rotation float32) error {
+	s.mu.Lock()
+	if s.units == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	found := -1
+	for i := range s.units.Entities {
+		if s.units.Entities[i].CreationNumber == creationNumber {
+			found = i
+			break
+		}
+	}
+	if found < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no unit with creation_number %d", creationNumber)
+	}
+	if s.units.Entities[found].Rotation == rotation {
+		s.mu.Unlock()
+		return nil
+	}
+	s.units.Entities[found].Rotation = rotation
+	wasDirty := s.dirtyUnits
+	s.dirtyUnits = true
+	pos := s.units.Entities[found].Position
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	s.notifyEntityChanged(EntityChange{
+		Kind:     "unit",
+		ID:       creationNumber,
+		Field:    "rotation",
+		Position: pos,
+		Rotation: rotation,
+	})
+	return nil
+}
+
+// RotateDoodad sets the facing angle (radians, Z-axis only) of the doodad with
+// the given creation_number. Mirrors MoveDoodad's shape.
+//
+// NOTE: Some doodad types carry a fixed_rot flag in the SLK type index, which
+// restricts valid rotations to a small set of angles (e.g. quarter-turns for
+// bridges). The backend stores whatever value it's given — snapping to
+// acceptable angles per fixed_rot is the responsibility of the gizmo's commit
+// path (Phase C). This comment is the contract notice for Phase C agents.
+func (s *Session) RotateDoodad(creationNumber uint32, rotation float32) error {
+	s.mu.Lock()
+	if s.doodads == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	found := -1
+	for i := range s.doodads.Doodads {
+		if s.doodads.Doodads[i].CreationNumber == creationNumber {
+			found = i
+			break
+		}
+	}
+	if found < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no doodad with creation_number %d", creationNumber)
+	}
+	if s.doodads.Doodads[found].Rotation == rotation {
+		s.mu.Unlock()
+		return nil
+	}
+	s.doodads.Doodads[found].Rotation = rotation
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
+	s.dirtyDoodads = true
+	pos := s.doodads.Doodads[found].Position
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	s.notifyEntityChanged(EntityChange{
+		Kind:     "doodad",
+		ID:       creationNumber,
+		Field:    "rotation",
+		Position: pos,
+		Rotation: rotation,
+	})
+	return nil
+}
+
+// ScaleUnit sets the per-axis scale of the unit with the given creation_number.
+// Mirrors MoveUnit's shape.
+//
+// CRITICAL: This mutator clears the entity's scaleRaw preservation field so
+// the next Encode emits the new Scale value rather than the original on-disk
+// bits. Without this, unitsdoo.Encode would preserve the OLD bytes (scaleRaw
+// takes precedence over Scale*128 when non-zero), silently discarding the edit.
+// See feedback_unitsdoo_scale_raw.md for the gotcha background.
+//
+// Doodads do NOT have this issue (their Scale is stored raw, no /128 divide at
+// Parse). Only units need scaleRaw invalidation.
+func (s *Session) ScaleUnit(creationNumber uint32, sx, sy, sz float32) error {
+	s.mu.Lock()
+	if s.units == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	found := -1
+	for i := range s.units.Entities {
+		if s.units.Entities[i].CreationNumber == creationNumber {
+			found = i
+			break
+		}
+	}
+	if found < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no unit with creation_number %d", creationNumber)
+	}
+	cur := s.units.Entities[found].Scale
+	if cur[0] == sx && cur[1] == sy && cur[2] == sz {
+		s.mu.Unlock()
+		return nil
+	}
+	s.units.Entities[found].Scale = [3]float32{sx, sy, sz}
+	// Invalidate scaleRaw so Encode derives from the new Scale value.
+	// scaleRaw is unexported; we call the package-level helper to set it.
+	unitsdoo.ClearScaleRaw(&s.units.Entities[found])
+	wasDirty := s.dirtyUnits
+	s.dirtyUnits = true
+	pos := s.units.Entities[found].Position
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	s.notifyEntityChanged(EntityChange{
+		Kind:  "unit",
+		ID:    creationNumber,
+		Field: "scale",
+		Scale: [3]float32{sx, sy, sz},
+		Position: pos,
+	})
+	return nil
+}
+
+// ScaleDoodad sets the per-axis scale of the doodad with the given
+// creation_number. Mirrors MoveDoodad's shape.
+//
+// Doodad Scale is stored RAW on disk (no /128 divide at Parse — the opposite
+// convention from unitsdoo). Encode writes Scale verbatim, so no scaleRaw
+// invalidation is needed here. The mutator simply sets the public Scale field.
+func (s *Session) ScaleDoodad(creationNumber uint32, sx, sy, sz float32) error {
+	s.mu.Lock()
+	if s.doodads == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	found := -1
+	for i := range s.doodads.Doodads {
+		if s.doodads.Doodads[i].CreationNumber == creationNumber {
+			found = i
+			break
+		}
+	}
+	if found < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no doodad with creation_number %d", creationNumber)
+	}
+	cur := s.doodads.Doodads[found].Scale
+	if cur[0] == sx && cur[1] == sy && cur[2] == sz {
+		s.mu.Unlock()
+		return nil
+	}
+	s.doodads.Doodads[found].Scale = [3]float32{sx, sy, sz}
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
+	s.dirtyDoodads = true
+	pos := s.doodads.Doodads[found].Position
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	s.notifyEntityChanged(EntityChange{
+		Kind:  "doodad",
+		ID:    creationNumber,
+		Field: "scale",
+		Scale: [3]float32{sx, sy, sz},
+		Position: pos,
 	})
 	return nil
 }

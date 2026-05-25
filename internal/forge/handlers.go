@@ -63,9 +63,13 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("units.list", handleUnitsList)
 	reg("units.get", handleUnitsGet)
 	reg("units.move", handleUnitsMove)
+	reg("units.rotate", handleUnitsRotate)
+	reg("units.scale", handleUnitsScale)
 	reg("doodads.list", handleDoodadsList)
 	reg("doodads.get", handleDoodadsGet)
 	reg("doodads.move", handleDoodadsMove)
+	reg("doodads.rotate", handleDoodadsRotate)
+	reg("doodads.scale", handleDoodadsScale)
 	reg("map.save", handleMapSave)
 	reg("selection.get", handleSelectionGet)
 	reg("selection.set", handleSelectionSet)
@@ -447,6 +451,107 @@ func handleDoodadsMove(params json.RawMessage) (any, error) {
 		OK:             true,
 		CreationNumber: p.CreationNumber,
 		Position:       [3]float32{p.X, p.Y, p.Z},
+	}, nil
+}
+
+// unitsRotateParams carries a single-axis rotation for the units.rotate handler.
+// Rotation is in radians around the Z axis (the only axis WC3 units support).
+type unitsRotateParams struct {
+	CreationNumber uint32  `json:"creation_number"`
+	Rotation       float32 `json:"rotation"` // radians, Z-axis only
+}
+
+type unitsRotateResponse struct {
+	OK             bool    `json:"ok"`
+	CreationNumber uint32  `json:"creation_number"`
+	Rotation       float32 `json:"rotation"`
+}
+
+// handleUnitsRotate applies a new facing angle to the unit with the given
+// creation_number. Wraps Session.RotateUnit; mirrors handleUnitsMove shape.
+func handleUnitsRotate(params json.RawMessage) (any, error) {
+	var p unitsRotateParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.RotateUnit(p.CreationNumber, p.Rotation); err != nil {
+		return nil, err
+	}
+	return unitsRotateResponse{
+		OK:             true,
+		CreationNumber: p.CreationNumber,
+		Rotation:       p.Rotation,
+	}, nil
+}
+
+// handleDoodadsRotate applies a new facing angle to the doodad with the given
+// creation_number. Reuses unitsRotateParams/unitsRotateResponse because the
+// wire shape is identical; only the dispatch target differs.
+func handleDoodadsRotate(params json.RawMessage) (any, error) {
+	var p unitsRotateParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.RotateDoodad(p.CreationNumber, p.Rotation); err != nil {
+		return nil, err
+	}
+	return unitsRotateResponse{
+		OK:             true,
+		CreationNumber: p.CreationNumber,
+		Rotation:       p.Rotation,
+	}, nil
+}
+
+// unitsScaleParams carries per-axis scale for the units.scale and doodads.scale
+// handlers. For units, sx/sy/sz are runtime-normalized (1.0 = default). For
+// doodads, they are raw on-disk values (same convention — 1.0 = default, but
+// doodads store them verbatim without the /128 divide units use).
+type unitsScaleParams struct {
+	CreationNumber uint32  `json:"creation_number"`
+	Sx             float32 `json:"sx"`
+	Sy             float32 `json:"sy"`
+	Sz             float32 `json:"sz"`
+}
+
+type unitsScaleResponse struct {
+	OK             bool       `json:"ok"`
+	CreationNumber uint32     `json:"creation_number"`
+	Scale          [3]float32 `json:"scale"`
+}
+
+// handleUnitsScale sets per-axis scale on the unit with the given
+// creation_number. Session.ScaleUnit clears scaleRaw so Encode emits the new
+// value; see feedback_unitsdoo_scale_raw.md for the gotcha background.
+func handleUnitsScale(params json.RawMessage) (any, error) {
+	var p unitsScaleParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.ScaleUnit(p.CreationNumber, p.Sx, p.Sy, p.Sz); err != nil {
+		return nil, err
+	}
+	return unitsScaleResponse{
+		OK:             true,
+		CreationNumber: p.CreationNumber,
+		Scale:          [3]float32{p.Sx, p.Sy, p.Sz},
+	}, nil
+}
+
+// handleDoodadsScale sets per-axis scale on the doodad with the given
+// creation_number. Doodad scale is stored raw on disk — no scaleRaw
+// invalidation needed; Encode writes Scale verbatim.
+func handleDoodadsScale(params json.RawMessage) (any, error) {
+	var p unitsScaleParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.ScaleDoodad(p.CreationNumber, p.Sx, p.Sy, p.Sz); err != nil {
+		return nil, err
+	}
+	return unitsScaleResponse{
+		OK:             true,
+		CreationNumber: p.CreationNumber,
+		Scale:          [3]float32{p.Sx, p.Sy, p.Sz},
 	}, nil
 }
 

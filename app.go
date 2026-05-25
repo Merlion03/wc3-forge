@@ -1046,6 +1046,36 @@ func (a *App) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 	return forge.Current.MoveDoodad(creationNumber, x, y, z)
 }
 
+// RotateUnit sets the facing angle (radians, Z-axis only) of the unit with the
+// given creation_number. The gizmo's rotate-handle commits via this method.
+// Mirrors MoveUnit's error-handling shape: no-op on same value, dirty-flip on
+// first edit, entity-changed event fires after unlock.
+func (a *App) RotateUnit(creationNumber uint32, rotation float32) error {
+	return forge.Current.RotateUnit(creationNumber, rotation)
+}
+
+// RotateDoodad sets the facing angle (radians, Z-axis only) of the doodad with
+// the given creation_number. Mirrors MoveDoodad's wire contract and shape.
+// See session.RotateDoodad for the fixed_rot clamping contract (Phase C).
+func (a *App) RotateDoodad(creationNumber uint32, rotation float32) error {
+	return forge.Current.RotateDoodad(creationNumber, rotation)
+}
+
+// ScaleUnit sets the per-axis scale of the unit with the given creation_number.
+// sx/sy/sz are runtime-normalized values (1.0 = default size, matching the
+// BlzSetUnitScale convention). The session mutator clears the on-disk scaleRaw
+// preservation field so Encode emits the new value instead of the stale bits.
+func (a *App) ScaleUnit(creationNumber uint32, sx, sy, sz float32) error {
+	return forge.Current.ScaleUnit(creationNumber, sx, sy, sz)
+}
+
+// ScaleDoodad sets the per-axis scale of the doodad with the given
+// creation_number. Doodad scale is stored raw on disk (no /128 divide at
+// Parse), so the values passed here are written verbatim by Encode.
+func (a *App) ScaleDoodad(creationNumber uint32, sx, sy, sz float32) error {
+	return forge.Current.ScaleDoodad(creationNumber, sx, sy, sz)
+}
+
 // IsDirty reports whether the session has unsaved edits. The header Save
 // button's modified-dot indicator polls this on mount; subsequent updates
 // arrive via the dirty-changed Wails event.
