@@ -63,9 +63,8 @@
 <style>
   .accordion {
     display: flex; flex-direction: column;
-    min-height: 0;
+    flex: 0 0 auto;
   }
-  .accordion.open { flex: 1 1 auto; }
   .acc-header {
     flex: 0 0 auto;
     display: flex; align-items: center; gap: 6px;
@@ -89,10 +88,8 @@
   .label { flex: 0 1 auto; min-width: 0; }
   .extras { flex: 1 1 auto; display: flex; justify-content: flex-end; gap: 6px; color: #71717a; font-weight: 400; text-transform: none; letter-spacing: 0; }
   .acc-body {
-    flex: 1 1 auto;
-    min-height: 0;
+    flex: 0 0 auto;
     display: flex; flex-direction: column;
-    overflow: hidden;
     animation: acc-open 200ms ease;
   }
   @keyframes acc-open {

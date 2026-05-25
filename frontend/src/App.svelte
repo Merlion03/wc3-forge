@@ -17,6 +17,7 @@
   import Splitter from './Splitter.svelte'
   import Accordion from './Accordion.svelte'
   import ViewMenu from './ViewMenu.svelte'
+  import AssetPreview from './AssetPreview.svelte'
   import { showToast } from './toast'
 
   // Wails drops struct typedefs from models.ts when they appear as map values,
@@ -601,6 +602,42 @@
 
   // ----- Properties helpers -----
 
+  // Asset-preview model path. Resolves the primary selection's MDX path from
+  // the SLK type index (unitTypes / doodadTypes). Mirrors the path-picking
+  // logic in scene-instances.ts:
+  //   - Append .mdx if no extension declared.
+  //   - For multi-variant doodads (num_var > 1), use the doodad's variation
+  //     index as a suffix (ATtr0.mdx etc.). Single-variant doodads use the
+  //     unsuffixed path. (The preview takes one path; if it 404s the lib
+  //     surfaces the error in the preview's own error band.)
+  // Slocs (type_id === 'sloc') intentionally return null — they're editor-
+  // only markers with no model file.
+  function mdxPathFor(file: string): string {
+    if (/\.(mdl|mdx)$/i.test(file)) return file
+    return file + '.mdx'
+  }
+  $: previewModelPath = (() => {
+    if (primaryEntity) {
+      if (primaryEntity.TypeID === 'sloc') return null
+      const info = unitTypes[primaryEntity.TypeID]
+      if (!info || !info.file) return null
+      return mdxPathFor(info.file)
+    }
+    if (primaryDoodad) {
+      const info = doodadTypes[primaryDoodad.type_id]
+      if (!info || !info.file) return null
+      const extMatch = info.file.match(/\.(mdl|mdx)$/i)
+      const declaredExt = extMatch ? extMatch[0] : '.mdx'
+      const stem = extMatch ? info.file.slice(0, -extMatch[0].length) : info.file
+      if (info.num_var > 1) {
+        const variantIdx = Math.min(Math.max(0, primaryDoodad.variation), info.num_var - 1)
+        return stem + variantIdx + declaredExt
+      }
+      return stem + declaredExt
+    }
+    return null
+  })()
+
   function fmt(n: number, decimals: number = 0): string {
     return n.toFixed(decimals)
   }
@@ -852,6 +889,13 @@
       <aside class="panel properties">
         <header class="panel-header">Properties</header>
         <div class="panel-body">
+        {#if previewModelPath}
+          <Accordion id="p:preview" label="Preview" open={isOpen('p:preview', true)}
+                     on:toggle={onSectionToggle}>
+            <AssetPreview modelPath={previewModelPath} {reforged}
+                          teamColor={primaryEntity ? primaryEntity.Player : 0} />
+          </Accordion>
+        {/if}
         {#if terrainCell}
           <!-- Terrain-cell info is its own Accordion section so it survives
                an entity selection (user can keep a unit selected and inspect
