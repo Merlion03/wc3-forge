@@ -1,23 +1,66 @@
-// Textured terrain renderer with 4-corner alpha blending (HiveWE-style).
+// Textured terrain renderer with HiveWE-style N-layer alpha-composite blending.
 //
-// Each cell can show up to 4 distinct tile textures (one per corner). The
-// corner's ground_tex picks which palette tile that corner "owns"; weights
-// fall off bilinearly across the cell so adjacent cells with different
-// primary tiles blend with feathered edges instead of a hard line.
+// ── Algorithm ───────────────────────────────────────────────────────────────
 //
-// Single draw call for the whole terrain. To get there in WebGL1 (no
-// sampler2DArray, no dynamic indexing into sampler arrays), all loaded
-// palette textures are pre-composited into a single vertical-strip atlas
-// (one palette per row, row height = 256, atlas width = max palette width)
-// via FBO-blit at build time. The frag shader then samples that one atlas
-// 4 times — once per cell corner — at offsets keyed by per-corner palette
-// layer index and per-corner sub-tile slot.
+// Per cell (i, j) — defined by its 4 corner tilepoints (bl, br, tl, tr):
 //
-// Extended atlases (width = 2×height, 8×4 sub-tile layout) live alongside
-// non-extended (4×4) palettes in the same atlas: extended palettes occupy
-// the full atlas width, non-extended only the left half. The per-palette
-// `extended` flag rides along as a per-corner shader uniform-via-attribute
-// (packed into the layer-index attribute's fractional part — see usage).
+//  1. Collect the 4 corners' palette indices. Up to 4 unique values per cell;
+//     uniform cells have 1, transition cells have 2-4.
+//
+//  2. Sort & dedupe the unique palette indices in ASCENDING order. Palette
+//     ordering in war3map.w3e is the SLK "dir" priority order — lowest-index
+//     ground textures (typically base grass) get painted FIRST, highest-index
+//     (typically dirt / transitions) get painted LAST on top. HiveWE's
+//     terrain.ixx does exactly this with `std::sort(u, u + 4)`.
+//
+//  3. The lowest-index palette is the BASE LAYER. It is rendered with its own
+//     "pure variation" sub-tile (slot picked by `pickSubTile(extended, var)`):
+//       - non-extended palettes: slot 0 (variation==0) or slot 15 (else)
+//       - extended palettes:     slot 16+var (var<=15), slot 15 (var==16),
+//                                slot 0 otherwise
+//
+//  4. Higher-priority palettes (k = 1..3) each carry a per-cell 4-bit
+//     CORNER-COVERAGE MASK packing which of the 4 corners use that palette:
+//       bit 0 → bottom-right, bit 1 → bottom-left,
+//       bit 2 → top-right,    bit 3 → top-left.
+//     The mask itself (range 0..15) IS the sub-tile slot inside that
+//     palette's 4×4 alpha-edged-variant grid. WC3 tile textures hand-author
+//     these 16 slots as pre-baked alpha-edge transitions: slot N's alpha
+//     channel masks ONLY the corners whose bits are set in N. So sampling
+//     `palette[k]` at slot=mask gives the correctly-faded coverage automatically.
+//
+//  5. The fragment shader composites layers in order. Starting from the base
+//     layer (fully opaque), each higher layer is `mix(prev, layer, layer.a)`
+//     where `layer.a` is the alpha-edged variant's per-pixel alpha. Cells with
+//     fewer than 4 layers use a sentinel (negative atlas-U coord) to skip.
+//
+// ── Implementation notes ─────────────────────────────────────────────────────
+//
+// WebGL1: no `sampler2DArray`, no dynamic indexing into sampler arrays. To
+// keep the algorithm in a single draw call against a single `sampler2D`, all
+// loaded palette textures are pre-composited into one vertical-strip atlas
+// (one palette per 256-pixel-tall row, atlas width = 256 for non-extended-only
+// maps or 512 if any extended palette exists) via FBO-blit at build time. The
+// frag shader samples that atlas at most 4 times — once per layer — at offsets
+// derived from per-cell vertex attributes.
+//
+// Per-vertex inputs:
+//   a_position  — world XYZ
+//   a_shadowUV  — shadow-map sample coord (per vertex; unused if no shadow)
+//   a_cellUV    — cell-local UV (0,0) at BL through (1,1) at TR
+//   a_layerUV01 — base-layer subUV (xy) + layer-1 subUV (zw)
+//   a_layerUV23 — layer-2 subUV (xy) + layer-3 subUV (zw)
+//
+// All 4 verts of a cell carry the same a_layerUV01 / a_layerUV23 (it's per-
+// cell data); only a_position, a_shadowUV, a_cellUV vary per vertex.
+//
+// `subUV` is the BOTTOM-LEFT corner of the sub-tile in atlas-UV coordinates
+// (v-up). Sub-tile size is uniform — every palette is 256×256 (non-extended,
+// 4×4 sub-tiles) or 512×256 (extended, 8×4 sub-tiles), and every sub-tile is
+// 64×64 pixels. So the size in atlas UV is `(64/atlasW, 64/atlasH)`, a single
+// uniform shared across the whole draw.
+//
+// Sentinel for "no layer N" = `subUV.x < 0`. The shader compares and skips.
 //
 // Drawn between viewer.startFrame() and viewer.render() so it lands in the
 // depth buffer before unit instances.
@@ -45,7 +88,9 @@ interface TerrainDTO {
 
 // Mirrors HiveWE's `get_tile_variation`: the per-corner variation byte
 // selects a sub-tile slot inside the texture's 4×4 (non-extended) or 8×4
-// (extended) sub-tile layout.
+// (extended) sub-tile layout. ONLY used for the BASE layer of a cell — higher
+// layers use the corner-coverage mask directly as the slot index (slots 0..15
+// are the alpha-edged variants for both extended and non-extended palettes).
 function pickSubTile(extended: boolean, variation: number): number {
   if (extended) {
     if (variation <= 15) return 16 + variation
@@ -56,133 +101,83 @@ function pickSubTile(extended: boolean, variation: number): number {
   return 15
 }
 
-// Per-cell vertex shader inputs:
-//   a_position    — world XYZ
-//   a_shadowUV    — shadow-map sample coord (per vertex)
-//   a_cellUV      — cell-local UV (0..1), bilinear weight basis
-//   a_layers      — palette layer index for each of the 4 corners (TL, TR, BR, BL)
-//   a_subUV0..3   — pre-computed (atlas_u0, atlas_v0) sub-tile origin for each
-//                   corner's chosen palette + sub-tile slot. Half is enough
-//                   because subTileSize is constant per palette and packed
-//                   into a_layers (see below).
-//   a_subSize     — (sub_tile_width, sub_tile_height) in atlas UV for each
-//                   of the 4 corners, packed as 2 vec4s (corners 0,1 and 2,3
-//                   share the attribute).
-//
-// All 4 verts of a cell carry the same a_layers, a_subUV*, a_subSize values
-// — only a_position, a_shadowUV, a_cellUV vary per vertex.
+// Vertex shader: pure pass-through of per-cell layer attributes. The fragment
+// shader does all the compositing.
 const VERT_SHADER = `
 attribute vec3 a_position;
 attribute vec2 a_shadowUV;
 attribute vec2 a_cellUV;
-attribute vec4 a_subUV01;   // TL.uv, TR.uv
-attribute vec4 a_subUV23;   // BR.uv, BL.uv
-attribute vec4 a_subSize01; // TL.size, TR.size
-attribute vec4 a_subSize23; // BR.size, BL.size
-attribute vec4 a_rowV;      // per-corner atlas row start (v coord in atlas, 0..1)
+attribute vec4 a_layerUV01; // base.uv, layer1.uv
+attribute vec4 a_layerUV23; // layer2.uv, layer3.uv
 uniform mat4 u_viewProj;
 varying vec2 v_shadowUV;
 varying vec2 v_cellUV;
-varying vec4 v_subUV01;
-varying vec4 v_subUV23;
-varying vec4 v_subSize01;
-varying vec4 v_subSize23;
-varying vec4 v_rowV;
+varying vec4 v_layerUV01;
+varying vec4 v_layerUV23;
 void main() {
   v_shadowUV = a_shadowUV;
   v_cellUV = a_cellUV;
-  v_subUV01 = a_subUV01;
-  v_subUV23 = a_subUV23;
-  v_subSize01 = a_subSize01;
-  v_subSize23 = a_subSize23;
-  v_rowV = a_rowV;
+  v_layerUV01 = a_layerUV01;
+  v_layerUV23 = a_layerUV23;
   gl_Position = u_viewProj * vec4(a_position, 1.0);
 }
 `.trim()
 
-// Frag shader: bilinear weights from cellUV, sample atlas 4 times.
-// Corner order (matches HiveWE 4-corner conventions):
-//   0 = TL (u=0, v=1)  weight = (1-u) * v
-//   1 = TR (u=1, v=1)  weight = u     * v
-//   2 = BR (u=1, v=0)  weight = u     * (1-v)
-//   3 = BL (u=0, v=0)  weight = (1-u) * (1-v)
-// cellUV is (0,0) at BL, (1,1) at TR — standard quad UV with v-up.
+// Fragment shader: alpha-composite up to 4 layers.
 //
-// Each corner's atlas sample = subUV + cellUV_localized * subSize. The
-// localization flips cellUV per corner so each corner's "own" texel sits at
-// the appropriate sub-tile interior coord.
+// For each layer L with sub-tile origin `lo` in atlas UV, sample the atlas at
+// `lo + (cellUV.x, 1.0 - cellUV.y) * u_subSize`. The v-flip aligns the image-
+// space (y-down) sub-tile interior with cellUV (y-up): cellUV.y=1 (top of
+// cell) → sample row 0 of the sub-tile.
+//
+// The base layer is opaque (its alpha is ignored — it covers the cell fully).
+// Each higher layer is `mix(prev, layer, layer.a)` so the layer's alpha-edged
+// transparency reveals what's underneath.
+//
+// Sentinel: a layer with `lo.x < -0.5` is "no layer here" and gets skipped.
+// Using -1 in the attribute and a generous -0.5 threshold dodges any
+// interpolation/precision drift across the cell (the attribute is flat-shaded
+// in spirit but varying-interpolated by the GL pipeline — for all 4 verts of
+// a cell the attribute value is identical, so interpolation is a no-op, but
+// keeping the threshold generous costs nothing).
 const FRAG_SHADER = `
 precision mediump float;
 uniform sampler2D u_atlas;
 uniform sampler2D u_shadowTex;
 uniform bool u_hasShadow;
+uniform vec2 u_subSize;     // (sub-tile width, sub-tile height) in atlas UV
 varying vec2 v_shadowUV;
 varying vec2 v_cellUV;
-varying vec4 v_subUV01;
-varying vec4 v_subUV23;
-varying vec4 v_subSize01;
-varying vec4 v_subSize23;
-varying vec4 v_rowV;
-void main() {
-  float u = v_cellUV.x;
-  float v = v_cellUV.y;
-  // Bilinear weights (must sum to 1).
-  float wTL = (1.0 - u) * v;
-  float wTR = u * v;
-  float wBR = u * (1.0 - v);
-  float wBL = (1.0 - u) * (1.0 - v);
+varying vec4 v_layerUV01;
+varying vec4 v_layerUV23;
 
-  // Per-corner atlas sample coord: (subOrigin.x + cellUV.x * subSize.x,
-  // rowV + (1 - cellUV.y) * subSize.y).  The v-flip matches HiveWE's
-  // "UV = vec2(vPos.x, 1 - vPos.y)" sub-tile orientation (image y-down,
-  // cellUV v-up). The atlas row "rowV" is the bottom of the palette's
-  // strip in the atlas — sub-tile slot's vertical offset (subUV.y) is
-  // already baked into the per-corner subUV value, so rowV adds the
-  // palette base only.
-  vec2 uvTL = vec2(v_subUV01.x + u * v_subSize01.x,
-                   v_subUV01.y + (1.0 - v) * v_subSize01.y);
-  vec2 uvTR = vec2(v_subUV01.z + u * v_subSize01.z,
-                   v_subUV01.w + (1.0 - v) * v_subSize01.w);
-  vec2 uvBR = vec2(v_subUV23.x + u * v_subSize23.x,
-                   v_subUV23.y + (1.0 - v) * v_subSize23.y);
-  vec2 uvBL = vec2(v_subUV23.z + u * v_subSize23.z,
-                   v_subUV23.w + (1.0 - v) * v_subSize23.w);
-
-  vec4 cTL = texture2D(u_atlas, uvTL);
-  vec4 cTR = texture2D(u_atlas, uvTR);
-  vec4 cBR = texture2D(u_atlas, uvBR);
-  vec4 cBL = texture2D(u_atlas, uvBL);
-
-  // Alpha-weighted bilinear blend. WC3 tileset atlases (especially the
-  // extended ones, but also some non-extended sub-tile slots) carry
-  // alpha-edged sub-tiles: the "interior" pixels of a sub-tile are opaque
-  // textured ground, while the edges fade to alpha=0 to support tile-to-tile
-  // blending. In those transparent border pixels the source DDS stores
-  // rgb ≈ (0, 0, 0), so a straight RGB-weighted-sum (rgb * weight) pulls
-  // those zero RGB values into the result weighted by the bilinear corner
-  // weight — producing the visible dark patches clustered at cell corners.
-  //
-  // The fix: weight each corner's contribution by (its alpha × its bilinear
-  // weight) and normalize by the total alpha-weight. Fully-opaque corners
-  // (alpha=1, the common case for cell interiors) cancel the alpha factor
-  // out and the formula reduces to the original straight bilinear blend —
-  // so this fix is a no-op everywhere the source isn't alpha-edged.
-  float aTL = cTL.a * wTL;
-  float aTR = cTR.a * wTR;
-  float aBR = cBR.a * wBR;
-  float aBL = cBL.a * wBL;
-  float totalA = aTL + aTR + aBR + aBL;
-
-  vec3 col;
-  if (totalA > 0.001) {
-    col = (cTL.rgb * aTL + cTR.rgb * aTR + cBR.rgb * aBR + cBL.rgb * aBL) / totalA;
-  } else {
-    // All four corners fully transparent. Shouldn't happen on real cells
-    // because at least one corner of a textured cell always lands in a
-    // non-transparent sub-tile, but defensive in case the atlas has a
-    // fully-transparent gutter region.
-    col = cTL.rgb;
+vec4 sampleLayer(vec2 lo) {
+  // lo.x < -0.5 = sentinel = no layer here.
+  if (lo.x < -0.5) {
+    return vec4(0.0, 0.0, 0.0, 0.0);
   }
+  // Sub-tile-local UV: image v-down within the sub-tile.
+  vec2 atlasUV = vec2(lo.x + v_cellUV.x * u_subSize.x,
+                      lo.y + (1.0 - v_cellUV.y) * u_subSize.y);
+  return texture2D(u_atlas, atlasUV);
+}
+
+void main() {
+  // Layer 0 = base (lowest-index palette). Its sub-tile is the per-corner
+  // variation slot — fully opaque on the interior. Alpha is IGNORED for base:
+  // base color covers the entire cell.
+  vec4 base = sampleLayer(v_layerUV01.xy);
+  vec3 col = base.rgb;
+
+  // Layers 1..3 — each may be a sentinel (skipped).
+  vec4 l1 = sampleLayer(v_layerUV01.zw);
+  col = mix(col, l1.rgb, l1.a);
+
+  vec4 l2 = sampleLayer(v_layerUV23.xy);
+  col = mix(col, l2.rgb, l2.a);
+
+  vec4 l3 = sampleLayer(v_layerUV23.zw);
+  col = mix(col, l3.rgb, l3.a);
 
   if (u_hasShadow) {
     float shadow = texture2D(u_shadowTex, v_shadowUV).r;
@@ -219,15 +214,13 @@ function buildProgram(gl: WebGLRenderingContext) {
     aPosition: gl.getAttribLocation(program, 'a_position'),
     aShadowUV: gl.getAttribLocation(program, 'a_shadowUV'),
     aCellUV: gl.getAttribLocation(program, 'a_cellUV'),
-    aSubUV01: gl.getAttribLocation(program, 'a_subUV01'),
-    aSubUV23: gl.getAttribLocation(program, 'a_subUV23'),
-    aSubSize01: gl.getAttribLocation(program, 'a_subSize01'),
-    aSubSize23: gl.getAttribLocation(program, 'a_subSize23'),
-    aRowV: gl.getAttribLocation(program, 'a_rowV'),
+    aLayerUV01: gl.getAttribLocation(program, 'a_layerUV01'),
+    aLayerUV23: gl.getAttribLocation(program, 'a_layerUV23'),
     uViewProj: gl.getUniformLocation(program, 'u_viewProj')!,
     uAtlas: gl.getUniformLocation(program, 'u_atlas')!,
     uShadowTex: gl.getUniformLocation(program, 'u_shadowTex')!,
     uHasShadow: gl.getUniformLocation(program, 'u_hasShadow')!,
+    uSubSize: gl.getUniformLocation(program, 'u_subSize')!,
   }
 }
 
@@ -288,12 +281,6 @@ function buildAtlas(
   }
   const rowH = 256
   const atlasH = numPalettes * rowH
-
-  // Round atlas dims up to power-of-two? Not required for non-mip CLAMP
-  // textures in WebGL1, but min/mag filtering is more well-defined. We're
-  // already POT (256/512 width, num*256 height — only POT when numPalettes
-  // is itself a power of two, but the WebGL1 NPOT-with-CLAMP path supports
-  // LINEAR sampling fine).
 
   const atlas = gl.createTexture()
   if (!atlas) return null
@@ -509,87 +496,77 @@ export async function buildTerrain(
 
   // ---- Pre-compute per-palette atlas mapping helpers ----
   //
-  // For palette p, sub-tile slot k, the sub-tile origin (in normalized atlas
-  // UV) is (atlasU0, atlasV0) and the sub-tile size in normalized atlas UV
-  // is (subW, subH). Both depend on whether the palette is extended.
+  // For palette p, sub-tile slot k, the sub-tile origin (bottom-left in
+  // atlas UV, v-up) is (u0, v0). All sub-tiles in the atlas are 64×64 pixels
+  // regardless of whether the source palette is extended (256×256, 4×4 grid)
+  // or extended (512×256, 8×4 grid). Sub-tile size in atlas UV:
+  //   subW = 64 / atlasW   (= 0.25 when atlasW=256, 0.125 when atlasW=512)
+  //   subH = 64 / atlasH   (= 0.25/numPalettes etc.)
   //
-  // Layout within a row (palette p occupies rows [(numPalettes-p-1)*256,
-  // (numPalettes-p)*256] in pixels):
-  //   non-extended: 4 cols × 4 rows of 64×64 sub-tiles in the left half
-  //                 → col c=0..3 at u = c * (1/8), width = (1/8) of atlas
-  //                 → row r=0..3 at v_within_row = r * 0.25 (top→bottom in
-  //                   image y-down, so r=0 is the TOP of the sub-tile grid)
-  //   extended:     8 cols × 4 rows of 64×64 sub-tiles spanning full row
-  //                 → col c=0..7 at u = c * (1/8), width = (1/8)
-  //                 → same row layout
+  // Slot layout within a row:
+  //   non-extended (4×4):  col c = slot % 4, row r = slot / 4   (slot 0..15)
+  //   extended    (8×4):   col c = slot % 8, row r = slot / 8   (slot 0..31)
   //
-  // Edge inset: tighten by 1% of sub-tile size to suppress LINEAR-filter
-  // bleed from adjacent sub-tiles. The atlas's row boundaries are also a
-  // potential bleed source (palette p+1's first row bleeds up into
-  // palette p's last row); inset on the row v handles that too.
-  function subTileAtlasRect(p: number, slot: number): {
-    u0: number; v0: number; sw: number; sh: number; rowV: number;
-  } {
-    const ext = rows[p].extended
-    const subCols = ext ? 8 : 4
-    const subRows = 4
-    // In pixels within the row (image y-down, row top at pixel 0):
-    const colW = 64 // 256/4 or 512/8 = 64
-    const rowH = 64 // 256/4
-    const sc = slot % subCols
-    const sr = Math.floor(slot / subCols)
-    const xPx = sc * colW
-    const yPxTop = sr * rowH // top of the sub-tile within the row (image y-down)
-
-    // The row sits at atlas pixel rows [palY .. palY + 256), where palY is
-    // the row's BOTTOM in atlas-pixel-y (since we used dstY = atlasH -
-    // (p+1)*256 above — yes, atlas pixel y goes UP from bottom in GL coords,
-    // so the row spans GL y from (atlasH-(p+1)*256) up to (atlasH-p*256)).
-    //
-    // The blit copied the source texture with UV (0,0) at the destination
-    // viewport's bottom-left. That means the image's "y=0 pixel" (top of
-    // the source) ended up at GL pixel y = atlasH - p*256 - 1 (top of the
-    // destination row). And image's "y=255 pixel" (bottom of source) at
-    // GL pixel y = atlasH - (p+1)*256.
-    //
-    // So sub-tile (sc, sr) in image-y-down coordinates occupies image rows
-    // [sr*64 .. (sr+1)*64), which maps to GL pixel-y rows:
-    //   GL y_top    = atlasH - p*256 - sr*64 - 1
-    //   GL y_bottom = atlasH - p*256 - (sr+1)*64
-    //
-    // Atlas UV v = GL_pixel_y / atlasH. Sub-tile origin (bottom-left in UV
-    // coords with v-up): u = xPx / atlasW, v = (atlasH - p*256 -
-    // (sr+1)*64) / atlasH. Sub-tile size: sw = colW/atlasW, sh = rowH/atlasH.
-    // Palette p occupies atlas v ∈ [base_v .. base_v + 256/atlasH], where
-    // base_v = (atlasH - (p+1)*256) / atlasH (palette 0 is at the TOP of
-    // the atlas in v-up GL UV-space, so base_v=1-256/atlasH for p=0).
-    // Within that palette's strip, source UV v is "v-down" in image terms:
-    // sub-tile row sr=0 is the top of the image, occupying source UV v
-    // [0..0.25]. Translated to atlas UV (which is v-up but the blit
-    // preserves the source's v-down orientation across the strip):
-    //   atlas_v(image_top_of_subtile) = base_v + sr * 256/atlasH * 0.25
-    //                                 = base_v + sr * 64/atlasH
+  // Row image-y-down: r=0 is the top of the sub-tile grid; r=3 is the
+  // bottom. We blit each palette so that the source image's TOP appears at
+  // the destination row's TOP (in atlas-pixel-y, "top" = higher pixel-y =
+  // higher atlas-UV v in v-up GL convention). So source sub-tile row r in
+  // image-y-down maps to atlas pixel-y range
+  //   [GL_top - (r+1)*64, GL_top - r*64)
+  // where GL_top = atlasH - p*256 (the row's upper edge in atlas pixel-y).
+  //
+  // The bottom-left of sub-tile (c, r) in atlas pixel coords:
+  //   xPx = c * 64
+  //   yPx = GL_top - (r + 1) * 64 = atlasH - p*256 - (r+1)*64
+  // → atlas UV (v-up):
+  //   u0 = xPx / atlasW
+  //   v0 = yPx / atlasH
+  const subW = 64 / atlasW
+  const subH = 64 / atlasH
+  // Inset by 1% of sub-tile to suppress LINEAR bleed from neighbors.
+  const insetU = subW * 0.01
+  const insetV = subH * 0.01
+  // Slot → (sub-tile column, row) in the SOURCE image, per HiveWE's
+  // GroundTexture atlas layout (ground_texture.ixx). Non-extended (4×4 grid,
+  // 256×256 image): slot ∈ 0..15, c = slot%4, r = slot/4. Extended (slots 0..31
+  // in a 512×256 image laid out as two horizontal halves of 4×4 each): slots
+  // 0..15 live in the LEFT half (image cols 0..3); slots 16..31 in the RIGHT
+  // half (image cols 4..7). Both halves keep the same row layout (slot &= 15
+  // for the row within each half).
+  //
+  //   slot 0..15   → c = slot % 4,        r = slot / 4
+  //   slot 16..31  → c = (slot-16) % 4 + 4, r = (slot-16) / 4
+  //
+  // The v-mapping here matches the existing (pre-refactor) terrain.ts that the
+  // alpha-weighted-bilinear renderer used and confirmed visually correct: the
+  // FBO blit stores image-row-0 at the LOWER atlas-v end of each palette's
+  // strip (i.e. row r maps to atlas-v = baseV + r*subH, growing with r), and
+  // the fragment shader compensates with (1 - cellUV.y) * subSize.y so that
+  // cellUV.y=1 (cell TL) samples the image's TOP of the sub-tile.
+  function subTileAtlasOrigin(p: number, slot: number): { u0: number; v0: number } {
+    const half = slot >> 4              // 0 for slots 0..15, 1 for 16..31
+    const k = slot & 0xF                // slot index within the half (0..15)
+    const sc = (k & 0x3) + half * 4
+    const sr = k >> 2
+    const xPx = sc * 64
     const baseV = (atlasH - (p + 1) * 256) / atlasH
-    const u0 = xPx / atlasW
-    const v0 = baseV + sr * (rowH / atlasH)
-    const sw = colW / atlasW
-    const sh = rowH / atlasH
-    // Inset by 1% of sub-tile to suppress LINEAR bleed from neighbors.
-    const insetU = sw * 0.01
-    const insetV = sh * 0.01
-    return {
-      u0: u0 + insetU,
-      v0: v0 + insetV,
-      sw: sw - 2 * insetU,
-      sh: sh - 2 * insetV,
-      rowV: baseV,
-    }
+    const v0 = baseV + sr * (64 / atlasH)
+    return { u0: xPx / atlasW + insetU, v0: v0 + insetV }
   }
+  // The shader's effective sub-tile sampling rect is `[u0, u0 + subWEff]` ×
+  // `[v0, v0 + subHEff]` after the insets. Pass the inset size to the shader
+  // as the uniform.
+  const subWEff = subW - 2 * insetU
+  const subHEff = subH - 2 * insetV
+  // Sentinel: a layer that doesn't exist for this cell gets atlas-U = -1.
+  // The shader compares against -0.5 to skip the sample.
+  const SENTINEL_U = -1.0
+  const SENTINEL_V = -1.0
 
   // ---- Build whole-map mesh (single VBO/IBO) ----
   //
-  // Per-vertex: pos(3) + shadowUV(2) + cellUV(2) + subUV01(4) + subUV23(4)
-  //           + subSize01(4) + subSize23(4) + rowV(4) = 27 floats.
+  // Per-vertex: pos(3) + shadowUV(2) + cellUV(2) + layerUV01(4) + layerUV23(4)
+  //           = 15 floats.
   //
   // 4 verts per cell × numCells cells. uint32 indices when vCount > 65535
   // (needs OES_element_index_uint, ships universally in modern browsers).
@@ -602,7 +579,7 @@ export async function buildTerrain(
     flog(`[terrain] needs uint32 indices (${vCount} verts) but OES_element_index_uint missing`)
     return null
   }
-  const STRIDE_F = 27
+  const STRIDE_F = 15
   const verts = new Float32Array(vCount * STRIDE_F)
   const indices = need32
     ? new Uint32Array(numCells * 6)
@@ -618,8 +595,11 @@ export async function buildTerrain(
   let iOff = 0
   let baseVert = 0
 
-  // Per-corner data assembled per cell. Corner order TL, TR, BR, BL matches
-  // the bilinear-weight layout in the frag shader.
+  // Scratch arrays for the per-cell unique-palette sort. Reused across all
+  // cells to avoid GC pressure (4096 cells × 4 entries = 16k allocs/build
+  // otherwise).
+  const cellPals = new Int32Array(4)
+
   for (let j = 0; j < H - 1; j++) {
     for (let i = 0; i < W - 1; i++) {
       const bl = j * W + i
@@ -632,34 +612,102 @@ export async function buildTerrain(
       const yB = cy + j * 128
       const yT = cy + (j + 1) * 128
 
-      // 4 corners' palette indices.
-      // ground_tex[v] is the palette index for vertex v (NOT cell). The
-      // 4 corners of cell (i, j) live at vertex indices bl, br, tl, tr.
-      // HiveWE's convention: each corner's "owned" tile is what
-      // ground_tex[that-corner-vertex] points to. The bilinear weights
-      // then fade between the 4 corners' tiles across the cell.
-      const pTL = Math.min(t.ground_tex[tl] | 0, numPalettes - 1)
-      const pTR = Math.min(t.ground_tex[tr] | 0, numPalettes - 1)
-      const pBR = Math.min(t.ground_tex[br] | 0, numPalettes - 1)
+      // 4 corners' palette indices, clamped to the loaded palette range.
       const pBL = Math.min(t.ground_tex[bl] | 0, numPalettes - 1)
+      const pBR = Math.min(t.ground_tex[br] | 0, numPalettes - 1)
+      const pTR = Math.min(t.ground_tex[tr] | 0, numPalettes - 1)
+      const pTL = Math.min(t.ground_tex[tl] | 0, numPalettes - 1)
 
-      // Each corner's own variation chooses its sub-tile slot within its
-      // own palette. Variations are per-corner (ground_var array indexed by
-      // vertex), independent for each owned tile.
-      const vTL = t.ground_var[tl] & 0x1F
-      const vTR = t.ground_var[tr] & 0x1F
-      const vBR = t.ground_var[br] & 0x1F
-      const vBL = t.ground_var[bl] & 0x1F
+      // HiveWE convention (terrain.ixx update_ground_textures): 4-corner
+      // mask uses bits assigned to {bottom_right=0, bottom_left=1,
+      // top_right=2, top_left=3}. We collect them in the same order so the
+      // mask matches what the texture's alpha-edged sub-tile slots expect.
+      cellPals[0] = pBR
+      cellPals[1] = pBL
+      cellPals[2] = pTR
+      cellPals[3] = pTL
 
-      const slotTL = pickSubTile(rows[pTL].extended, vTL)
-      const slotTR = pickSubTile(rows[pTR].extended, vTR)
-      const slotBR = pickSubTile(rows[pBR].extended, vBR)
-      const slotBL = pickSubTile(rows[pBL].extended, vBL)
+      // Sort + dedupe. With only 4 entries, an in-place insertion sort is
+      // faster than calling Array.prototype.sort (it's also reusable across
+      // an Int32Array). After sort, walk the sorted array writing unique
+      // values to the front.
+      // Tiny insertion sort (n=4):
+      for (let a = 1; a < 4; a++) {
+        const v = cellPals[a]
+        let b = a - 1
+        while (b >= 0 && cellPals[b] > v) {
+          cellPals[b + 1] = cellPals[b]
+          b--
+        }
+        cellPals[b + 1] = v
+      }
+      // Inline dedupe — count unique values; the 4 cellPals stay accessible
+      // for the per-layer mask computation that follows.
+      // u0 = sorted unique values
+      let u0 = cellPals[0]
+      let u1 = -1, u2 = -1, u3 = -1
+      let nUnique = 1
+      if (cellPals[1] !== u0) { u1 = cellPals[1]; nUnique = 2 }
+      const next1 = cellPals[2]
+      if (nUnique === 1) {
+        if (next1 !== u0) { u1 = next1; nUnique = 2 }
+      } else {
+        if (next1 !== u1) { u2 = next1; nUnique = 3 }
+      }
+      const next2 = cellPals[3]
+      if (nUnique === 1) {
+        if (next2 !== u0) { u1 = next2; nUnique = 2 }
+      } else if (nUnique === 2) {
+        if (next2 !== u1) { u2 = next2; nUnique = 3 }
+      } else {
+        if (next2 !== u2) { u3 = next2; nUnique = 4 }
+      }
 
-      const rTL = subTileAtlasRect(pTL, slotTL)
-      const rTR = subTileAtlasRect(pTR, slotTR)
-      const rBR = subTileAtlasRect(pBR, slotBR)
-      const rBL = subTileAtlasRect(pBL, slotBL)
+      // ---- Layer 0 (base): variation-driven slot of u0 ----
+      // HiveWE: out.x = u[0] | get_tile_variation(u[0], variation_at_cell_origin) << 16
+      // The "variation_at_cell_origin" is the ground_var of the BL corner
+      // (cell origin in HiveWE's `ci(tx, ty)` indexing — see
+      // `corner_ground_variation[ci(tx, ty)]` in terrain.ixx update_ground_textures).
+      const vBase = t.ground_var[bl] & 0x1F
+      const slotBase = pickSubTile(rows[u0].extended, vBase)
+      const orig0 = subTileAtlasOrigin(u0, slotBase)
+      const l0u = orig0.u0, l0v = orig0.v0
+
+      // ---- Layers 1..3: higher-priority palettes, slot = corner mask ----
+      // The mask bits are { bottom_right=0, bottom_left=1, top_right=2,
+      // top_left=3 } — same as HiveWE.
+      let l1u = SENTINEL_U, l1v = SENTINEL_V
+      let l2u = SENTINEL_U, l2v = SENTINEL_V
+      let l3u = SENTINEL_U, l3v = SENTINEL_V
+
+      if (nUnique >= 2) {
+        let m = 0
+        if (pBR === u1) m |= 0x1
+        if (pBL === u1) m |= 0x2
+        if (pTR === u1) m |= 0x4
+        if (pTL === u1) m |= 0x8
+        // Mask 0..15 IS the alpha-edged sub-tile slot.
+        const o = subTileAtlasOrigin(u1, m)
+        l1u = o.u0; l1v = o.v0
+      }
+      if (nUnique >= 3) {
+        let m = 0
+        if (pBR === u2) m |= 0x1
+        if (pBL === u2) m |= 0x2
+        if (pTR === u2) m |= 0x4
+        if (pTL === u2) m |= 0x8
+        const o = subTileAtlasOrigin(u2, m)
+        l2u = o.u0; l2v = o.v0
+      }
+      if (nUnique >= 4) {
+        let m = 0
+        if (pBR === u3) m |= 0x1
+        if (pBL === u3) m |= 0x2
+        if (pTR === u3) m |= 0x4
+        if (pTL === u3) m |= 0x8
+        const o = subTileAtlasOrigin(u3, m)
+        l3u = o.u0; l3v = o.v0
+      }
 
       // Shadow UVs.
       const sBLu = i * invWm1, sBLv = j * invHm1
@@ -667,17 +715,7 @@ export async function buildTerrain(
       const sTLu = sBLu, sTLv = (j + 1) * invHm1
       const sTRu = sBRu, sTRv = sTLv
 
-      // Pre-pack the 4 per-corner sub-tile attributes (same across all 4
-      // verts of this cell).
-      const subUV01x = rTL.u0, subUV01y = rTL.v0, subUV01z = rTR.u0, subUV01w = rTR.v0
-      const subUV23x = rBR.u0, subUV23y = rBR.v0, subUV23z = rBL.u0, subUV23w = rBL.v0
-      const subSz01x = rTL.sw, subSz01y = rTL.sh, subSz01z = rTR.sw, subSz01w = rTR.sh
-      const subSz23x = rBR.sw, subSz23y = rBR.sh, subSz23z = rBL.sw, subSz23w = rBL.sh
-      // rowV is unused in the frag shader currently (sub-tile origin already
-      // includes the row's vertical offset) — keep the attribute reserved
-      // for future per-palette work (e.g. cliff cover textures).
-      const rowVx = rTL.rowV, rowVy = rTR.rowV, rowVz = rBR.rowV, rowVw = rBL.rowV
-
+      // Per-cell layer attributes are the same across all 4 verts.
       // Vert layout helper: write one vertex's STRIDE_F floats.
       // cellUV per vertex: bl=(0,0), br=(1,0), tl=(0,1), tr=(1,1).
       function writeVert(
@@ -688,11 +726,8 @@ export async function buildTerrain(
         verts[vOff++] = x; verts[vOff++] = y; verts[vOff++] = z
         verts[vOff++] = shU; verts[vOff++] = shV
         verts[vOff++] = cellU; verts[vOff++] = cellV
-        verts[vOff++] = subUV01x; verts[vOff++] = subUV01y; verts[vOff++] = subUV01z; verts[vOff++] = subUV01w
-        verts[vOff++] = subUV23x; verts[vOff++] = subUV23y; verts[vOff++] = subUV23z; verts[vOff++] = subUV23w
-        verts[vOff++] = subSz01x; verts[vOff++] = subSz01y; verts[vOff++] = subSz01z; verts[vOff++] = subSz01w
-        verts[vOff++] = subSz23x; verts[vOff++] = subSz23y; verts[vOff++] = subSz23z; verts[vOff++] = subSz23w
-        verts[vOff++] = rowVx; verts[vOff++] = rowVy; verts[vOff++] = rowVz; verts[vOff++] = rowVw
+        verts[vOff++] = l0u; verts[vOff++] = l0v; verts[vOff++] = l1u; verts[vOff++] = l1v
+        verts[vOff++] = l2u; verts[vOff++] = l2v; verts[vOff++] = l3u; verts[vOff++] = l3v
       }
 
       writeVert(xL, yB, t.heights[bl], 0, 0, sBLu, sBLv) // BL
@@ -726,13 +761,14 @@ export async function buildTerrain(
   // floating cell-aligned dark blocks without their visible casters.
   const shadowTex: WebGLTexture | null = null
 
-  flog(`[terrain] built blended mesh: ${numCells} cells, ${numPalettes} palettes, atlas ${atlasW}×${atlasH}`)
+  flog(`[terrain] built layered mesh: ${numCells} cells, ${numPalettes} palettes, atlas ${atlasW}×${atlasH}, subSize=(${subWEff.toFixed(4)}, ${subHEff.toFixed(4)})`)
 
   return {
     drawCallCount: 1,
     draw(viewProj: Float32Array) {
       gl.useProgram(prog.program)
       gl.uniformMatrix4fv(prog.uViewProj, false, viewProj)
+      gl.uniform2f(prog.uSubSize, subWEff, subHEff)
 
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, atlas)
@@ -767,22 +803,16 @@ export async function buildTerrain(
       setAttr(prog.aPosition, 3)
       setAttr(prog.aShadowUV, 2)
       setAttr(prog.aCellUV, 2)
-      setAttr(prog.aSubUV01, 4)
-      setAttr(prog.aSubUV23, 4)
-      setAttr(prog.aSubSize01, 4)
-      setAttr(prog.aSubSize23, 4)
-      setAttr(prog.aRowV, 4)
+      setAttr(prog.aLayerUV01, 4)
+      setAttr(prog.aLayerUV23, 4)
 
       gl.drawElements(gl.TRIANGLES, triCount * 3, indexType, 0)
 
       if (prog.aPosition >= 0) gl.disableVertexAttribArray(prog.aPosition)
       if (prog.aShadowUV >= 0) gl.disableVertexAttribArray(prog.aShadowUV)
       if (prog.aCellUV >= 0) gl.disableVertexAttribArray(prog.aCellUV)
-      if (prog.aSubUV01 >= 0) gl.disableVertexAttribArray(prog.aSubUV01)
-      if (prog.aSubUV23 >= 0) gl.disableVertexAttribArray(prog.aSubUV23)
-      if (prog.aSubSize01 >= 0) gl.disableVertexAttribArray(prog.aSubSize01)
-      if (prog.aSubSize23 >= 0) gl.disableVertexAttribArray(prog.aSubSize23)
-      if (prog.aRowV >= 0) gl.disableVertexAttribArray(prog.aRowV)
+      if (prog.aLayerUV01 >= 0) gl.disableVertexAttribArray(prog.aLayerUV01)
+      if (prog.aLayerUV23 >= 0) gl.disableVertexAttribArray(prog.aLayerUV23)
     },
     dispose() {
       gl.deleteBuffer(vbo)
