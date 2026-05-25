@@ -84,6 +84,12 @@ interface TerrainDTO {
   shadow_map: string
   shadow_map_width: number
   shadow_map_height: number
+  // Per-cell skip mask (1 = don't render terrain quad). Mirrors HiveWE's
+  // gpu_ground_exists == 0 test. Cliff cells (non-ramp-entrance) get
+  // their vertical face covered by cliff MDX; rendering the terrain quad
+  // on top produces diagonal Z-interpolated slopes that punch through
+  // the cliff geometry. Length = (width-1)*(height-1), row-major.
+  cell_skip?: number[]
 }
 
 // Mirrors HiveWE's `get_tile_variation`: the per-corner variation byte
@@ -101,24 +107,34 @@ function pickSubTile(extended: boolean, variation: number): number {
   return 15
 }
 
-// Vertex shader: pure pass-through of per-cell layer attributes. The fragment
-// shader does all the compositing.
+// Vertex shader: pure pass-through of per-cell layer attributes plus per-
+// vertex normal for lighting. Normals are computed CPU-side from neighbor-
+// corner heights (same algorithm as HiveWE terrain.vert):
+//   normal = normalize((hL - hR, hD - hU, 2.0))
+// where hL/hR/hD/hU are the heights of the 4 cardinal neighbors (one tile-
+// width = 128 studs away, but the 2.0 in the Z slot already bakes the
+// implicit 2*128-wide finite-difference into the slope). HiveWE uses
+// vertex-shader SSBO lookup; we precompute on the CPU since per-vertex
+// attribute upload is cheap and WebGL1 doesn't have SSBOs anyway.
 const VERT_SHADER = `
 attribute vec3 a_position;
 attribute vec2 a_shadowUV;
 attribute vec2 a_cellUV;
 attribute vec4 a_layerUV01; // base.uv, layer1.uv
 attribute vec4 a_layerUV23; // layer2.uv, layer3.uv
+attribute vec3 a_normal;
 uniform mat4 u_viewProj;
 varying vec2 v_shadowUV;
 varying vec2 v_cellUV;
 varying vec4 v_layerUV01;
 varying vec4 v_layerUV23;
+varying vec3 v_normal;
 void main() {
   v_shadowUV = a_shadowUV;
   v_cellUV = a_cellUV;
   v_layerUV01 = a_layerUV01;
   v_layerUV23 = a_layerUV23;
+  v_normal = a_normal;
   gl_Position = u_viewProj * vec4(a_position, 1.0);
 }
 `.trim()
@@ -146,10 +162,12 @@ uniform sampler2D u_atlas;
 uniform sampler2D u_shadowTex;
 uniform bool u_hasShadow;
 uniform vec2 u_subSize;     // (sub-tile width, sub-tile height) in atlas UV
+uniform vec3 u_lightDir;    // unit vector; matches HiveWE map.ixx (normalize(1,1,-3))
 varying vec2 v_shadowUV;
 varying vec2 v_cellUV;
 varying vec4 v_layerUV01;
 varying vec4 v_layerUV23;
+varying vec3 v_normal;
 
 vec4 sampleLayer(vec2 lo) {
   // lo.x < -0.5 = sentinel = no layer here.
@@ -178,6 +196,18 @@ void main() {
 
   vec4 l3 = sampleLayer(v_layerUV23.zw);
   col = mix(col, l3.rgb, l3.a);
+
+  // Half-Lambert lighting, exact port of HiveWE terrain.frag line 42-44:
+  //   contribution = (dot(-light_direction, normal) + 1) * 0.5
+  //   color *= clamp(contribution, 0, 1)
+  // The +1 then *0.5 maps a [-1..1] dot to [0..1] (so backfaces aren't
+  // fully black). With HiveWE's default light (normalize(1,1,-3)) a flat
+  // ground normal (0,0,1) yields contribution = (0.905 + 1)/2 = 0.95.
+  // This is the missing piece that gave wc3-forge over-saturated raw-DDS
+  // teal where HiveWE shows neutral lit ground.
+  vec3 n = normalize(v_normal);
+  float contribution = (dot(-u_lightDir, n) + 1.0) * 0.5;
+  col *= clamp(contribution, 0.0, 1.0);
 
   if (u_hasShadow) {
     float shadow = texture2D(u_shadowTex, v_shadowUV).r;
@@ -216,11 +246,13 @@ function buildProgram(gl: WebGLRenderingContext) {
     aCellUV: gl.getAttribLocation(program, 'a_cellUV'),
     aLayerUV01: gl.getAttribLocation(program, 'a_layerUV01'),
     aLayerUV23: gl.getAttribLocation(program, 'a_layerUV23'),
+    aNormal: gl.getAttribLocation(program, 'a_normal'),
     uViewProj: gl.getUniformLocation(program, 'u_viewProj')!,
     uAtlas: gl.getUniformLocation(program, 'u_atlas')!,
     uShadowTex: gl.getUniformLocation(program, 'u_shadowTex')!,
     uHasShadow: gl.getUniformLocation(program, 'u_hasShadow')!,
     uSubSize: gl.getUniformLocation(program, 'u_subSize')!,
+    uLightDir: gl.getUniformLocation(program, 'u_lightDir')!,
   }
 }
 
@@ -563,27 +595,89 @@ export async function buildTerrain(
   const SENTINEL_U = -1.0
   const SENTINEL_V = -1.0
 
+  // ---- Pre-compute per-corner normals from neighboring heights ----
+  //
+  // Port of HiveWE terrain.vert:
+  //   normal = normalize(vec3(hL - hR, hD - hU, 2.0))
+  // where hL/hR/hD/hU are heights of the 4 cardinal neighbors. HiveWE
+  // does this in the vertex shader from an SSBO of CORNER_HEIGHT (the
+  // SMOOTH height without the cliff-layer step), so cliff steps don't
+  // make the lighting fight itself. We don't have a smooth-only buffer
+  // — t.heights is FinalZ which includes the cliff step. Using FinalZ
+  // for lighting produces sensible results except at exactly-on-cliff
+  // corners (where the normal points sideways and the cell darkens),
+  // but those cells are exactly the ones we SKIP in the cell_skip pass.
+  // So in practice the visible cells all have neighbor pairs at the
+  // same layer-height and the normal computation is well-behaved.
+  //
+  // Z slope baked-in factor: HiveWE's "2.0" in the Z slot represents
+  // 2 tile-widths (left-to-right = 2 tiles apart) without dividing the
+  // dh by 2*tile. In HiveWE units 1 tile = 1, in our units 1 tile = 128
+  // studs. To keep the slope-to-height ratio the same as HiveWE:
+  //   normal = normalize((hL - hR) / 256, (hD - hU) / 256, 1.0)
+  // which simplifies to
+  //   normal = normalize(hL - hR, hD - hU, 256.0)
+  // and after normalize gives identical direction to HiveWE's per-tile
+  // formula. Verified: flat ground (all heights equal) yields (0,0,1).
+  const NORMAL_Z_SCALE = 256.0
+  const normals = new Float32Array(N * 3) // per-corner (x,y,z)
+  for (let j = 0; j < H; j++) {
+    for (let i = 0; i < W; i++) {
+      const idx = j * W + i
+      const hL = t.heights[j * W + Math.max(i - 1, 0)]
+      const hR = t.heights[j * W + Math.min(i + 1, W - 1)]
+      const hD = t.heights[Math.max(j - 1, 0) * W + i]
+      const hU = t.heights[Math.min(j + 1, H - 1) * W + i]
+      const nx = hL - hR
+      const ny = hD - hU
+      const nz = NORMAL_Z_SCALE
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
+      normals[idx * 3 + 0] = nx / len
+      normals[idx * 3 + 1] = ny / len
+      normals[idx * 3 + 2] = nz / len
+    }
+  }
+
+  // ---- Pre-count cells we'll actually emit (cliff cells get skipped) ----
+  //
+  // Per HiveWE update_ground_exists: a cell is skipped when corner_cliff
+  // is set AND it's not a ramp entrance (and not a special-doodad cell —
+  // unimplemented here, low signal in test maps). The Go side computed
+  // this into t.cell_skip already; we just have to honor it. Pre-counting
+  // lets us size the typed arrays exactly so we don't carry sentinel
+  // verts/indices that the GPU would skip anyway.
+  const cellSkip = t.cell_skip || []
+  let emittedCells = 0
+  for (let k = 0; k < numCells; k++) {
+    if (!cellSkip[k]) emittedCells++
+  }
+  if (emittedCells === 0) {
+    flog(`[terrain] all ${numCells} cells skipped (entire map is cliff?) — aborting`)
+    return null
+  }
+  flog(`[terrain] cell-skip: rendering ${emittedCells}/${numCells} cells (skipped ${numCells - emittedCells} cliff cells)`)
+
   // ---- Build whole-map mesh (single VBO/IBO) ----
   //
   // Per-vertex: pos(3) + shadowUV(2) + cellUV(2) + layerUV01(4) + layerUV23(4)
-  //           = 15 floats.
+  //           + normal(3) = 18 floats.
   //
-  // 4 verts per cell × numCells cells. uint32 indices when vCount > 65535
+  // 4 verts per cell × emittedCells cells. uint32 indices when vCount > 65535
   // (needs OES_element_index_uint, ships universally in modern browsers).
   const uintExt = gl.getExtension('OES_element_index_uint')
   const has32Bit = !!uintExt
 
-  const vCount = numCells * 4
+  const vCount = emittedCells * 4
   const need32 = vCount > 65535
   if (need32 && !has32Bit) {
     flog(`[terrain] needs uint32 indices (${vCount} verts) but OES_element_index_uint missing`)
     return null
   }
-  const STRIDE_F = 15
+  const STRIDE_F = 18
   const verts = new Float32Array(vCount * STRIDE_F)
   const indices = need32
-    ? new Uint32Array(numCells * 6)
-    : new Uint16Array(numCells * 6)
+    ? new Uint32Array(emittedCells * 6)
+    : new Uint16Array(emittedCells * 6)
   const indexType = need32 ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT
 
   const cx = t.center_offset[0]
@@ -602,6 +696,8 @@ export async function buildTerrain(
 
   for (let j = 0; j < H - 1; j++) {
     for (let i = 0; i < W - 1; i++) {
+      const cellIdx = j * (W - 1) + i
+      if (cellSkip[cellIdx]) continue
       const bl = j * W + i
       const br = bl + 1
       const tl = bl + W
@@ -718,22 +814,27 @@ export async function buildTerrain(
       // Per-cell layer attributes are the same across all 4 verts.
       // Vert layout helper: write one vertex's STRIDE_F floats.
       // cellUV per vertex: bl=(0,0), br=(1,0), tl=(0,1), tr=(1,1).
+      // Normal is per-corner (precomputed in `normals` from neighbor heights).
       function writeVert(
         x: number, y: number, z: number,
         cellU: number, cellV: number,
         shU: number, shV: number,
+        cornerIdx: number,
       ) {
         verts[vOff++] = x; verts[vOff++] = y; verts[vOff++] = z
         verts[vOff++] = shU; verts[vOff++] = shV
         verts[vOff++] = cellU; verts[vOff++] = cellV
         verts[vOff++] = l0u; verts[vOff++] = l0v; verts[vOff++] = l1u; verts[vOff++] = l1v
         verts[vOff++] = l2u; verts[vOff++] = l2v; verts[vOff++] = l3u; verts[vOff++] = l3v
+        verts[vOff++] = normals[cornerIdx * 3 + 0]
+        verts[vOff++] = normals[cornerIdx * 3 + 1]
+        verts[vOff++] = normals[cornerIdx * 3 + 2]
       }
 
-      writeVert(xL, yB, t.heights[bl], 0, 0, sBLu, sBLv) // BL
-      writeVert(xR, yB, t.heights[br], 1, 0, sBRu, sBRv) // BR
-      writeVert(xL, yT, t.heights[tl], 0, 1, sTLu, sTLv) // TL
-      writeVert(xR, yT, t.heights[tr], 1, 1, sTRu, sTRv) // TR
+      writeVert(xL, yB, t.heights[bl], 0, 0, sBLu, sBLv, bl) // BL
+      writeVert(xR, yB, t.heights[br], 1, 0, sBRu, sBRv, br) // BR
+      writeVert(xL, yT, t.heights[tl], 0, 1, sTLu, sTLv, tl) // TL
+      writeVert(xR, yT, t.heights[tr], 1, 1, sTRu, sTRv, tr) // TR
 
       indices[iOff++] = baseVert + 0
       indices[iOff++] = baseVert + 1
@@ -754,7 +855,15 @@ export async function buildTerrain(
 
   const prog = buildProgram(gl)
   const STRIDE_B = STRIDE_F * 4
-  const triCount = numCells * 2
+  const triCount = emittedCells * 2
+
+  // HiveWE map.ixx: light_direction = normalize(vec3(1, 1, -3)). Pre-computed
+  // so the per-frame draw doesn't redo the sqrt.
+  const lightDir = (() => {
+    const x = 1, y = 1, z = -3
+    const len = Math.sqrt(x * x + y * y + z * z)
+    return new Float32Array([x / len, y / len, z / len])
+  })()
 
   // war3map.shd is the baked doodad-cast shadow map. HiveWE skips rendering it;
   // we follow suit because at game-scale viewport zooms the shadows appear as
@@ -769,6 +878,7 @@ export async function buildTerrain(
       gl.useProgram(prog.program)
       gl.uniformMatrix4fv(prog.uViewProj, false, viewProj)
       gl.uniform2f(prog.uSubSize, subWEff, subHEff)
+      gl.uniform3fv(prog.uLightDir, lightDir)
 
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, atlas)
@@ -805,6 +915,7 @@ export async function buildTerrain(
       setAttr(prog.aCellUV, 2)
       setAttr(prog.aLayerUV01, 4)
       setAttr(prog.aLayerUV23, 4)
+      setAttr(prog.aNormal, 3)
 
       gl.drawElements(gl.TRIANGLES, triCount * 3, indexType, 0)
 
@@ -813,6 +924,7 @@ export async function buildTerrain(
       if (prog.aCellUV >= 0) gl.disableVertexAttribArray(prog.aCellUV)
       if (prog.aLayerUV01 >= 0) gl.disableVertexAttribArray(prog.aLayerUV01)
       if (prog.aLayerUV23 >= 0) gl.disableVertexAttribArray(prog.aLayerUV23)
+      if (prog.aNormal >= 0) gl.disableVertexAttribArray(prog.aNormal)
     },
     dispose() {
       gl.deleteBuffer(vbo)
