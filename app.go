@@ -282,6 +282,28 @@ type TerrainDTO struct {
 	// the bug Problem 1 fixes. Stored as []uint32 for the same
 	// base64-marshal-trap reason as GroundTex.
 	CellSkip []uint32 `json:"cell_skip"`
+	// CliffDisplacement is the per-corner SMOOTH height (just `Tilepoint.Z()`,
+	// in studs) — i.e. the per-corner wobble WITHOUT the layer-step offset.
+	// This is what the cliff vertex shader's per-vertex displacement consumes.
+	//
+	// CRITICAL: this is NOT the same as `Heights` (which is FinalZ = Z() +
+	// (layer-2)*128). The cliff MDX geometry ALREADY encodes the full layer-step
+	// height in its vertex Z range (a 1-step cliff MDX has vertices spanning
+	// vPos.z = 0..128 studs). If we displaced cliffs by the full FinalZ, the
+	// layer-step contribution would be applied TWICE (once via MDX geometry,
+	// once via shader displacement) producing visibly 2×-tall cliff walls.
+	//
+	// This matches HiveWE's binding split (terrain.ixx:613 vs :652): the
+	// terrain shader's SSBO binding 0 is `cliff_level_buffer` (full
+	// FinalGroundHeights), but the cliff shader's SSBO binding 0 is
+	// `ground_height_buffer` (CORNER_HEIGHT only — the wobble). HiveWE's cliff
+	// shader pulls the layer-step contribution from `vOffset.z = min_layer - 2`
+	// and from each MDX vertex's own Z; the per-corner displacement adds ONLY
+	// the small wobble adjustment.
+	//
+	// Stored as parallel-indexed with `Heights` (length = Width*Height,
+	// row-major); each entry is the corresponding Tilepoint's `Z()` in studs.
+	CliffDisplacement []float32 `json:"cliff_displacement"`
 }
 
 // GetTerrain returns the terrain grid for rendering. Empty if no map loaded or
@@ -295,6 +317,7 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 	H := int(t.Height)
 	n := W * H
 	heights := make([]float32, n)
+	cliffDisp := make([]float32, n) // per-corner SMOOTH height (Z() only), in studs
 	ground := make([]uint32, n)
 	layer := make([]uint32, n)
 	cliffTex := make([]uint32, n)
@@ -304,10 +327,16 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 	waterZ := make([]float32, n)
 	hasWater := make([]uint32, n)
 	for i := 0; i < n; i++ {
-		// FinalZ includes the layer_height contribution; cliffs would otherwise
-		// render as a flat slab. The JS terrain mesh + cliff transition logic
-		// both depend on this combined Z.
+		// FinalZ includes the layer_height contribution; the terrain mesh
+		// renders corners at this world Z directly.
 		heights[i] = t.Tiles[i].FinalZ()
+		// CliffDisplacement is the per-corner SMOOTH height (just the wobble,
+		// no layer-step), in studs. Used by the cliff vertex shader's
+		// per-vertex displacement. HiveWE binds CORNER_HEIGHT (smooth) to the
+		// cliff shader (terrain.ixx:652), NOT FinalGroundHeights — because the
+		// cliff MDX geometry already encodes the layer-step rise in its
+		// vertex Z values, so adding (layer-2)*128 again would double it.
+		cliffDisp[i] = t.Tiles[i].Z()
 		ground[i] = uint32(t.Tiles[i].GroundTexIdx())
 		layer[i] = uint32(t.Tiles[i].LayerHeight)
 		cliffTex[i] = uint32(t.Tiles[i].CliffTexIdx())
@@ -646,7 +675,8 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		ShadowMap:       shadowBytes,
 		ShadowMapWidth:  shadowW,
 		ShadowMapHeight: shadowH,
-		CellSkip:        cellSkip,
+		CellSkip:          cellSkip,
+		CliffDisplacement: cliffDisp,
 	}, nil
 }
 

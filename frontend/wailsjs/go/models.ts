@@ -230,6 +230,7 @@ export namespace main {
 	    shadow_map_width: number;
 	    shadow_map_height: number;
 	    cell_skip: number[];
+	    cliff_displacement: number[];
 	
 	    static createFrom(source: any = {}) {
 	        return new TerrainDTO(source);
@@ -260,6 +261,7 @@ export namespace main {
 	        this.shadow_map_width = source["shadow_map_width"];
 	        this.shadow_map_height = source["shadow_map_height"];
 	        this.cell_skip = source["cell_skip"];
+	        this.cliff_displacement = source["cliff_displacement"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
