@@ -54,115 +54,13 @@ import {
 patchMdxParser()
 
 const MV: any = (MV_ns as any).default ?? MV_ns
-
-// ────────────────────────────────────────────────────────────────────────────
-// Corrective patch: fix mdx-parser-patch.ts's broken AnimatedObject.readAnimations.
-//
-// **Root cause of the "doodad bones don't animate" symptom:**
-// mdx-parser-patch.ts installs a "safety belt" readAnimations override on
-// AnimatedObject.prototype (the parent class of Layer, Bone, Helper, Light,
-// ParticleEmitter, etc. — every animated GenericObject). The override tries
-// to look up animation tags ("KGTR", "KGRT", "KGSC", "KMTA", …) in
-// `mdx-m3-viewer/parsers/mdlx/AnimationMap` via the public `MV.parsers.mdlx`
-// surface. But that namespace does NOT export AnimationMap (see
-// `parsers/mdlx/index.js` — only Model/Sequence/Material/Layer/Texture/etc.
-// are re-exported). So the patch's `animationMap` resolves to `null`, the
-// `entry` lookup is always `undefined`, and the patch's else-branch
-// `stream.index = end; return` SKIPS ALL ANIMATION TRACKS for every chunk.
-//
-// Consequence chain (silent at every layer):
-//   1. parser: every bone ends up with animations=[] (zero tracks)
-//   2. mdx handler's runtime AnimatedObject builds an empty animations Map
-//   3. addVariants finds nothing → variants['translation'/'rotation']=[0…]
-//   4. modelinstance.updateNodes: `forced || variants[type][sequence]` is
-//      false after the first frame → skips animation lookup → bones keep
-//      their initial pose forever
-//   5. updateBoneTexture still uploads the (now-static) world matrices
-//      every frame, so geometry RENDERS — it just renders frozen
-//   6. Particle emitters are SEPARATE — they tick on their own per-instance
-//      update path that doesn't depend on bone animations, so they emit fine.
-//      That's why the user sees particles working but no skeletal motion.
-//
-// The bug doesn't affect units AS MUCH because the lib's setSequence/
-// setTeamColor/etc. paths set `forced=true`, and unit setUnitAnimation/
-// rollSequence triggers from sequenceEnded re-roll keep forced firing. But
-// even units have subtle missing motion (within-sequence interpolation
-// frames) — it's just less obvious because the reroll keeps things fresh.
-//
-// **The fix:** re-import AnimationMap from the lib's INTERNAL deep path
-// (`mdx-m3-viewer/dist/cjs/parsers/mdlx/animationmap`), then re-install a
-// CORRECT readAnimations that actually consults the map. The lib's original
-// implementation is fine — we just need the map.
-//
-// Belongs in mdx-parser-patch.ts conceptually, but that file is owned by
-// another agent in this session; the fix is applied here from
-// scene-instances.ts because that's the only file this agent is permitted
-// to modify, and the corrective patch must run at module-load time before
-// any MDX model is parsed (which is exactly when this module is imported by
-// App.svelte).
-// ────────────────────────────────────────────────────────────────────────────
-import animationMapModule from 'mdx-m3-viewer/dist/cjs/parsers/mdlx/animationmap.js'
-const REPATCHED_FLAG = '__wc3ForgeReadAnimationsRepatched'
-;(function repatchReadAnimations() {
-  if ((globalThis as any)[REPATCHED_FLAG]) return
-  const animationMap: Record<string, [string, any]> | null =
-    (animationMapModule as any)?.default ?? (animationMapModule as any) ?? null
-  if (!animationMap || typeof animationMap !== 'object' || !animationMap['KGTR']) {
-    flog('[readAnimations re-patch] animation map lookup failed — bones will be static; symptom: doodads/units render but never animate')
-    return
-  }
-  const Layer = MV?.parsers?.mdlx?.Layer
-  if (!Layer) {
-    flog('[readAnimations re-patch] Layer class missing — cannot re-patch')
-    return
-  }
-  const AnimatedObjectProto = Object.getPrototypeOf(Layer.prototype)
-  if (!AnimatedObjectProto || typeof AnimatedObjectProto.readAnimations !== 'function') {
-    flog('[readAnimations re-patch] AnimatedObject prototype missing readAnimations')
-    return
-  }
-  // Replicates the lib's original implementation
-  // (parsers/mdlx/animatedobject.js readAnimations) but keeps the patch's
-  // K-prefix recovery so a malformed track tag doesn't kill the whole chunk
-  // parse. Pushes parsed animations onto `this.animations`, same shape the
-  // lib's downstream code (handlers/mdx/animatedobject.js constructor)
-  // expects when it iterates `object.animations` to build the runtime Map.
-  AnimatedObjectProto.readAnimations = function correctReadAnimations(
-    stream: any,
-    size: number,
-  ): void {
-    const end = stream.index + size
-    while (stream.index < end) {
-      const name = stream.readBinary(4)
-      // K-prefix recovery: animation tags ('KGTR', 'KMTA', …) always start
-      // with 'K'. A non-K byte means misaligned read or unknown extension —
-      // skip to chunk end so the surrounding parse stays aligned rather than
-      // crashing the model.
-      if (
-        typeof name !== 'string' ||
-        name.length < 1 ||
-        name.charCodeAt(0) !== 0x4b /* 'K' */
-      ) {
-        stream.index = end
-        return
-      }
-      const entry = animationMap[name]
-      if (!entry) {
-        // Unknown K-prefixed tag — also skip to end. Animations are visual
-        // polish; geometry has already been read by this point so the model
-        // still renders (just without the animation for that property).
-        stream.index = end
-        return
-      }
-      const Ctor = entry[1]
-      const animation = new Ctor()
-      animation.readMdx(stream, name)
-      this.animations.push(animation)
-    }
-  }
-  ;(globalThis as any)[REPATCHED_FLAG] = true
-  flog('[readAnimations re-patch] installed correct AnimatedObject.readAnimations (animation track count for downstream parses will be > 0)')
-})()
+// The previous version of this file ran a corrective re-patch here at module
+// load to fix a broken readAnimations override in mdx-parser-patch.ts (commit
+// dc0aaa0). That correction has been consolidated INTO mdx-parser-patch.ts
+// itself — see the top-of-file imports and `patchMdxParser()` body there for
+// the correct AnimationMap source and the patched readAnimations. With one
+// canonical patch site, double-patching isn't possible and the failure mode
+// (silent fallback to "every animation tag is unknown") can't recur.
 
 // Defensive access to the lib's namespaced classes. CJS+ESM interop is
 // finicky enough that a single bundler config change can move things from
@@ -413,6 +311,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // initial state has it framing the world origin from a 45°-down angle, and
   // loadMap() will re-frame whenever a new map opens.
   const camera = createCamera(canvas, scene.camera)
+  ;(window as any).__camera = camera // devtools + verification-script access
 
   // Visible-error logger: dedupe by (message + target URL) so a single
   // missing asset doesn't spam the log thousands of times per second.
@@ -481,6 +380,28 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   }
   // Background color (used by our own clear call now that scene.alpha=true).
   const bg = [0.07, 0.07, 0.09]
+  // Real-dt tracking for viewer.update(). Mdx-m3-viewer's contract is that
+  // `viewer.update(dt)` receives MILLISECONDS elapsed since the previous
+  // tick (see viewer.js line 425: `dt *= 0.001` to convert internally to
+  // seconds, then each MdxModelInstance.updateAnimations multiplies back by
+  // 1000 to advance KGTR/KGRT/KGSC keyframe times — which live in ms).
+  //
+  // The previous version passed a HARDCODED `1000 / 60` (= 16.67ms), which
+  // is correct only at exactly 60 Hz. On a high-refresh display (120 Hz =
+  // 8.33ms real, 144 Hz = 6.94ms real, 240 Hz = 4.17ms real) RAF fires
+  // faster — but the hardcoded value still advanced the animation by 16.67ms
+  // per frame, so all WC3 animations played at 2×, 2.4×, 4× speed
+  // respectively. (User reported "a little faster than HiveWE" — which
+  // matches the common 120Hz case.) HiveWE's `update(delta)` in
+  // skeletal_model_instance.ixx uses the real frame delta from the editor's
+  // QElapsedTimer; mirroring that here.
+  //
+  // Clamped to 250ms to keep a stalled tab from advancing animations by
+  // multiple seconds on the first frame after wake (would skip past
+  // non-looping idle re-rolls and look jarring). Mirrors HiveWE's
+  // `std::clamp(delta, 0.0, 0.5)` on the seconds path.
+  let lastFrameTs = performance.now()
+  const MAX_DT_MS = 250
   const loop = () => {
     if (!crashed) {
       try {
@@ -501,7 +422,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         //   3. terrain.draw — writes color + depth across the framebuffer
         //   4. scene.render — units render on top, depth-tested vs terrain
         const gl = (viewer as any).gl as WebGLRenderingContext
-        viewer.update(1000 / 60)
+        const nowTs = performance.now()
+        const dtMs = Math.min(MAX_DT_MS, Math.max(0, nowTs - lastFrameTs))
+        lastFrameTs = nowTs
+        viewer.update(dtMs)
         // Re-roll stand variation when a non-looping idle finishes. Mirrors
         // mdx-m3-viewer's Widget.update (handlers/w3x/widget.ts): MDX models
         // typically have N stand variations marked nonLooping=1, so most

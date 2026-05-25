@@ -19,16 +19,30 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// startupCameraSpec holds the value of --camera so App.startup can forward
+// it to the frontend via Wails event. Set by main() before wails.Run is
+// invoked; read by App.startup. Defaults to "" which the frontend treats as
+// "no override; use whatever framing reloadMap chose".
+var startupCameraSpec string
+
 func main() {
 	var headless bool
 	var noBridge bool
 	var openPath string
 	var startReforged bool
+	var cameraSpec string
 	flag.BoolVar(&headless, "headless", false, "run the bridge only; do not open the GUI window")
 	flag.BoolVar(&noBridge, "no-bridge", false, "skip starting the MCP bridge (for GUI-only dev)")
 	flag.StringVar(&openPath, "open", "", "extracted map folder to load on startup (skips Open Map dialog)")
 	flag.BoolVar(&startReforged, "reforged", false, "start in HD (Reforged) graphics mode; default is SD (Classic)")
+	// Verification-automation hook: lets external test drivers pin the camera
+	// to a known feature on startup without synthetic mouse input (which
+	// WebView2 drops). Format: "x,y,z,distance" with z and distance optional.
+	// Plumbed into the JS via a Wails event in App.startup so the frontend
+	// can apply it on the first map-load.
+	flag.StringVar(&cameraSpec, "camera", "", "initial camera spec 'x,y,z,distance' (z+distance optional)")
 	flag.Parse()
+	startupCameraSpec = cameraSpec
 
 	if startReforged {
 		reforgedMode.Store(true)

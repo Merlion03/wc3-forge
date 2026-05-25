@@ -40,6 +40,13 @@ export interface RTSCamera {
   frame(centerX: number, centerY: number, span: number): void
   /** Direct setter for pivot if you have a precise spot to focus on. */
   setPivot(x: number, y: number, z?: number): void
+  /**
+   * Direct setter for camera-to-pivot distance. Clamped to the controller's
+   * own zoom-range bounds. Useful for verification automation that needs to
+   * zoom in on a specific feature without going through wheel input (which
+   * WebView2 drops on synthetic mouse_event). For programmatic close-ups.
+   */
+  setDistance(d: number): void
   /** Update the projection aspect ratio. Cheap no-op if unchanged. */
   setAspect(aspect: number): void
   /** Detach all input listeners. */
@@ -212,6 +219,11 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
       pivot[0] = x
       pivot[1] = y
       pivot[2] = z
+      applyToViewer()
+    },
+    setDistance(d: number) {
+      if (!isFinite(d) || d <= 0) return
+      distance = Math.max(DIST_MIN, Math.min(DIST_MAX, d))
       applyToViewer()
     },
     setAspect(a: number) {
