@@ -11,6 +11,7 @@
   import type { main, unitsdoo } from '../wailsjs/go/models'
   import { createScene, type SceneAPI, type PickHit, type SelectMode } from './scene-instances'
   import Toast from './Toast.svelte'
+  import Splitter from './Splitter.svelte'
   import { showToast } from './toast'
 
   // Wails drops struct typedefs from models.ts when they appear as map values,
@@ -54,6 +55,94 @@
   let scene: SceneAPI | null = null
   let dirty: boolean = false
   let saving: boolean = false
+
+  // ----- File menu (header dropdown) -----
+  //
+  // Click File button → toggles open. Click outside / Escape → closes. Open
+  // Map / Save / Close items live inside; the previous header buttons for
+  // these were moved here so the header reads as "File-menu + view-toggles"
+  // rather than a mixed action+toggle strip.
+  let fileMenuOpen: boolean = false
+  let fileMenuEl: HTMLDivElement | null = null
+  function toggleFileMenu() { fileMenuOpen = !fileMenuOpen }
+  function onDocClickForFileMenu(e: MouseEvent) {
+    if (!fileMenuOpen) return
+    if (fileMenuEl && fileMenuEl.contains(e.target as Node)) return
+    fileMenuOpen = false
+  }
+  function onDocKeyForFileMenu(e: KeyboardEvent) {
+    if (e.key === 'Escape' && fileMenuOpen) {
+      fileMenuOpen = false
+      e.stopPropagation()
+    }
+  }
+  // Menu-item adapter: closes the menu THEN runs the action so the dropdown
+  // animation/visibility doesn't linger over a modal (Open Map's file dialog,
+  // notably).
+  function runMenuAction(fn: () => unknown) {
+    return () => {
+      fileMenuOpen = false
+      void fn()
+    }
+  }
+
+  // ----- Explorer section sizes -----
+  //
+  // The Explorer is split into stacked sections (Heroes / Units & Items /
+  // Markers / Doodads) separated by drag handles. Sizes are pixel-based and
+  // tracked per section id. The LAST visible section uses flex: 1 1 auto so
+  // it absorbs leftover space + window-resize delta — that keeps the splitter
+  // ratios sensible across window resize without strict pixel math.
+  //
+  // Defaults chosen so that on a typical map (a few heroes, lots of units &
+  // doodads) Doodads gets the lion's share by being the trailing flex-fill
+  // section. Heroes/Units/Markers start small so a Doodad-heavy map shows
+  // doodads prominently right after open.
+  //
+  // Sizes survive map reload but reset on page reload (not persisted). If we
+  // ever want persistence, drop them into localStorage on dragEnd.
+  type SectionId = 'heroes' | 'units' | 'markers' | 'doodads'
+  const DEFAULT_SECTION_SIZE: Record<SectionId, number> = {
+    heroes: 140,
+    units: 180,
+    markers: 120,
+    doodads: 260, // last section ends up flex:1 1 auto regardless, but default is the seed if it's not last
+  }
+  let sectionSizes: Record<SectionId, number> = { ...DEFAULT_SECTION_SIZE }
+  const MIN_SECTION_HEIGHT = 56 // header (~28) + ~28 of content visible
+
+  // Returns the ordered list of visible major sections. Used by the Explorer
+  // markup so non-present sections are skipped entirely and splitters only
+  // appear between sections that actually render.
+  function visibleSections(): SectionId[] {
+    const out: SectionId[] = []
+    if (groups.some(g => g.id === 'heroes')) out.push('heroes')
+    if (groups.some(g => g.id === 'units')) out.push('units')
+    if (groups.some(g => g.id === 'markers')) out.push('markers')
+    if (doodadCount > 0) out.push('doodads')
+    return out
+  }
+  // Reactive recompute when units/doodads change (open new map, etc.). The
+  // explicit dep references (groups, doodadCount) make Svelte's compiler pick
+  // them up — visibleSections() reads from them but the static analyzer
+  // doesn't follow through function calls. Without this line, opening a new
+  // map would leave the previous map's section list rendered.
+  let visSections: SectionId[] = []
+  $: {
+    void groups
+    void doodadCount
+    visSections = visibleSections()
+  }
+
+  // Splitter drag: id = the section ABOVE the splitter being dragged. Adjusts
+  // that section's pixel size by dy; clamps to MIN_SECTION_HEIGHT. The
+  // section BELOW (which may be flex:1:1:auto or pixel-sized) absorbs the
+  // delta implicitly via the flexbox model.
+  function onSplitterDrag(id: SectionId, dy: number) {
+    const next = Math.max(MIN_SECTION_HEIGHT, sectionSizes[id] + dy)
+    if (next === sectionSizes[id]) return
+    sectionSizes = { ...sectionSizes, [id]: next }
+  }
 
   const SEL_EVENT = 'wc3-forge:selection-changed'
   const MAP_EVENT = 'wc3-forge:map-changed'
@@ -175,6 +264,11 @@
     ingestSelection(sel)
     try { dirty = await IsDirty() } catch { dirty = false }
     window.addEventListener('keydown', onGlobalKeyDown)
+    // File-menu dismiss: click-outside (capture so an in-bubble preventDefault
+    // can't swallow it) + Escape (non-capture, lets local Esc handlers run
+    // first if anything claims it).
+    document.addEventListener('mousedown', onDocClickForFileMenu, true)
+    document.addEventListener('keydown', onDocKeyForFileMenu)
   })
 
   // Global Ctrl+S / Cmd+S → save. preventDefault() stops the browser's
@@ -281,6 +375,8 @@
     EventsOff(ENTITY_EVENT)
     EventsOff(DEV_ANIM_EVENT)
     window.removeEventListener('keydown', onGlobalKeyDown)
+    document.removeEventListener('mousedown', onDocClickForFileMenu, true)
+    document.removeEventListener('keydown', onDocKeyForFileMenu)
     scene?.dispose()
   })
 
@@ -601,6 +697,42 @@
 <main>
   <header>
     <h1>wc3-forge</h1>
+    <div class="file-menu" bind:this={fileMenuEl}>
+      <button class="file-btn"
+              class:open={fileMenuOpen}
+              on:click={toggleFileMenu}
+              aria-haspopup="menu"
+              aria-expanded={fileMenuOpen}
+              title="File menu">
+        File <span class="caret">▾</span>
+      </button>
+      {#if fileMenuOpen}
+        <div class="file-dropdown" role="menu">
+          <button class="file-item"
+                  role="menuitem"
+                  on:click={runMenuAction(pickAndOpen)}
+                  disabled={busy}>
+            <span class="file-item-label">Open Map…</span>
+          </button>
+          <button class="file-item"
+                  role="menuitem"
+                  on:click={runMenuAction(doSave)}
+                  disabled={!status.loaded || !dirty || saving}
+                  class:dirty
+                  title="Save pending edits (Ctrl+S).">
+            <span class="file-item-label">Save{dirty ? ' •' : ''}</span>
+            <span class="file-item-shortcut">Ctrl+S</span>
+          </button>
+          <div class="file-sep" role="separator"></div>
+          <button class="file-item"
+                  role="menuitem"
+                  on:click={runMenuAction(close)}
+                  disabled={!status.loaded || busy}>
+            <span class="file-item-label">Close</span>
+          </button>
+        </div>
+      {/if}
+    </div>
     <div class="status-strip">
       {#if status.loaded}
         <span class="map-name">{status.name || '(untitled)'}</span>
@@ -609,15 +741,6 @@
       {/if}
     </div>
     <div class="actions">
-      {#if status.loaded}
-        <button on:click={doSave}
-                class="mode-toggle save-pill"
-                class:dirty
-                disabled={saving || !dirty}
-                title="Save pending edits (Ctrl+S).">
-          Save{dirty ? ' •' : ''}
-        </button>
-      {/if}
       <button on:click={togglePathing}
               class="mode-toggle"
               class:on={pathingVisible}
@@ -630,10 +753,6 @@
               title="Toggle Reforged graphics. Reloads the current map without resetting the camera.">
         Reforged Graphics{reforged ? ' ✓' : ''}
       </button>
-      <button on:click={pickAndOpen} disabled={busy}>Open Map…</button>
-      {#if status.loaded}
-        <button on:click={close} disabled={busy} class="secondary">Close</button>
-      {/if}
     </div>
   </header>
 
@@ -645,47 +764,67 @@
       {#if !status.loaded}
         <div class="empty">No map loaded.</div>
       {:else}
-        {#each groups as g (g.id)}
-          <div class="category">
-            <header class="cat-header">{g.label} <span class="count">{g.entries.length}</span></header>
-            <ul>
-              {#each g.entries as u (u.creation_number)}
-                <li class:selected={selectedIds.has(u.creation_number)}
-                    on:click={(e) => clickRow(e, 'unit', u.creation_number)}
-                    title="{u.type_id} #{u.creation_number}">
-                  <span class="name">{unitDisplayName(u)}</span>
-                  <span class="cat dim">{unitCategory(u)}</span>
-                  <button class="pan-btn"
-                          on:click={(e) => panToEntity(e, u.position)}
-                          title="Pan camera to this entity">⊕</button>
-                </li>
-              {/each}
-            </ul>
-          </div>
-        {/each}
-        {#if doodadCount > 0}
-          <div class="category">
-            <header class="cat-header">Doodads <span class="count">{doodadCount}</span></header>
-          </div>
-          {#each doodadGroups as g (g.id)}
-            <div class="category subcategory">
-              <header class="cat-header sub">{g.label} <span class="count">{g.entries.length}</span></header>
-              <ul>
-                {#each g.entries as d (d.creation_number)}
-                  <li class:selected={selectedDoodadIds.has(d.creation_number)}
-                      on:click={(e) => clickRow(e, 'doodad', d.creation_number)}
-                      title="{d.type_id} #{d.creation_number}">
-                    <span class="name">{doodadDisplayName(d)}</span>
-                    <span class="cat dim">{doodadCategoryFor(d)}</span>
-                    <button class="pan-btn"
-                            on:click={(e) => panToEntity(e, d.position)}
-                            title="Pan camera to this doodad">⊕</button>
-                  </li>
-                {/each}
-              </ul>
-            </div>
+        <div class="explorer-sections">
+          {#each visSections as sid, i (sid)}
+            {@const g = groups.find(x => x.id === sid)}
+            {@const isLast = i === visSections.length - 1}
+            {#if sid === 'doodads'}
+              <div class="section"
+                   class:section-last={isLast}
+                   style={isLast ? '' : `flex: 0 0 ${sectionSizes.doodads}px;`}>
+                <header class="cat-header section-header">
+                  Doodads <span class="count">{doodadCount}</span>
+                </header>
+                <div class="section-body">
+                  {#each doodadGroups as dg (dg.id)}
+                    <div class="subcategory">
+                      <header class="cat-header sub">{dg.label} <span class="count">{dg.entries.length}</span></header>
+                      <ul>
+                        {#each dg.entries as d (d.creation_number)}
+                          <li class:selected={selectedDoodadIds.has(d.creation_number)}
+                              on:click={(e) => clickRow(e, 'doodad', d.creation_number)}
+                              title="{d.type_id} #{d.creation_number}">
+                            <span class="name">{doodadDisplayName(d)}</span>
+                            <span class="cat dim">{doodadCategoryFor(d)}</span>
+                            <button class="pan-btn"
+                                    on:click={(e) => panToEntity(e, d.position)}
+                                    title="Pan camera to this doodad">⊕</button>
+                          </li>
+                        {/each}
+                      </ul>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {:else if g}
+              <div class="section"
+                   class:section-last={isLast}
+                   style={isLast ? '' : `flex: 0 0 ${sectionSizes[sid]}px;`}>
+                <header class="cat-header section-header">
+                  {g.label} <span class="count">{g.entries.length}</span>
+                </header>
+                <div class="section-body">
+                  <ul>
+                    {#each g.entries as u (u.creation_number)}
+                      <li class:selected={selectedIds.has(u.creation_number)}
+                          on:click={(e) => clickRow(e, 'unit', u.creation_number)}
+                          title="{u.type_id} #{u.creation_number}">
+                        <span class="name">{unitDisplayName(u)}</span>
+                        <span class="cat dim">{unitCategory(u)}</span>
+                        <button class="pan-btn"
+                                on:click={(e) => panToEntity(e, u.position)}
+                                title="Pan camera to this entity">⊕</button>
+                      </li>
+                    {/each}
+                  </ul>
+                </div>
+              </div>
+            {/if}
+            {#if !isLast}
+              <Splitter onDrag={(dy) => onSplitterDrag(sid, dy)} />
+            {/if}
           {/each}
-        {/if}
+        </div>
       {/if}
     </aside>
 
@@ -695,6 +834,7 @@
 
     <aside class="panel properties">
       <header class="panel-header">Properties</header>
+      <div class="properties-body">
       {#if primaryDoodad}
         {@const d = primaryDoodad}
         <dl class="props">
@@ -819,6 +959,7 @@
           {/if}
         </dl>
       {/if}
+      </div>
     </aside>
   </div>
 
@@ -859,19 +1000,47 @@
   }
   button:hover:not(:disabled) { background: #1d4ed8; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
-  button.secondary { background: #3f3f46; }
-  button.secondary:hover:not(:disabled) { background: #52525b; }
   button.mode-toggle {
     background: #3f3f46; font-weight: 500;
   }
   button.mode-toggle:hover:not(:disabled) { background: #52525b; }
   button.mode-toggle.on { background: #15803d; }
   button.mode-toggle.on:hover:not(:disabled) { background: #166534; }
-  /* Save pill picks up an amber tone while dirty so the bullet glyph reads
-     as a "modified" indicator even at a glance. Disabled (clean) state stays
-     neutral via the base .mode-toggle styling. */
-  button.save-pill.dirty { background: #b45309; }
-  button.save-pill.dirty:hover:not(:disabled) { background: #92400e; }
+
+  /* File menu dropdown — anchored under the File button, opens on click,
+     closes on click-outside or Escape. Styled to match the header chrome
+     (dark background + thin border, no rounded corners on the dropdown so it
+     reads as part of the header bar rather than a floating popup). */
+  .file-menu { position: relative; }
+  button.file-btn {
+    background: transparent; color: #d4d4d8; font-weight: 500;
+    padding: 5px 10px; border: 1px solid transparent; border-radius: 3px;
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  button.file-btn:hover:not(:disabled),
+  button.file-btn.open { background: #27272a; }
+  .file-btn .caret { color: #71717a; font-size: 10px; }
+  .file-dropdown {
+    position: absolute; top: calc(100% + 4px); left: 0;
+    min-width: 220px; z-index: 100;
+    background: #18181b; border: 1px solid #27272a;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    display: flex; flex-direction: column; padding: 4px 0;
+  }
+  button.file-item {
+    background: transparent; color: #e4e4e7;
+    border: 0; border-radius: 0;
+    padding: 6px 14px; font-size: 12px; font-weight: 400;
+    text-align: left; cursor: pointer;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px;
+  }
+  button.file-item:hover:not(:disabled) { background: #27272a; color: #fff; }
+  button.file-item:disabled { color: #52525b; cursor: not-allowed; opacity: 1; }
+  button.file-item.dirty .file-item-label { color: #fbbf24; }
+  .file-item-shortcut { color: #71717a; font-size: 11px; font-family: 'Cascadia Mono', Consolas, monospace; }
+  button.file-item:disabled .file-item-shortcut { color: #3f3f46; }
+  .file-sep { height: 1px; background: #27272a; margin: 4px 0; }
 
   .error { background: #7f1d1d; color: #fecaca; padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; max-height: 200px; overflow: auto; }
   .error pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
@@ -890,14 +1059,65 @@
   .viewport { position: relative; min-width: 0; min-height: 0; }
   canvas { display: block; width: 100%; height: 100%; }
 
-  /* Explorer */
-  .explorer > .category { padding: 8px 0; border-bottom: 1px solid #1f1f23; }
-  .explorer .cat-header {
+  /* Explorer — stacked resizable sections.
+     Layout model:
+       .explorer (flex column, fills panel height)
+         .panel-header                                 // "EXPLORER" bar, fixed
+         .explorer-sections (flex column, fills rest)  // owns the stack
+           .section (flex 0 0 Npx OR 1 1 auto last)    // per-section box
+             .section-header                          // sticky title bar
+             .section-body (overflow-y: auto)         // scrolls within section
+           Splitter (4px tall drag-handle)
+           .section …                                  // next section
+     The trailing section uses flex:1:1:auto so window resize + leftover space
+     land there sensibly. Earlier sections have explicit pixel heights driven
+     by `sectionSizes`; the splitter above the section below adjusts the
+     section ABOVE the handle. */
+  .explorer-sections {
+    flex: 1 1 auto; min-height: 0;
+    display: flex; flex-direction: column;
+    /* Whole-panel scroll fallback: if window-shrink squeezes all sections
+       below their min-heights, the stack overflows here. Per-section scroll
+       (inside .section-body below) handles the common case; this is the
+       safety net. */
+    overflow-y: auto;
+  }
+  .section {
+    display: flex; flex-direction: column;
+    min-height: 56px; overflow: hidden;
+    background: #161618;
+  }
+  /* Last section absorbs leftover space + window-resize delta so splitter
+     ratios survive resizes without strict pixel math. flex-basis: 0 forces
+     it to start from 0 and grow into the remaining flex space; otherwise
+     `flex: 1 1 auto` keeps it at its intrinsic content height even when
+     other sections are pixel-sized, which is wrong here. */
+  .section.section-last { flex: 1 1 0; min-height: 120px; }
+  .section-header {
+    flex: 0 0 auto;
+    background: #1c1c1f; border-bottom: 1px solid #27272a;
+    padding: 6px 14px;
+    font-size: 10px; font-weight: 600; color: #a1a1aa;
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .section-header .count { color: #71717a; font-weight: 400; }
+  .section-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 0; }
+
+  /* Sub-buckets only appear inside the Doodads section. Same row chrome as
+     top-level entries (rows are .explorer-section ul li below); just a
+     slightly-dimmed indented header. */
+  .subcategory { padding: 2px 0 4px; }
+  .cat-header {
     padding: 4px 14px; font-size: 11px; font-weight: 600; color: #d4d4d8;
     display: flex; justify-content: space-between; align-items: center;
   }
-  .explorer .cat-header .count { color: #71717a; font-weight: 400; font-size: 11px; }
-  .explorer ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
+  .cat-header .count { color: #71717a; font-weight: 400; font-size: 11px; }
+  .cat-header.sub {
+    padding-left: 22px; color: #a1a1aa; font-weight: 500; font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+
+  .explorer ul { list-style: none; margin: 0; padding: 0; }
   .explorer li {
     display: flex; align-items: center; gap: 8px;
     padding: 4px 14px; cursor: pointer; font-size: 12px;
@@ -927,16 +1147,11 @@
   }
   .explorer li:hover .pan-btn { display: inline-flex; }
   .explorer li .pan-btn:hover { background: #3f3f46; color: #e4e4e7; }
-  /* Doodad sub-buckets sit visually under the "Doodads" header with a slight
-     indent on the category label so the hierarchy reads at a glance. */
-  .explorer > .category.subcategory { padding: 2px 0 4px; border-bottom: 0; }
-  .explorer .cat-header.sub {
-    padding-left: 22px; color: #a1a1aa; font-weight: 500; font-size: 10.5px;
-    text-transform: uppercase; letter-spacing: 0.04em;
-  }
 
-  /* Properties */
-  .properties { overflow-y: auto; }
+  /* Properties — panel-header stays sticky at the top; only the body scrolls
+     when the selected entity's fields overflow (Heroes with abilities +
+     inventory + item drops + 7 base fields can run long). */
+  .properties-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
   .props {
     display: grid; grid-template-columns: max-content 1fr;
     gap: 4px 12px; padding: 10px 16px; margin: 0; font-size: 12px;
