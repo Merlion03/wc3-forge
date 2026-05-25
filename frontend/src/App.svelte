@@ -18,6 +18,7 @@
   import Accordion from './Accordion.svelte'
   import ViewMenu from './ViewMenu.svelte'
   import AssetPreview from './AssetPreview.svelte'
+  import MapInfoEditor from './MapInfoEditor.svelte'
   import { showToast } from './toast'
   import { loadIconURL } from './icon-loader'
   import { TEAM_COLORS_RGB } from './sloc-markers'
@@ -78,6 +79,19 @@
   let scene: SceneAPI | null = null
   let dirty: boolean = false
   let saving: boolean = false
+
+  // ----- Map Info Editor modal -----
+  // Conditional mount in the template (`{#if showMapInfoEditor}`) so the
+  // dialog component fully unmounts on close — keeps the focus-trap +
+  // global keydown listeners scoped to when the modal is actually open.
+  let showMapInfoEditor: boolean = false
+  function openMapInfoEditor() {
+    if (!status.loaded) return
+    showMapInfoEditor = true
+  }
+  function closeMapInfoEditor() {
+    showMapInfoEditor = false
+  }
 
   // ----- File menu (header dropdown) -----
   let fileMenuOpen: boolean = false
@@ -304,6 +318,12 @@
           if (isFinite(pct) && pct > 0 && pct < 100) rightExplorerPct = pct
           break
         }
+        case 'mapinfo.open':
+          openMapInfoEditor()
+          break
+        case 'mapinfo.close':
+          closeMapInfoEditor()
+          break
       }
     })
     // Test-driver hook (also exposed on window for in-page console use):
@@ -331,6 +351,13 @@
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 's' || e.key === 'S')) {
       e.preventDefault()
       void doSave()
+    }
+    // Map Info Editor hotkey: Ctrl+Shift+I. Picked because Ctrl+I alone is
+    // commonly bound (italic) and Shift differentiates without conflicting
+    // with existing wc3-forge shortcuts (Ctrl+S Save).
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.key === 'I' || e.key === 'i')) {
+      e.preventDefault()
+      openMapInfoEditor()
     }
   }
 
@@ -869,6 +896,15 @@
           <div class="file-sep" role="separator"></div>
           <button class="file-item"
                   role="menuitem"
+                  on:click={runMenuAction(openMapInfoEditor)}
+                  disabled={!status.loaded}
+                  title="Edit map name, author, description, and other metadata.">
+            <span class="file-item-label">Map Info…</span>
+            <span class="file-item-shortcut">Ctrl+Shift+I</span>
+          </button>
+          <div class="file-sep" role="separator"></div>
+          <button class="file-item"
+                  role="menuitem"
                   on:click={runMenuAction(close)}
                   disabled={!status.loaded || busy}>
             <span class="file-item-label">Close</span>
@@ -1240,6 +1276,10 @@
       </aside>
     </div>
   </div>
+
+  {#if showMapInfoEditor}
+    <MapInfoEditor open={showMapInfoEditor} on:close={closeMapInfoEditor} />
+  {/if}
 
   <Toast />
 </main>
