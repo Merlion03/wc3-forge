@@ -412,6 +412,21 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         gl.clearColor(bg[0], bg[1], bg[2], 1)
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
         if (terrain) terrain.draw(scene.camera.viewProjectionMatrix)
+        // **CRITICAL**: terrain.draw calls gl.useProgram(terrainProg) directly,
+        // bypassing mdx-m3-viewer's webgl.useShader() state cache. The cache
+        // still thinks the LAST-USED MDX shader is bound. On the next frame,
+        // when the lib does shader.use() → useShader(sameShader), it short-
+        // circuits because `shader === currentShader` — but the actual GL
+        // program is now the TERRAIN program. Every subsequent uniform call
+        // then targets terrain's program with locations queried against the
+        // MDX shader → GL_INVALID_OPERATION on every uniformXxx call → no
+        // pixels painted. The lib's `webgl` is a state-caching wrapper;
+        // we must invalidate its cache after any direct useProgram from our
+        // own custom shaders (terrain, water, slocs, pathing). Resetting to
+        // null forces the next `webgl.useShader(s)` to re-bind the program
+        // and re-sync attribute indices. This is the fix for the "every MDX
+        // is invisible on second frame onward" bug — see commit log.
+        ;(viewer as any).webgl.currentShader = null
         viewer.render()
         // Sloc markers go AFTER viewer.render() and BEFORE water so they're
         // opaque-on-top-of-units but still get alpha-blended water in front.
