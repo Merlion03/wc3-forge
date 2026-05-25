@@ -525,11 +525,29 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   let terrainPickMode = false
   let terrainPickCallback: TerrainPickCallback | null = null
   let cachedTerrainDTO: any = null
-  // Subset of doodad instances whose model has MORE THAN ONE 'stand' sequence
-  // — only these benefit from per-frame sequenceEnded checks. Most doodads
-  // (trees, rocks, props) have a single stand variation: rolling at placement
-  // sets it, and reroll would just pick the same index. Tracking the subset
-  // avoids iterating ~hundreds of static props every RAF tick.
+  // Doodad instances whose model has at least one 'stand' sequence AND that
+  // sequence may end (either non-looping, or multi-variation where we want
+  // to re-roll a new variation when the current one ends). These need
+  // per-frame sequenceEnded checks so the idle plays continuously.
+  //
+  // Two cases share this path:
+  //   1. Multi-variation Stand (e.g. "Stand", "Stand - 2", …):
+  //      reroll picks a new variation via rarity weighting, matching the
+  //      library's Widget.update idle pattern.
+  //   2. Single Stand sequence marked nonLooping=1 (e.g. EFFECT doodads
+  //      like Enfo FFB's "Soul Discharge"): reroll re-sets the same sequence
+  //      index, which `setSequence` implements as a clean restart (frame =
+  //      interval[0], event-emitters reset, forced=true). Without this the
+  //      effect plays once then freezes — HiveWE's skeletal_model_instance
+  //      always loops regardless of the nonLooping flag (it just wraps
+  //      current_frame back to start_frame in update() — see HiveWE's
+  //      src/resources/skinned_mesh/skeletal_model_instance.ixx ~line 145),
+  //      so we mirror that behaviour for nonLooping-Stand doodads here.
+  //
+  // Doodads with no 'stand' sequence at all stay out of the set (no-op idle).
+  // Doodads with a single LOOPING Stand also stay out — the library auto-loops
+  // those internally and `sequenceEnded` never fires, so adding them would
+  // just waste an iteration per RAF tick.
   const doodadInstancesToReroll = new Set<any>()
 
   // Sloc-marker renderer. Owns its own shader + box geometry. Failure to
@@ -852,10 +870,20 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const visible = doodadVisibility.get(cat) !== false
     if (!visible) inst.hide()
     rollSequence(inst, 'stand')
-    // Only doodads with multiple 'stand' variations need the per-frame reroll.
-    // Single-stand and no-stand cases are no-ops — exclude them from the loop.
-    const standCount = filterSequencesByType('stand', model.sequences || []).length
-    if (standCount > 1) doodadInstancesToReroll.add(inst)
+    // Add to the per-frame reroll set when EITHER:
+    //   - the model has multiple 'stand' variations (so we want variety on end), OR
+    //   - the single 'stand' sequence is non-looping (so it freezes after one
+    //     play without an explicit restart; the canonical case is EFFECT-type
+    //     doodads like Enfo FFB's "Soul Discharge" — 1 Stand, nonLooping=1).
+    //
+    // Doodads with a single looping Stand can skip the reroll: the library
+    // auto-wraps the frame back to interval[0] internally and never sets
+    // `sequenceEnded`, so they'd hit a no-op branch every RAF tick.
+    const standSeqs = filterSequencesByType('stand', model.sequences || [])
+    const standCount = standSeqs.length
+    const singleStandNonLooping = standCount === 1
+      && (model.sequences?.[standSeqs[0].index]?.nonLooping ?? 0) !== 0
+    if (standCount > 1 || singleStandNonLooping) doodadInstancesToReroll.add(inst)
     if (selectedDoodadSet.has(d.creation_number)) {
       inst.setVertexColor(SELECT_TINT)
     }
