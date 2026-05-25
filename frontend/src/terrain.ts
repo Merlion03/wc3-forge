@@ -405,10 +405,34 @@ void main() {
     // we agree with ourselves — pick top-to-bottom so row v-coord =
     // (atlasH - (p+1)*rowH) / atlasH .. (atlasH - p*rowH) / atlasH.
     //
-    // For non-extended palettes (width 256), only fill the left half of the
-    // atlas row. The right half is undefined memory; non-extended sub-tile
-    // UVs never reach into u >= 0.5, so it doesn't matter.
-    const dstW = pal.extended ? atlasW : Math.min(pal.width, atlasW)
+    // CANONICAL atlas pitch is 64 atlas-pixels per sub-tile regardless of
+    // the SOURCE palette's pixel dimensions. Sub-tile picker math below
+    // (subTileAtlasOrigin) assumes this — slot col c → atlas pixel `c * 64`.
+    //
+    // - non-extended: 4 columns × 64 = 256 dst-px wide; right half of atlas
+    //   row left blank (subUVs never reach u >= 0.5).
+    // - extended:     8 columns × 64 = 512 dst-px wide; fills the full row.
+    //
+    // Source palette dims vary in the wild: stock CASC ships non-extended at
+    // 256×256 (16 sub-tiles × 64×64) but ALSO at 512×256 extended (32 ×
+    // 64×64). Custom-map BLP overrides are often 512×512 (16 sub-tiles ×
+    // 128×128). All three are equally valid and HiveWE handles them via
+    // `tile_size = max(height * 0.25, 1)` + `extended = (width == height*2)`.
+    // We rasterize them all into the SAME canonical 64-px-per-sub-tile atlas
+    // by scaling-down at blit time (the UV-textured-quad blit covers source
+    // [0..1]×[0..1] regardless of source size, and the destination viewport
+    // is fixed to 256 or 512 px wide × 256 px tall). This collapses all four
+    // size variants into a single rendering path.
+    //
+    // PREVIOUSLY this line was `dstW = pal.extended ? atlasW : Math.min(pal.width, atlasW)`,
+    // which gave dstW=512 for a 512×512 non-extended source when paired with
+    // any extended palette in the same map (atlasW=512). That scaled the
+    // source's 128-px sub-tiles to 128 atlas-px wide × 64 atlas-px tall
+    // (squashed!) while the sub-tile picker still indexed at 64-px pitch —
+    // sampling the wrong region for every slot but slot 0 and looking
+    // visually like "rotated/wrong" sub-tiles. Fixed by anchoring dstW to
+    // the canonical 256/512 pitch.
+    const dstW = pal.extended ? 512 : 256
     const dstH = rowH
     const dstX = 0
     const dstY = atlasH - (p + 1) * rowH
