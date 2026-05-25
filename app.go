@@ -114,11 +114,16 @@ func (a *App) startup(ctx context.Context) {
 	// side's document.title only updates the inner WebView2 child window,
 	// which the user never sees; runtime.WindowSetTitle hits the outer Wails
 	// window so the taskbar + window-list entry pick up the `* ` prefix too.
+	// Title format includes the process PID so users running multiple
+	// wc3-forge windows (e.g. coordinating with parallel AI agents) can tell
+	// them apart at a glance in the taskbar + window list. The PID never
+	// changes for this process so we capture it once.
+	pidTag := fmt.Sprintf(" [PID %d]", os.Getpid())
 	forge.Current.OnDirtyChanged(func(dirty bool) {
 		runtime.EventsEmit(a.ctx, eventDirtyChanged, map[string]any{"dirty": dirty})
-		title := "wc3-forge"
+		title := "wc3-forge" + pidTag
 		if dirty {
-			title = "* wc3-forge"
+			title = "* wc3-forge" + pidTag
 		}
 		runtime.WindowSetTitle(a.ctx, title)
 	})

@@ -23,9 +23,22 @@
 
   export let categories: string[] = []  // present-in-map ordered list
   export let visibility: Record<string, boolean> = {}  // category → visible
+  // Overlays section — non-entity layered toggles that sit on top of the 3D
+  // view. New overlays slot in here as the editor grows (cell-highlight always-
+  // on, path-blocker checkers, etc.). Pass current on/off via this object;
+  // parent reacts to overlay-toggle events the same way it reacts to the
+  // doodad-category toggles above.
+  export let overlays: Record<string, boolean> = {}  // overlay-id → visible
+  // Top-level toggles — flat checkboxes at the menu root (no sub-menu).
+  // Use these for editor-wide modes that don't belong inside Doodads or
+  // Overlays — e.g. Reforged Graphics, Agent Console. Parent supplies the
+  // ordered list + current checked state; we dispatch `extra-toggle`.
+  export let extras: { id: string; label: string; checked: boolean; title?: string; disabled?: boolean }[] = []
 
   const dispatch = createEventDispatcher<{
     toggle: { category: string; visible: boolean }
+    'overlay-toggle': { overlay: string; visible: boolean }
+    'extra-toggle': { id: string; checked: boolean }
   }>()
 
   let open = false
@@ -47,6 +60,27 @@
   // Sub-menu (Doodads) hover-open. Click also toggles, for keyboard / non-hover.
   let doodadOpen = false
   function toggleDoodadSub() { doodadOpen = !doodadOpen }
+  let overlaysOpen = false
+  function toggleOverlaysSub() { overlaysOpen = !overlaysOpen }
+
+  // Curated list of overlays surfaced in the menu. id is the wire key; label
+  // is the human-readable name. Extend as new overlays are added.
+  const OVERLAYS: { id: string; label: string; title: string }[] = [
+    { id: 'pathing', label: 'Pathing', title: 'Toggle the static pathing-map overlay (red=unwalkable, blue=unflyable, yellow=unbuildable).' },
+  ]
+  function setOverlay(id: string, v: boolean) {
+    dispatch('overlay-toggle', { overlay: id, visible: v })
+  }
+  function onOverlayChange(ev: Event, id: string) {
+    const el = ev.currentTarget as HTMLInputElement
+    setOverlay(id, el.checked)
+  }
+  $: overlaysOnCount = OVERLAYS.filter(o => overlays[o.id] === true).length
+
+  function onExtraChange(ev: Event, id: string) {
+    const el = ev.currentTarget as HTMLInputElement
+    dispatch('extra-toggle', { id, checked: el.checked })
+  }
 
   $: allVisibleCount = categories.filter(c => visibility[c] !== false).length
   $: allChecked = categories.length > 0 && allVisibleCount === categories.length
@@ -80,6 +114,7 @@
     document.removeEventListener('mousedown', onDocClick, true)
     document.removeEventListener('keydown', onDocKey)
     doodadOpen = false
+    overlaysOpen = false
   }
 </script>
 
@@ -93,6 +128,18 @@
   </button>
   {#if open}
     <div class="view-dropdown" role="menu">
+      {#if extras.length}
+        {#each extras as x (x.id)}
+          <label class="check-item top-level" title={x.title ?? ''}>
+            <input type="checkbox"
+                   checked={x.checked}
+                   disabled={x.disabled === true}
+                   on:change={(e) => onExtraChange(e, x.id)} />
+            <span class="lbl">{x.label}</span>
+          </label>
+        {/each}
+        <div class="sep"></div>
+      {/if}
       <button class="view-item parent"
               on:click={toggleDoodadSub}
               aria-expanded={doodadOpen}>
@@ -121,6 +168,25 @@
           {#if categories.length === 0}
             <div class="empty">No doodads in map</div>
           {/if}
+        </div>
+      {/if}
+      <button class="view-item parent"
+              on:click={toggleOverlaysSub}
+              aria-expanded={overlaysOpen}>
+        <span class="chev">{overlaysOpen ? '▾' : '▸'}</span>
+        <span class="lbl">Overlays</span>
+        <span class="meta">{overlaysOnCount}/{OVERLAYS.length}</span>
+      </button>
+      {#if overlaysOpen}
+        <div class="sub" role="menu">
+          {#each OVERLAYS as o (o.id)}
+            <label class="check-item" title={o.title}>
+              <input type="checkbox"
+                     checked={overlays[o.id] === true}
+                     on:change={(e) => onOverlayChange(e, o.id)} />
+              <span class="lbl">{o.label}</span>
+            </label>
+          {/each}
         </div>
       {/if}
     </div>
@@ -172,6 +238,7 @@
   .check-item:hover { background: #27272a; color: #fff; }
   .check-item input { margin: 0; cursor: pointer; }
   .check-item .lbl { flex: 1 1 auto; }
+  .check-item.top-level { padding-left: 14px; }
   .sep { height: 1px; background: #27272a; margin: 3px 0; }
   .empty { padding: 6px 18px; color: #71717a; font-size: 11px; font-style: italic; }
 </style>

@@ -583,6 +583,29 @@
     pathingVisible = !pathingVisible
     scene?.setPathingVisible(pathingVisible)
   }
+  // View → Overlays sub-menu dispatches `overlay-toggle` events. Route per id
+  // to the relevant scene toggle. Add new overlay ids here as the menu's
+  // OVERLAYS list in ViewMenu.svelte grows.
+  function onOverlayToggle(e: CustomEvent<{ overlay: string; visible: boolean }>) {
+    const { overlay, visible } = e.detail
+    if (overlay === 'pathing') {
+      pathingVisible = visible
+      scene?.setPathingVisible(pathingVisible)
+    }
+  }
+  // View → top-level "extras" dispatches `extra-toggle` events. Route per id
+  // to the existing toggle handler (reforged, agent-console, etc.) so the
+  // menu and any header / hotkey path end up at the same code.
+  function onExtraToggle(e: CustomEvent<{ id: string; checked: boolean }>) {
+    const { id, checked } = e.detail
+    if (id === 'reforged') {
+      // toggleReforged flips internally; only call when the desired state
+      // differs from current so the menu can't get out of sync with `busy`.
+      if (checked !== reforged) toggleReforged()
+    } else if (id === 'agent-console') {
+      if (checked !== bridgeConsoleOpen) toggleBridgeConsole()
+    }
+  }
 
   function toggleTerrainPickMode() {
     terrainPickModeOn = !terrainPickModeOn
@@ -1000,7 +1023,16 @@
     </div>
     <ViewMenu categories={doodadCategoriesPresent}
               visibility={doodadVisibility}
-              on:toggle={onViewToggle} />
+              overlays={{ pathing: pathingVisible }}
+              extras={[
+                { id: 'reforged', label: 'Reforged Graphics', checked: reforged, disabled: busy,
+                  title: 'Toggle Reforged graphics. Reloads the current map without resetting the camera.' },
+                { id: 'agent-console', label: 'Agent Console', checked: bridgeConsoleOpen,
+                  title: 'Toggle the Agent Console (Ctrl+`) — live stream of every MCP bridge call.' },
+              ]}
+              on:toggle={onViewToggle}
+              on:overlay-toggle={onOverlayToggle}
+              on:extra-toggle={onExtraToggle} />
     <div class="status-strip">
       {#if status.loaded}
         <span class="map-name">{status.name || '(untitled)'}</span>
@@ -1018,25 +1050,7 @@
                 : 'Doodad mode active — clicking selects entities. Click to switch to Terrain mode.'}>
         {terrainPickModeOn ? 'Terrain Mode' : 'Doodad Mode'}
       </button>
-      <button on:click={togglePathing}
-              class="mode-toggle"
-              class:on={pathingVisible}
-              title="Toggle the static pathing-map overlay (red=unwalkable, blue=unflyable, yellow=unbuildable).">
-        Pathing{pathingVisible ? ' ✓' : ''}
-      </button>
-      <button on:click={toggleReforged} disabled={busy}
-              class="mode-toggle"
-              class:on={reforged}
-              title="Toggle Reforged graphics. Reloads the current map without resetting the camera.">
-        Reforged Graphics{reforged ? ' ✓' : ''}
-      </button>
       <span class="header-divider" aria-hidden="true"></span>
-      <button on:click={toggleBridgeConsole}
-              class="mode-toggle"
-              class:on={bridgeConsoleOpen}
-              title="Toggle the Agent Console (Ctrl+`) — live stream of every MCP bridge call.">
-        Agent Console{bridgeConsoleOpen ? ' ✓' : ''}
-      </button>
       <button on:click={launchTestMap}
               disabled={testMapDisabled}
               class="test-map"
