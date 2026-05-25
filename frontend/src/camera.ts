@@ -51,6 +51,8 @@ export interface RTSCamera {
   setAspect(aspect: number): void
   /** Detach all input listeners. */
   dispose(): void
+  /** World-space eye position. Used by the gizmo to compute fixed-screen-space handle scale. */
+  getEye(): [number, number, number]
 }
 
 export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSCamera {
@@ -66,6 +68,11 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
   let pitch = Math.PI / 3
   let yaw = 0
   let aspect = 1
+  // Current world-space eye position, updated every applyToViewer(). Exposed
+  // via getEye() so the gizmo can compute fixed-screen-space handle scale
+  // without needing to access mdx-m3-viewer's internal camera.location property
+  // (which is not reliably exposed in our version of the library).
+  let currentEye: [number, number, number] = [0, 0, distance]
 
   function applyToViewer() {
     const cp = Math.cos(pitch)
@@ -78,6 +85,7 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
     const oy = -cy * cp * distance
     const oz = sp * distance
     const eye = [pivot[0] + ox, pivot[1] + oy, pivot[2] + oz]
+    currentEye = [eye[0], eye[1], eye[2]]
     viewerCamera.perspective(FOV, aspect,
       Math.max(8, distance * 0.001),
       Math.max(50000, distance * 10))
@@ -250,6 +258,9 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
       window.removeEventListener('keyup', onKeyUp)
       window.removeEventListener('blur', onBlur)
       document.removeEventListener('visibilitychange', onBlur)
+    },
+    getEye(): [number, number, number] {
+      return [currentEye[0], currentEye[1], currentEye[2]]
     },
   }
 }

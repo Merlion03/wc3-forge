@@ -45,6 +45,7 @@ import {
 } from './sloc-markers'
 import { buildCellHighlight, type CellHighlight } from './cell-highlight'
 import { buildPathBlockerRenderer, type PathBlockerRenderer, type PathBlockerMarker } from './path-blockers'
+import { buildGizmo, type GizmoRenderer, type SelectionItem as GizmoSelectionItem } from './gizmo'
 
 // Apply the MDX parser patch BEFORE any viewer code touches the library — the
 // lib's MdxModel constructor parses on construction, and the patch fixes a
@@ -752,6 +753,21 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   } catch (e) {
     flog('[path-blockers] init failed:', e instanceof Error ? e.message : String(e))
   }
+  // Transform gizmo — Phase B move-only 3-axis arrows. Drawn last (after all
+  // other overlays) so it's always on top. Non-fatal if build fails; user
+  // falls back to drag-to-move. Lifetime matches the other overlay renderers.
+  let gizmo: GizmoRenderer | null = null
+  try {
+    gizmo = buildGizmo((viewer as any).gl as WebGLRenderingContext)
+    flog('[gizmo] built ok')
+  } catch (e) {
+    flog('[gizmo] init failed:', e instanceof Error ? e.message : String(e))
+  }
+  // Current selection items for the gizmo. Updated in setSelected.
+  let gizmoSelectionItems: GizmoSelectionItem[] = []
+  // Whether a gizmo drag is currently in progress (set in mousedown, cleared in mouseup).
+  let gizmoDragging = false
+
   // Background color (used by our own clear call now that scene.alpha=true).
   const bg = [0.07, 0.07, 0.09]
   // Real-dt tracking for viewer.update(). Mdx-m3-viewer's contract is that
@@ -887,11 +903,23 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // pass already ran inside viewer.render(); water sits above that.
         if (water) water.draw(scene.camera.viewProjectionMatrix)
         // Cell-highlight overlay (yellow wireframe quad for picked cell).
-        // Drawn LAST so the wireframe sits visually on top of every other
-        // layer including water. The shader disables depth-test for the
-        // same reason — the user wants the highlight always-visible, not
-        // buried under a translucent surface.
+        // Drawn LAST before the gizmo so the wireframe sits visually on top
+        // of every other layer including water.
         if (cellHighlight) cellHighlight.draw(scene.camera.viewProjectionMatrix)
+        // Transform gizmo — Phase B move-only 3-axis arrows. Drawn LAST of
+        // all overlays. Always-on-top via gl.disable(DEPTH_TEST) in draw().
+        // Only draws when selection is non-empty. Passes the camera eye position
+        // (from our RTSCamera controller's getEye()) for fixed-screen-space scaling.
+        if (gizmo && gizmoSelectionItems.length > 0) {
+          gizmo.draw(
+            (viewer as any).gl as WebGLRenderingContext,
+            viewer, scene, canvas,
+            gizmoSelectionItems,
+            unitInstances,
+            doodadInstances,
+            camera.getEye(),
+          )
+        }
       } catch (e) {
         crashed = true
         flog('[render-loop crash]', e instanceof Error ? e.stack : String(e))
@@ -1450,6 +1478,31 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const py = e.clientY - r.top
     const shift = e.shiftKey
     const ctrl = e.ctrlKey || e.metaKey
+
+    // ── GIZMO PRIORITY PICK (design §1.3) ─────────────────────────────
+    // Check gizmo handle BEFORE entity selection / drag-to-move logic.
+    // Only when no modifier key is held (modifier = selection semantics).
+    if (!shift && !ctrl && gizmo && gizmoSelectionItems.length > 0) {
+      const gizmoHit = gizmo.rayPick(px, py, scene, canvas)
+      if (gizmoHit) {
+        gizmo.beginDrag(
+          gizmoHit.axis, px, py, scene, canvas,
+          gizmoSelectionItems,
+          unitInstances, doodadInstances,
+          unitTypeIndexCache,
+        )
+        gizmoDragging = true
+        downAt = {
+          x: px, y: py,
+          clientX: e.clientX, clientY: e.clientY,
+          shift: false, ctrl: false,
+          rubberBanding: false,
+          dragMove: null,
+        }
+        return  // swallow — gizmo owns this gesture
+      }
+    }
+
     // Arm a drag-to-move only on a plain LMB click that lands on a unit
     // that's ALREADY in the current selection. Modifier-held clicks defer to
     // toggle/add semantics (shift+click a selected unit = deselect via
@@ -1522,6 +1575,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // app chrome — matches what every other editor does).
   function onDocMouseMove(e: MouseEvent) {
     if (!downAt) return
+
+    // ── Gizmo drag path ─────────────────────────────────────────────────
+    if (gizmoDragging && gizmo?.isDragging()) {
+      const r = canvas.getBoundingClientRect()
+      gizmo.onDrag(e.clientX - r.left, e.clientY - r.top, scene, canvas)
+      return
+    }
+
     // Drag-to-move on a selected unit. Threshold-gated like rubber-band:
     // sub-threshold motion stays as a click (so the mouseup path re-selects),
     // past-threshold motion locks into a drag-move that ignores any further
@@ -1565,6 +1626,17 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   function onDocMouseUp(e: MouseEvent) {
     const d = downAt
     downAt = null
+
+    // ── Gizmo drag commit ────────────────────────────────────────────────
+    if (gizmoDragging) {
+      gizmoDragging = false
+      if (gizmo?.isDragging()) {
+        const r = canvas.getBoundingClientRect()
+        gizmo.onDragEnd(e.clientX - r.left, e.clientY - r.top, scene, canvas)
+      }
+      return
+    }
+
     if (!d || e.button !== 0) return
 
     if (d.dragMove?.active) {
@@ -1658,10 +1730,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (a.isContentEditable) return
     }
-    // Mid-drag Escape = cancel the move and snap each unit back to its
-    // pre-drag position. The mouseup that follows will see `downAt` is
-    // null and won't commit MoveUnit. Selection is NOT cleared in this
-    // path — Escape during a drag cancels the drag, not the selection.
+    // Mid-drag Escape: cancel any active drag without committing.
+    // For gizmo drags: restore original positions. For entity drags: snap back.
+    // Selection is NOT cleared — Escape cancels the drag, not the selection.
+    if (gizmoDragging && gizmo?.isDragging()) {
+      gizmo.cancelDrag()
+      gizmoDragging = false
+      downAt = null
+      overlay.style.display = 'none'
+      return
+    }
     if (downAt?.dragMove?.active) {
       const dragMove = downAt.dragMove
       for (const cn of dragMove.cns) {
@@ -1720,6 +1798,15 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const r = canvas.getBoundingClientRect()
     const px = e.clientX - r.left
     const py = e.clientY - r.top
+    // Gizmo hover takes priority over entity hover. rayPick on the gizmo also
+    // updates the hoverAxis state used by draw() for handle highlighting.
+    if (gizmo && gizmoSelectionItems.length > 0) {
+      const gHit = gizmo.rayPick(px, py, scene, canvas)
+      if (gHit) {
+        if (canvas.style.cursor !== 'crosshair') canvas.style.cursor = 'crosshair'
+        return
+      }
+    }
     const hit = rayPick(px, py)
     let cursor = 'default'
     if (hit) {
@@ -2077,6 +2164,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         pathBlockers.dispose()
         pathBlockers = null
       }
+      if (gizmo) {
+        gizmo.dispose()
+        gizmo = null
+      }
     },
     setSelected(units: Set<number>, doodads: Set<number>) {
       // Units: clear tint on no-longer-selected, paint tint on newly-selected.
@@ -2104,6 +2195,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         if (inst) inst.setVertexColor(SELECT_TINT)
       }
       selectedDoodadSet = new Set(doodads)
+
+      // Update gizmo selection items. Cancel any active drag when selection changes.
+      if (gizmo?.isDragging()) {
+        gizmo.cancelDrag()
+        gizmoDragging = false
+      }
+      gizmoSelectionItems = [
+        ...[...units].map(id => ({ kind: 'unit' as const, id })),
+        ...[...doodads].map(id => ({ kind: 'doodad' as const, id })),
+      ]
     },
     onPick(cb: PickCallback) {
       pickCallback = cb
