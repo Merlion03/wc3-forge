@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/StephenSHorton/wc3-forge/internal/bridge"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 )
 
 // RegisterAll wires every wc3-forge MCP handler into the bridge. Called once
@@ -16,6 +17,7 @@ func RegisterAll(b *bridge.Bridge) {
 	b.Register("map.close", handleMapClose)
 	b.Register("map.status", handleMapStatus)
 	b.Register("map.info_get", handleMapInfoGet)
+	b.Register("map.info_set", handleMapInfoSet)
 	b.Register("units.list", handleUnitsList)
 	b.Register("units.move", handleUnitsMove)
 	b.Register("doodads.move", handleDoodadsMove)
@@ -103,6 +105,96 @@ func handleMapInfoGet(_ json.RawMessage) (any, error) {
 		return nil, errors.New("no map loaded")
 	}
 	return info, nil
+}
+
+// handleMapInfoSet applies a partial-update DTO to the in-memory war3map.w3i.
+// Mirrors HiveWE's bridge surface: input is `{updates: {<key>: <value>, ...}}`,
+// response is `{changed_fields: N}`. Routes through Session.MutateInfo so the
+// shared dirty-tracking + entity-changed event wiring lights up just like the
+// UI-driven path (App.MapInfoApply).
+type mapInfoSetParams struct {
+	Updates map[string]any `json:"updates"`
+}
+
+type mapInfoSetResponse struct {
+	ChangedFields int `json:"changed_fields"`
+}
+
+func handleMapInfoSet(params json.RawMessage) (any, error) {
+	var p mapInfoSetParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if len(p.Updates) == 0 {
+		return mapInfoSetResponse{ChangedFields: 0}, nil
+	}
+	var changed int
+	if err := Current.MutateInfo(func(info *w3i.Info) {
+		changed = ApplyInfoUpdates(info, p.Updates)
+	}); err != nil {
+		return nil, err
+	}
+	return mapInfoSetResponse{ChangedFields: changed}, nil
+}
+
+// ApplyInfoUpdates is the shared implementation of the Map Info partial-update
+// DTO walker, used by BOTH the Wails App.MapInfoApply method and the
+// map.info_set MCP handler. Centralizing the switch here ensures both wire
+// surfaces accept the exact same key set + value-type rules.
+//
+// Returns the number of fields successfully applied. Type-mismatches and
+// unknown keys are silently skipped (counted as zero); callers that want
+// strict validation should pre-validate the map.
+//
+// Key set (v1 — Description/General tab subset of the Map Info Editor):
+//
+//	"name"             string  — map title
+//	"author"           string  — map author
+//	"description"      string  — long description
+//	"suggestedPlayers" string  — display string, e.g. "2v2v2v2"
+//	"lua"              bool    — primary script is Lua (v28+ marker)
+//
+// Adding a field: append a case to the switch + document the wire key here.
+//
+// IMPORTANT: when `name`/`author`/`description`/`suggestedPlayers` are
+// updated, the value is written verbatim as the new on-disk string. If the
+// loaded Info still carries the resolved-from-TRIGSTR display value (which it
+// does today — Session.Open calls ResolveStrings post-Parse), an unrelated
+// MapInfoApply call that touches OTHER fields will still write the literal
+// strings on save because the original TRIGSTR tokens are lost in memory.
+// See encode.go top-of-file for the full Option A vs Option B discussion.
+func ApplyInfoUpdates(info *w3i.Info, updates map[string]any) int {
+	var changed int
+	for key, raw := range updates {
+		switch key {
+		case "name":
+			if s, ok := raw.(string); ok {
+				info.Name = s
+				changed++
+			}
+		case "author":
+			if s, ok := raw.(string); ok {
+				info.Author = s
+				changed++
+			}
+		case "description":
+			if s, ok := raw.(string); ok {
+				info.Description = s
+				changed++
+			}
+		case "suggestedPlayers":
+			if s, ok := raw.(string); ok {
+				info.SuggestedPlayers = s
+				changed++
+			}
+		case "lua":
+			if b, ok := raw.(bool); ok {
+				info.Lua = b
+				changed++
+			}
+		}
+	}
+	return changed
 }
 
 // unitsListResponse mirrors the C++ fork's shape: each entity is rendered with

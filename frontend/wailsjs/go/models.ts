@@ -449,3 +449,581 @@ export namespace unitsdoo {
 
 }
 
+export namespace w3i {
+	
+	export class CamDistance {
+	    Default: number;
+	    Max: number;
+	    Min: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new CamDistance(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Default = source["Default"];
+	        this.Max = source["Max"];
+	        this.Min = source["Min"];
+	    }
+	}
+	export class Color {
+	    R: number;
+	    G: number;
+	    B: number;
+	    A: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Color(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.R = source["R"];
+	        this.G = source["G"];
+	        this.B = source["B"];
+	        this.A = source["A"];
+	    }
+	}
+	export class Flags {
+	    Raw: number;
+	    HideMinimapPreview: boolean;
+	    ModifyAllyPriorities: boolean;
+	    MeleeMap: boolean;
+	    Unknown1: boolean;
+	    MaskedAreaPartiallyVisible: boolean;
+	    FixedPlayerSettings: boolean;
+	    CustomForces: boolean;
+	    CustomTechtree: boolean;
+	    CustomAbilities: boolean;
+	    CustomUpgrades: boolean;
+	    Unknown2: boolean;
+	    CliffShoreWaves: boolean;
+	    RollingShoreWaves: boolean;
+	    Unknown3: boolean;
+	    Unknown4: boolean;
+	    ItemClassification: boolean;
+	    WaterTinting: boolean;
+	    AccurateProbabilityForCalculations: boolean;
+	    CustomAbilitySkins: boolean;
+	    DisableDenyIcon: boolean;
+	    ForceDefaultZoom: boolean;
+	    ForceMaxZoom: boolean;
+	    ForceMinZoom: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new Flags(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Raw = source["Raw"];
+	        this.HideMinimapPreview = source["HideMinimapPreview"];
+	        this.ModifyAllyPriorities = source["ModifyAllyPriorities"];
+	        this.MeleeMap = source["MeleeMap"];
+	        this.Unknown1 = source["Unknown1"];
+	        this.MaskedAreaPartiallyVisible = source["MaskedAreaPartiallyVisible"];
+	        this.FixedPlayerSettings = source["FixedPlayerSettings"];
+	        this.CustomForces = source["CustomForces"];
+	        this.CustomTechtree = source["CustomTechtree"];
+	        this.CustomAbilities = source["CustomAbilities"];
+	        this.CustomUpgrades = source["CustomUpgrades"];
+	        this.Unknown2 = source["Unknown2"];
+	        this.CliffShoreWaves = source["CliffShoreWaves"];
+	        this.RollingShoreWaves = source["RollingShoreWaves"];
+	        this.Unknown3 = source["Unknown3"];
+	        this.Unknown4 = source["Unknown4"];
+	        this.ItemClassification = source["ItemClassification"];
+	        this.WaterTinting = source["WaterTinting"];
+	        this.AccurateProbabilityForCalculations = source["AccurateProbabilityForCalculations"];
+	        this.CustomAbilitySkins = source["CustomAbilitySkins"];
+	        this.DisableDenyIcon = source["DisableDenyIcon"];
+	        this.ForceDefaultZoom = source["ForceDefaultZoom"];
+	        this.ForceMaxZoom = source["ForceMaxZoom"];
+	        this.ForceMinZoom = source["ForceMinZoom"];
+	    }
+	}
+	export class Fog {
+	    Style: number;
+	    StartZ: number;
+	    EndZ: number;
+	    Density: number;
+	    Color: Color;
+	
+	    static createFrom(source: any = {}) {
+	        return new Fog(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Style = source["Style"];
+	        this.StartZ = source["StartZ"];
+	        this.EndZ = source["EndZ"];
+	        this.Density = source["Density"];
+	        this.Color = this.convertValues(source["Color"], Color);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ForceFlags {
+	    Raw: number;
+	    Allied: boolean;
+	    AlliedVictory: boolean;
+	    ShareVision: boolean;
+	    ShareUnitControl: boolean;
+	    ShareAdvancedUnitControl: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ForceFlags(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Raw = source["Raw"];
+	        this.Allied = source["Allied"];
+	        this.AlliedVictory = source["AlliedVictory"];
+	        this.ShareVision = source["ShareVision"];
+	        this.ShareUnitControl = source["ShareUnitControl"];
+	        this.ShareAdvancedUnitControl = source["ShareAdvancedUnitControl"];
+	    }
+	}
+	export class Force {
+	    Flags: ForceFlags;
+	    PlayerMasks: number;
+	    Name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Force(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Flags = this.convertValues(source["Flags"], ForceFlags);
+	        this.PlayerMasks = source["PlayerMasks"];
+	        this.Name = source["Name"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class IVec4 {
+	    A: number;
+	    B: number;
+	    C: number;
+	    D: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new IVec4(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.A = source["A"];
+	        this.B = source["B"];
+	        this.C = source["C"];
+	        this.D = source["D"];
+	    }
+	}
+	export class RandomItemEntry {
+	    Chance: number;
+	    ID: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RandomItemEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Chance = source["Chance"];
+	        this.ID = source["ID"];
+	    }
+	}
+	export class RandomItemSet {
+	    Items: RandomItemEntry[];
+	
+	    static createFrom(source: any = {}) {
+	        return new RandomItemSet(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Items = this.convertValues(source["Items"], RandomItemEntry);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class RandomItemTable {
+	    CreationNumber: number;
+	    Name: string;
+	    ItemSets: RandomItemSet[];
+	
+	    static createFrom(source: any = {}) {
+	        return new RandomItemTable(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.CreationNumber = source["CreationNumber"];
+	        this.Name = source["Name"];
+	        this.ItemSets = this.convertValues(source["ItemSets"], RandomItemSet);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class RandomUnitLine {
+	    Chance: number;
+	    IDs: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new RandomUnitLine(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Chance = source["Chance"];
+	        this.IDs = source["IDs"];
+	    }
+	}
+	export class RandomUnitTable {
+	    CreationNumber: number;
+	    Name: string;
+	    Positions: number[];
+	    Lines: RandomUnitLine[];
+	
+	    static createFrom(source: any = {}) {
+	        return new RandomUnitTable(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.CreationNumber = source["CreationNumber"];
+	        this.Name = source["Name"];
+	        this.Positions = source["Positions"];
+	        this.Lines = this.convertValues(source["Lines"], RandomUnitLine);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class TechAvailability {
+	    PlayerFlags: number;
+	    ID: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TechAvailability(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.PlayerFlags = source["PlayerFlags"];
+	        this.ID = source["ID"];
+	    }
+	}
+	export class UpgradeAvailability {
+	    PlayerFlags: number;
+	    ID: string;
+	    Level: number;
+	    Availability: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpgradeAvailability(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.PlayerFlags = source["PlayerFlags"];
+	        this.ID = source["ID"];
+	        this.Level = source["Level"];
+	        this.Availability = source["Availability"];
+	    }
+	}
+	export class Player {
+	    InternalNumber: number;
+	    Type: number;
+	    Race: number;
+	    FixedStartPosition: number;
+	    Name: string;
+	    StartingPosition: Vec2;
+	    AllyLowPriorities: number;
+	    AllyHighPriorities: number;
+	    EnemyLowPriorities: number;
+	    EnemyHighPriorities: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Player(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.InternalNumber = source["InternalNumber"];
+	        this.Type = source["Type"];
+	        this.Race = source["Race"];
+	        this.FixedStartPosition = source["FixedStartPosition"];
+	        this.Name = source["Name"];
+	        this.StartingPosition = this.convertValues(source["StartingPosition"], Vec2);
+	        this.AllyLowPriorities = source["AllyLowPriorities"];
+	        this.AllyHighPriorities = source["AllyHighPriorities"];
+	        this.EnemyLowPriorities = source["EnemyLowPriorities"];
+	        this.EnemyHighPriorities = source["EnemyHighPriorities"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class Prologue {
+	    Model: string;
+	    Text: string;
+	    Title: string;
+	    Subtitle: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Prologue(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Model = source["Model"];
+	        this.Text = source["Text"];
+	        this.Title = source["Title"];
+	        this.Subtitle = source["Subtitle"];
+	    }
+	}
+	export class LoadingScreen {
+	    Number: number;
+	    Model: string;
+	    Text: string;
+	    Title: string;
+	    Subtitle: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LoadingScreen(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Number = source["Number"];
+	        this.Model = source["Model"];
+	        this.Text = source["Text"];
+	        this.Title = source["Title"];
+	        this.Subtitle = source["Subtitle"];
+	    }
+	}
+	export class Vec2 {
+	    X: number;
+	    Y: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Vec2(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.X = source["X"];
+	        this.Y = source["Y"];
+	    }
+	}
+	export class Info {
+	    FileVersion: number;
+	    MapVersion: number;
+	    EditorVersion: number;
+	    GameVersion: number[];
+	    Name: string;
+	    Author: string;
+	    Description: string;
+	    SuggestedPlayers: string;
+	    CameraLeftBottom: Vec2;
+	    CameraRightTop: Vec2;
+	    CameraLeftTop: Vec2;
+	    CameraRightBottom: Vec2;
+	    CameraComplements: IVec4;
+	    PlayableWidth: number;
+	    PlayableHeight: number;
+	    Flags: Flags;
+	    Tileset: number;
+	    LoadingScreen: LoadingScreen;
+	    GameDataSet: number;
+	    Prologue: Prologue;
+	    Fog: Fog;
+	    WeatherID: number;
+	    CustomSoundEnv: string;
+	    CustomLightTileset: number;
+	    WaterColor: Color;
+	    Lua: boolean;
+	    SupportedModes: number;
+	    GameDataVersion: number;
+	    CamDistance: CamDistance;
+	    Players: Player[];
+	    Forces: Force[];
+	    AvailableUpgrades: UpgradeAvailability[];
+	    AvailableTech: TechAvailability[];
+	    RandomUnitTables: RandomUnitTable[];
+	    RandomItemTables: RandomItemTable[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Info(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.FileVersion = source["FileVersion"];
+	        this.MapVersion = source["MapVersion"];
+	        this.EditorVersion = source["EditorVersion"];
+	        this.GameVersion = source["GameVersion"];
+	        this.Name = source["Name"];
+	        this.Author = source["Author"];
+	        this.Description = source["Description"];
+	        this.SuggestedPlayers = source["SuggestedPlayers"];
+	        this.CameraLeftBottom = this.convertValues(source["CameraLeftBottom"], Vec2);
+	        this.CameraRightTop = this.convertValues(source["CameraRightTop"], Vec2);
+	        this.CameraLeftTop = this.convertValues(source["CameraLeftTop"], Vec2);
+	        this.CameraRightBottom = this.convertValues(source["CameraRightBottom"], Vec2);
+	        this.CameraComplements = this.convertValues(source["CameraComplements"], IVec4);
+	        this.PlayableWidth = source["PlayableWidth"];
+	        this.PlayableHeight = source["PlayableHeight"];
+	        this.Flags = this.convertValues(source["Flags"], Flags);
+	        this.Tileset = source["Tileset"];
+	        this.LoadingScreen = this.convertValues(source["LoadingScreen"], LoadingScreen);
+	        this.GameDataSet = source["GameDataSet"];
+	        this.Prologue = this.convertValues(source["Prologue"], Prologue);
+	        this.Fog = this.convertValues(source["Fog"], Fog);
+	        this.WeatherID = source["WeatherID"];
+	        this.CustomSoundEnv = source["CustomSoundEnv"];
+	        this.CustomLightTileset = source["CustomLightTileset"];
+	        this.WaterColor = this.convertValues(source["WaterColor"], Color);
+	        this.Lua = source["Lua"];
+	        this.SupportedModes = source["SupportedModes"];
+	        this.GameDataVersion = source["GameDataVersion"];
+	        this.CamDistance = this.convertValues(source["CamDistance"], CamDistance);
+	        this.Players = this.convertValues(source["Players"], Player);
+	        this.Forces = this.convertValues(source["Forces"], Force);
+	        this.AvailableUpgrades = this.convertValues(source["AvailableUpgrades"], UpgradeAvailability);
+	        this.AvailableTech = this.convertValues(source["AvailableTech"], TechAvailability);
+	        this.RandomUnitTables = this.convertValues(source["RandomUnitTables"], RandomUnitTable);
+	        this.RandomItemTables = this.convertValues(source["RandomItemTables"], RandomItemTable);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+
+}
+

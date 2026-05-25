@@ -66,6 +66,14 @@ export function LogJS(arg1) {
   return window['go']['main']['App']['LogJS'](arg1);
 }
 
+export function MapInfoApply(arg1) {
+  return window['go']['main']['App']['MapInfoApply'](arg1);
+}
+
+export function MapInfoGet() {
+  return window['go']['main']['App']['MapInfoGet']();
+}
+
 export function MoveDoodad(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['MoveDoodad'](arg1, arg2, arg3, arg4);
 }

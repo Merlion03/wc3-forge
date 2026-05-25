@@ -10,6 +10,7 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -910,4 +911,40 @@ func (a *App) IsDirty() bool {
 // suggest extracting to a folder.
 func (a *App) SaveMap() error {
 	return forge.Current.Save()
+}
+
+// MapInfoGet returns the full parsed war3map.w3i for the loaded map. The
+// Map Info Editor dialog calls this on open to pre-populate every field;
+// it's heavier than Status() (which intentionally exposes only the
+// name/path/unit_count needed for the header chrome) and is shaped to be
+// fed directly into form inputs.
+//
+// Returns an error when no map is loaded — the dialog gates open on
+// IsLoaded() so this is a programmer-error path, not a normal flow.
+func (a *App) MapInfoGet() (*w3i.Info, error) {
+	info := forge.Current.Info()
+	if info == nil {
+		return nil, fmt.Errorf("no map loaded")
+	}
+	return info, nil
+}
+
+// MapInfoApply applies a partial update DTO to the in-memory war3map.w3i.
+// The Map Info Editor dialog calls this on commit; it walks `updates` and
+// applies each known key to the Info struct via Session.MutateInfo so
+// dirty-tracking + entity-changed events fire normally.
+//
+// Subset coverage for v1: the dialog's Description/General tab fields.
+// See forge.ApplyInfoUpdates for the wire-key contract + how to extend.
+// Unknown keys are silently ignored; type-mismatches are silently skipped.
+//
+// Returns the MutateInfo error (e.g. no map loaded). Successful application
+// of a 0-length updates map is a no-op (returns nil without flipping dirty).
+func (a *App) MapInfoApply(updates map[string]any) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	return forge.Current.MutateInfo(func(info *w3i.Info) {
+		forge.ApplyInfoUpdates(info, updates)
+	})
 }
