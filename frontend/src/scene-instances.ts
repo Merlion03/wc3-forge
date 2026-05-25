@@ -108,6 +108,20 @@ interface DoodadTypeInfo {
   num_var: number
   fixed_rot: number
   model_scale: number
+  // Per-type pitch / roll override from Doodads.slk maxPitch / maxRoll
+  // (or the destructible / w3d-overlay equivalents). Stored in radians.
+  // HiveWE convention:
+  //   - negative value: fixed pitch/roll — apply as-is regardless of terrain
+  //     (this is what custom maps use to author flame-on-sword effects whose
+  //     emitters point along +X in model-local space and need a 90° tilt up).
+  //   - positive value: clamp to terrain slope sampled around the doodad
+  //     (terrain-follow path — currently unimplemented; we treat positive
+  //     as zero, since the only stock rows we've seen use 0 here and the
+  //     real consumers of this field in custom maps are all negative).
+  //   - zero: no rotation (the default; everything points the way the MDX
+  //     author left it).
+  max_pitch: number
+  max_roll: number
   name: string
   category: string
 }
@@ -128,6 +142,40 @@ function mdxPath(file: string): string {
 function quatZ(angle: number): number[] {
   const h = angle * 0.5
   return [0, 0, Math.sin(h), Math.cos(h)]
+}
+
+// Axis-angle quaternion around +Y (model-local pitch). Used to apply per-type
+// maxPitch overrides for doodads whose source MDX puts particle emitters along
+// +X in model-local space and needs a fixed tilt to point them upright (see
+// Enfo FFB's D002 Fire Sword Effect — maxPitch=-4.71 ≈ +π/2 after sign-flip).
+function quatY(angle: number): number[] {
+  const h = angle * 0.5
+  return [0, Math.sin(h), 0, Math.cos(h)]
+}
+
+// Axis-angle quaternion around +X (model-local roll). Used for the maxRoll
+// override sibling of maxPitch; rarely populated on stock data but custom
+// maps occasionally set it.
+function quatX(angle: number): number[] {
+  const h = angle * 0.5
+  return [Math.sin(h), 0, 0, Math.cos(h)]
+}
+
+// Hamilton product a * b — quaternion composition. Convention matches gl-matrix
+// (and HiveWE's glm): the result rotates by b FIRST, then by a. The lib's
+// `rotateLocal` takes a single quaternion and right-multiplies it into the
+// instance's local rotation, so to apply yaw → pitch → roll in that order
+// (matching HiveWE's doodad.ixx update sequence) we hand it a product where
+// yaw is the leftmost factor.
+function quatMul(a: number[], b: number[]): number[] {
+  const ax = a[0], ay = a[1], az = a[2], aw = a[3]
+  const bx = b[0], by = b[1], bz = b[2], bw = b[3]
+  return [
+    aw * bx + ax * bw + ay * bz - az * by,
+    aw * by - ax * bz + ay * bw + az * bx,
+    aw * bz + ax * by - ay * bx + az * bw,
+    aw * bw - ax * bx - ay * by - az * bz,
+  ]
 }
 
 // Rarity-weighted sequence picker ported from
@@ -601,7 +649,37 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
 
     const inst = model.addInstance()
     inst.move([d.position[0], d.position[1], d.position[2]])
-    inst.rotateLocal(quatZ(d.rotation))
+    // Composed rotation: world-Z yaw (placement rotation) → model-local Y
+    // pitch (per-type maxPitch override) → model-local X roll (per-type
+    // maxRoll override). Mirrors HiveWE's Doodad::update:
+    //
+    //   glm::quat rotation = glm::angleAxis(angle, glm::vec3(0, 0, 1));
+    //   rotation *= glm::angleAxis(-pitch, glm::vec3(0, 1, 0));
+    //   rotation *= glm::angleAxis(roll,  glm::vec3(1, 0, 0));
+    //
+    // For maxPitch / maxRoll values < 0 (the "user-set fixed" case), HiveWE
+    // takes the value as-is (already-negated by the user for the Y axis;
+    // unsigned for the X axis). For values > 0 it samples surrounding
+    // terrain heights and pitches/rolls to follow the slope, clamped by
+    // ±value. We currently only implement the fixed-negative path — that's
+    // the only one custom maps in the wild actually use to author flame /
+    // statue / floating-doodad effects whose source MDX is laid out flat.
+    // Zero (the default for most stock doodads) is a no-op.
+    let rot = quatZ(d.rotation)
+    const mp = info.max_pitch || 0
+    if (mp < 0) {
+      // HiveWE's "-pitch" inside the angleAxis: with mp already negative,
+      // the effective rotation about Y is +|mp|. The Ember Sword's mp=-4.71
+      // (≈ -3π/2) produces a +3π/2 about Y, equivalent to a -π/2 (-90°)
+      // rotation that flips the +X-axis emitters to point along +Z.
+      rot = quatMul(rot, quatY(-mp))
+    }
+    const mr = info.max_roll || 0
+    if (mr < 0) {
+      // HiveWE flips the sign in its `roll = -max_roll` line; mirror that.
+      rot = quatMul(rot, quatX(-mr))
+    }
+    inst.rotateLocal(rot)
     inst.uniformScale((d.scale[0] || 1) * (info.model_scale || 1))
     inst.setScene(scene)
     rollSequence(inst, 'stand')

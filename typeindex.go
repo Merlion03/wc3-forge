@@ -38,11 +38,30 @@ type UnitTypeInfo struct {
 
 // DoodadTypeInfo carries everything the JS scene needs to instantiate a
 // doodad or destructible MDX. NumVar selects which fileN.mdx variant.
+//
+// MaxPitch / MaxRoll come from the Doodads.slk / DestructableData.slk
+// `maxPitch` / `maxRoll` columns (radians, HiveWE convention). Per HiveWE's
+// src/base/doodad.ixx::update:
+//   - negative value: user-set fixed rotation (apply as-is); the magnitude
+//     is the pitch / roll angle, in radians, that the doodad should be tilted
+//     at regardless of the underlying terrain. This is what custom maps use
+//     to author flame-on-sword and similar effects whose source MDX has the
+//     particle emitters laid out along +X / +Y in model-local space and
+//     needs a fixed rotation to point them upright.
+//   - positive value: terrain-following — sample neighbouring terrain heights
+//     and pitch / roll to follow the slope, clamped by ±magnitude. We don't
+//     implement the terrain-follow branch yet (no caller has needed it on
+//     the maps we've shipped against), so a positive value is currently
+//     a no-op. The fixed-negative path is what custom D-type doodads in
+//     the wild actually rely on (e.g. Enfo FFB's D002 Fire Sword Effect
+//     uses maxPitch=-4.71 to rotate the embers from +X to +Z).
 type DoodadTypeInfo struct {
 	File       string  `json:"file"`        // MDX path stem (no .mdx suffix)
 	NumVar     int     `json:"num_var"`     // variation count; 1 means no suffix
 	FixedRot   float64 `json:"fixed_rot"`   // terrain-doodad rotation override (degrees)
 	ModelScale float64 `json:"model_scale"` // baseline scale; default 1
+	MaxPitch   float64 `json:"max_pitch"`   // negative = fixed pitch in radians (rotated about model-local Y)
+	MaxRoll    float64 `json:"max_roll"`    // negative = fixed roll in radians (rotated about model-local X)
 	Name       string  `json:"name"`        // resolved display name (e.g. "Summer Tree Wall"); empty if unknown
 	Category   string  `json:"category"`    // human-readable group (e.g. "Trees/Destructibles")
 }
@@ -217,8 +236,14 @@ func buildTypeIndex() {
 			// Reforged skin .txt also carries defScale:hd for HD-only sizing
 			// which we ignore (SD-only rendering for now).
 			ModelScale: firstNonZero(row.Number("defScale"), row.Number("modelScale")),
-			Name:       resolveDisplay(row.String("name"), nil),
-			Category:   doodadCategory(row.String("category"), wes),
+			// SLK Number returns 0 for missing columns, which our renderer
+			// treats as "no rotation override" (zero pitch / roll). That
+			// matches HiveWE's behaviour for the stock rows that don't carry
+			// maxPitch / maxRoll at all.
+			MaxPitch: row.Number("maxPitch"),
+			MaxRoll:  row.Number("maxRoll"),
+			Name:     resolveDisplay(row.String("name"), nil),
+			Category: doodadCategory(row.String("category"), wes),
 		}
 		if info.NumVar <= 0 {
 			info.NumVar = 1
@@ -364,6 +389,8 @@ var doodadFieldMap = map[string]string{
 	"dmis": "minScale",
 	"dmas": "maxScale",
 	"dfxr": "fixedRot",
+	"dmap": "maxPitch", // per-doodad pitch override (radians; negative = fixed)
+	"dmar": "maxRoll",  // per-doodad roll override (radians; negative = fixed)
 	"dvr1": "red",
 	"dvg1": "green",
 	"dvb1": "blue",
@@ -375,6 +402,8 @@ var doodadFieldMap = map[string]string{
 	"bmis": "minScale",
 	"bmas": "maxScale",
 	"bfxr": "fixedRot",
+	"bmap": "maxPitch",
+	"bmar": "maxRoll",
 	"bnam": "name",
 	"bcat": "category",
 }
@@ -414,6 +443,10 @@ func applyDoodadOverrides(base DoodadTypeInfo, ov w3objmod.Overrides, mapStrings
 			out.ModelScale = parseFloat(val, base.ModelScale)
 		case "fixedrot":
 			out.FixedRot = parseFloat(val, base.FixedRot)
+		case "maxpitch":
+			out.MaxPitch = parseFloat(val, base.MaxPitch)
+		case "maxroll":
+			out.MaxRoll = parseFloat(val, base.MaxRoll)
 		case "name":
 			out.Name = resolveDisplay(val, mapStrings)
 		case "category":
