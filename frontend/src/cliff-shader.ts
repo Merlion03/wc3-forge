@@ -418,6 +418,15 @@ export function createCliffRenderer(
       gl.enable(gl.CULL_FACE)
       gl.cullFace(gl.BACK)
       gl.frontFace(gl.CCW)
+      // Defensive Z-pushback for cliff geometry so its TOP face never
+      // accidentally wins the Z-fight against a ramp's terrain ground quad
+      // (both are drawn at the same world Z after the +0.5-layer / +64-stud
+      // ramp-base bump in update_ground_heights). Pure cliffs (cell_skip=1,
+      // no ground quad) are unaffected — nothing to Z-fight with. Vertical
+      // cliff faces are perpendicular to the ground plane so the offset
+      // just nudges depth without creating visible gaps.
+      gl.enable(gl.POLYGON_OFFSET_FILL)
+      gl.polygonOffset(1.0, 1.0)
 
       for (const bucket of meshes.values()) {
         const geom = bucket.geom
@@ -496,6 +505,13 @@ export function createCliffRenderer(
       if (program.aNormal >= 0) gl.disableVertexAttribArray(program.aNormal)
       if (program.aUV >= 0) gl.disableVertexAttribArray(program.aUV)
       if (program.aOffset >= 0) gl.disableVertexAttribArray(program.aOffset)
+
+      // Restore default GL state so subsequent passes (MDX, water, slocs) don't
+      // inherit the cliff-only polygon offset. mdx-m3-viewer's render path
+      // assumes POLYGON_OFFSET_FILL is disabled and reset to (0, 0); leaving
+      // it on would push every subsequent triangle backward too.
+      gl.disable(gl.POLYGON_OFFSET_FILL)
+      gl.polygonOffset(0.0, 0.0)
     },
 
     dispose() {
