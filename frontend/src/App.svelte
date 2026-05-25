@@ -732,7 +732,6 @@
 
 <main>
   <header>
-    <h1>wc3-forge</h1>
     <div class="file-menu" bind:this={fileMenuEl}>
       <button class="file-btn"
               class:open={fileMenuOpen}
@@ -1023,7 +1022,6 @@
     background: #18181b;
     flex: 0 0 auto;
   }
-  h1 { margin: 0; font-size: 13px; font-weight: 600; color: #e4e4e7; }
   .status-strip { flex: 1 1 auto; color: #a1a1aa; font-size: 12px; }
   .map-name { color: #e4e4e7; font-weight: 500; }
   .map-count { color: #71717a; }
