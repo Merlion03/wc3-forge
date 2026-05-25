@@ -98,8 +98,14 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Try ALL candidates against the map source FIRST, before falling back
+	// to CASC. This matters when a map imports a stock-path texture via
+	// sibling extension (e.g. ships terrainart/cityscape/City_GrassTrim.blp
+	// to override the stock City_GrassTrim.dds). With the old per-candidate
+	// interleaving, the requested .dds would resolve from CASC before we'd
+	// ever try the map's .blp, hiding the override. Map wins for ANY
+	// extension match before CASC ever runs.
 	for _, candidate := range candidates {
-		// Try the current map's source first.
 		data, ok, err := forge.Current.ReadFile(candidate)
 		if err != nil {
 			http.Error(w, "read error: "+err.Error(), http.StatusInternalServerError)
@@ -114,10 +120,12 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			serveBytes(w, candidate, data)
 			return
 		}
+	}
 
-		// CASC fallback for stock WC3 assets.
-		if c, err := getCASC(); err == nil && c != nil {
-			data, ok, err = c.ReadFile(candidate)
+	// CASC fallback for stock WC3 assets — only after exhausting the map.
+	if c, err := getCASC(); err == nil && c != nil {
+		for _, candidate := range candidates {
+			data, ok, err := c.ReadFile(candidate)
 			if err != nil {
 				log.Printf("asset: %s -> CASC error: %v", candidate, err)
 				http.Error(w, "casc read error: "+err.Error(), http.StatusInternalServerError)
