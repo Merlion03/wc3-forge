@@ -62,6 +62,31 @@ const MV: any = (MV_ns as any).default ?? MV_ns
 // canonical patch site, double-patching isn't possible and the failure mode
 // (silent fallback to "every animation tag is unknown") can't recur.
 
+// Disable per-instance frustum culling. The lib's `ModelInstance.isVisible`
+// tests an MDX-stored bounding sphere (`bounds.r * scale`) against the camera
+// planes. Many WC3 MDX bounds are tight to the idle pose and don't account
+// for attached weapons, particle emitters, or animation-extended geometry —
+// so the moment the sphere center crosses a frustum plane the entire model
+// pops out, even though pixels would still land on-screen. The user sees this
+// as units/doodads vanishing at the canvas edges while panning.
+//
+// For an editor view with at most a few thousand instances, always-render is
+// effectively free on a modern GPU and entirely eliminates the edge-pop. We
+// still need `instance.depth` populated so the scene's depth-sort works, so
+// we replicate just that one line and return true unconditionally.
+;(() => {
+  const ModelInstance = MV?.viewer?.ModelInstance
+  if (!ModelInstance?.prototype) {
+    throw new Error('cull-patch: MV.viewer.ModelInstance.prototype missing')
+  }
+  ModelInstance.prototype.isVisible = function (camera: any) {
+    const [x, y, z] = this.worldLocation
+    const near = camera.planes[4]
+    this.depth = near[0] * x + near[1] * y + near[2] * z + near[3]
+    return true
+  }
+})()
+
 // Defensive access to the lib's namespaced classes. CJS+ESM interop is
 // finicky enough that a single bundler config change can move things from
 // `MV.foo` to `MV.default.foo`; we crash with a descriptive error if either
