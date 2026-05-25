@@ -34,6 +34,14 @@ type UnitTypeInfo struct {
 	Blue       int     `json:"blue"`        // 0..255 vertex tint
 	Name       string  `json:"name"`        // resolved display name (e.g. "Paladin"); empty if unknown
 	Category   string  `json:"category"`    // human-readable group (e.g. "Human Hero", "Item")
+	// IconArt is the command-button portrait path (e.g.
+	// "ReplaceableTextures/CommandButtons/BTNFootman.blp"). For units it
+	// comes from Units/unitSkin.txt `Art=`; for items from Units/ItemFunc.txt
+	// `Art=`. The original SLK columns (UnitData.slk, ItemData.slk) don't
+	// carry an icon column — Reforged moved per-asset paths into the *Skin/
+	// *Func INI files. About 60% of stock units and 98% of stock items have
+	// this populated; the rest fall back to a generic placeholder in JS.
+	IconArt string `json:"icon_art"`
 }
 
 // DoodadTypeInfo carries everything the JS scene needs to instantiate a
@@ -64,6 +72,15 @@ type DoodadTypeInfo struct {
 	MaxRoll    float64 `json:"max_roll"`    // negative = fixed roll in radians (rotated about model-local X)
 	Name       string  `json:"name"`        // resolved display name (e.g. "Summer Tree Wall"); empty if unknown
 	Category   string  `json:"category"`    // human-readable group (e.g. "Trees/Destructibles")
+	// IconArt is the category icon path (e.g.
+	// "ReplaceableTextures/WorldEditUI/Doodad-Tree.dds"). Doodads + destruct-
+	// ables have NO per-row art column in their SLKs — HiveWE's source-of-
+	// truth maps the single-letter `category` column through UI/WorldEditData.txt
+	// sections [DoodadCategories] / [DestructibleCategories] to a shared icon
+	// per category. So every "Trees/Destructibles" row gets the same tree
+	// icon; structures get the structures icon; etc. That's the same scheme
+	// HiveWE's asset palette uses.
+	IconArt string `json:"icon_art"`
 }
 
 var (
@@ -74,6 +91,13 @@ var (
 
 	wesOnce sync.Once
 	wesTab  *wesstrings.Table
+
+	doodadIconOnce sync.Once
+	// doodadCategoryIcons maps a single-letter doodad/destructable category
+	// (e.g. "D" for Trees/Destructibles) to its icon path stem (no extension).
+	// Populated lazily from UI/WorldEditData.txt sections [DoodadCategories]
+	// and [DestructibleCategories]. Same mapping HiveWE's tree models use.
+	doodadCategoryIcons map[string]string
 )
 
 func loadSLKs(m *slk.Mapped, names []string) {
@@ -192,6 +216,9 @@ func buildTypeIndex() {
 		"Units/NeutralUnitStrings.txt",
 		"Units/CampaignUnitStrings.txt",
 		"Units/ItemStrings.txt",
+		// ItemFunc.txt is where item command-button icons live (Art=...);
+		// the SLK side and the *Skin.txt variants both lack an icon column.
+		"Units/ItemFunc.txt",
 	})
 
 	doodads := slk.New()
@@ -217,6 +244,7 @@ func buildTypeIndex() {
 			Blue:       int(row.Number("blue")),
 			Name:       resolveDisplay(row.String("name"), nil),
 			Category:   unitCategory(row, wes),
+			IconArt:    unitIconArt(row),
 		}
 		// SLKs default to scale 1 when the column is absent; Number returns
 		// 0 in that case which would render the model invisibly small.
@@ -244,6 +272,7 @@ func buildTypeIndex() {
 			MaxRoll:  row.Number("maxRoll"),
 			Name:     resolveDisplay(row.String("name"), nil),
 			Category: doodadCategory(row.String("category"), wes),
+			IconArt:  doodadIconArt(row),
 		}
 		if info.NumVar <= 0 {
 			info.NumVar = 1
@@ -346,6 +375,112 @@ func doodadCategory(letter string, wes *wesstrings.Table) string {
 	return letter
 }
 
+// loadDoodadCategoryIcons parses UI/WorldEditData.txt sections [DoodadCategories]
+// and [DestructibleCategories]. Each line looks like:
+//
+//	D=WESTRING_DTYPE_DESTRUCTABLE,ReplaceableTextures\WorldEditUI\Doodad-Destructible
+//
+// The second comma-separated field is the icon path stem (no extension).
+// We don't need a full INI parser here — the format is simple enough to
+// inline-scan, and we avoid pulling another loader into this file.
+//
+// All paths get normalized to forward-slash + lowercased; ".blp" appended
+// where the source omits it. JS-side <img> requests resolve via /asset/<path>
+// which already handles BLP↔DDS sibling swap.
+func loadDoodadCategoryIcons() map[string]string {
+	doodadIconOnce.Do(func() {
+		doodadCategoryIcons = map[string]string{}
+		data, ok, err := readBaseAsset("UI/WorldEditData.txt")
+		if err != nil || !ok {
+			log.Printf("typeindex: WorldEditData.txt load skip: ok=%v err=%v", ok, err)
+			return
+		}
+		// Strip UTF-8 BOM.
+		if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+			data = data[3:]
+		}
+		section := ""
+		for _, raw := range strings.Split(string(data), "\n") {
+			line := strings.TrimSpace(raw)
+			if line == "" || strings.HasPrefix(line, "//") || strings.HasPrefix(line, ";") {
+				continue
+			}
+			if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+				section = line[1 : len(line)-1]
+				continue
+			}
+			if section != "DoodadCategories" && section != "DestructibleCategories" {
+				continue
+			}
+			eq := strings.IndexByte(line, '=')
+			if eq < 0 {
+				continue
+			}
+			key := strings.ToUpper(strings.TrimSpace(line[:eq]))
+			val := strings.TrimSpace(line[eq+1:])
+			// Format: WESTRING_XYZ,ReplaceableTextures\WorldEditUI\Foo
+			// Take the second comma-separated field.
+			parts := strings.SplitN(val, ",", 2)
+			if len(parts) < 2 {
+				continue
+			}
+			icon := strings.TrimSpace(parts[1])
+			if icon == "" {
+				continue
+			}
+			doodadCategoryIcons[key] = normalizeIconPath(icon)
+		}
+		log.Printf("typeindex: loaded %d doodad/destructable category icons", len(doodadCategoryIcons))
+	})
+	return doodadCategoryIcons
+}
+
+// normalizeIconPath converts an SLK/INI icon-path cell into the form the
+// asset HTTP handler expects: forward slashes, lowercased, with a .blp
+// extension when none is declared (the handler's BLP↔DDS swap makes the
+// extension choice mostly cosmetic). Returns "" for empty input.
+func normalizeIconPath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	p = strings.ReplaceAll(p, "\\", "/")
+	p = strings.ToLower(p)
+	// Append .blp if no recognized extension. Reforged CASC actually ships
+	// these as .dds; the asset handler swaps siblings on miss so either
+	// extension routes to the live file.
+	ext := strings.ToLower(path.Ext(p))
+	if ext != ".blp" && ext != ".dds" && ext != ".tga" {
+		p += ".blp"
+	}
+	return p
+}
+
+// unitIconArt extracts the per-unit/item icon path. The Reforged data layout
+// moves icon paths into the *Skin.txt / *Func.txt INI files (unitSkin.txt's
+// "Art=" column and ItemFunc.txt's "Art=" column), both merged into the
+// units MappedRow alongside the SLK columns at load time. Returns "" when
+// the row has no icon set — caller falls back gracefully.
+func unitIconArt(row slk.MappedRow) string {
+	return normalizeIconPath(row.String("art"))
+}
+
+// doodadIconArt picks the per-row icon path for a doodad/destructable.
+// Both kinds use the category icon (HiveWE's behaviour) since their SLKs
+// don't carry a per-row art column. Returns "" when the row's category
+// letter doesn't map to a known WorldEditData entry.
+func doodadIconArt(row slk.MappedRow) string {
+	letter := strings.ToUpper(strings.TrimSpace(row.String("category")))
+	if letter == "" {
+		return ""
+	}
+	icons := loadDoodadCategoryIcons()
+	if v, ok := icons[letter]; ok {
+		return v
+	}
+	return ""
+}
+
 func ensureTypeIndex() error {
 	indexOnce.Do(buildTypeIndex)
 	return indexErr
@@ -421,6 +556,8 @@ var unitFieldMap = map[string]string{
 	"unam_item": "name",
 	"unin": "description",
 	"inam": "name", // item name (w3t)
+	"uico": "art", // unit command-button icon override (w3u)
+	"iico": "art", // item icon override (w3t)
 }
 
 func resolveColumn(modID string, fields map[string]string) string {
@@ -451,6 +588,14 @@ func applyDoodadOverrides(base DoodadTypeInfo, ov w3objmod.Overrides, mapStrings
 			out.Name = resolveDisplay(val, mapStrings)
 		case "category":
 			out.Category = doodadCategory(val, wesStrings())
+			// Re-derive the icon when the per-map override changes the
+			// category letter — custom doodads that switch from Trees to
+			// Structures get the structures icon automatically.
+			if icons := loadDoodadCategoryIcons(); icons != nil {
+				if v, ok := icons[strings.ToUpper(strings.TrimSpace(val))]; ok {
+					out.IconArt = v
+				}
+			}
 		}
 	}
 	return out
@@ -463,6 +608,11 @@ func applyUnitOverrides(base UnitTypeInfo, ov w3objmod.Overrides, mapStrings wts
 		switch strings.ToLower(col) {
 		case "name":
 			out.Name = resolveDisplay(val, mapStrings)
+		case "art":
+			// Per-map custom units may declare their own command-button icon
+			// (war3map.w3u uart field). Lets a map override the Footman
+			// icon for a Hero Footman variant, etc.
+			out.IconArt = normalizeIconPath(val)
 		}
 	}
 	return out

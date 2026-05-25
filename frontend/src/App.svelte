@@ -19,6 +19,8 @@
   import ViewMenu from './ViewMenu.svelte'
   import AssetPreview from './AssetPreview.svelte'
   import { showToast } from './toast'
+  import { loadIconURL } from './icon-loader'
+  import { TEAM_COLORS_RGB } from './sloc-markers'
 
   // Wails drops struct typedefs from models.ts when they appear as map values,
   // so the unit/doodad type-index shapes are declared locally here. Must stay
@@ -27,10 +29,12 @@
     file: string; model_scale: number; move_height: number
     red: number; green: number; blue: number
     name: string; category: string
+    icon_art: string
   }
   interface DoodadTypeInfo {
     file: string; num_var: number; fixed_rot: number; model_scale: number
     name: string; category: string
+    icon_art: string
   }
 
   let status: main.MapStatus = { loaded: false, unit_count: 0 }
@@ -545,10 +549,19 @@
   type Group = { id: string; label: string; entries: main.UnitDTO[] }
   $: groups = bucket(units, unitTypes)
   function unitDisplayName(u: main.UnitDTO): string {
+    // Slocs are start-location markers, not real units — there's no
+    // UnitData.slk row for them so the type-index has no entry. Without
+    // this branch every Markers row in the Explorer reads the raw "sloc"
+    // FourCC with zero per-player differentiation. Resolve to a humanised
+    // "Start Location (Red)" label using the existing player palette.
+    if (u.type_id === 'sloc') {
+      return `Start Location (${playerColorName(u.player)})`
+    }
     const info = unitTypes[u.type_id]
     return info && info.name ? info.name : u.type_id
   }
   function unitCategory(u: main.UnitDTO): string {
+    if (u.type_id === 'sloc') return `Player ${u.player}`
     const info = unitTypes[u.type_id]
     return info ? info.category : ''
   }
@@ -710,6 +723,32 @@
     if (p === 12) return 'Neutral Aggressive (12)'
     if (p < colors.length) return `${colors[p]} (${p})`
     return `Player ${p}`
+  }
+  function playerColorName(p: number): string {
+    const colors = ['Red', 'Blue', 'Teal', 'Purple', 'Yellow', 'Orange', 'Green',
+                    'Pink', 'Gray', 'LightBlue', 'DarkGreen', 'Brown']
+    if (p < colors.length) return colors[p]
+    if (p === 15) return 'Neutral Passive'
+    if (p === 12) return 'Neutral Aggressive'
+    return `P${p}`
+  }
+  function teamColorCSS(p: number): string {
+    const rgb = p < TEAM_COLORS_RGB.length ? TEAM_COLORS_RGB[p] : [0.55, 0.15, 0.15]
+    const r = Math.round(rgb[0] * 255)
+    const g = Math.round(rgb[1] * 255)
+    const b = Math.round(rgb[2] * 255)
+    return `rgb(${r}, ${g}, ${b})`
+  }
+  // Resolve the icon asset path for an entity. Returns "" when no icon
+  // exists in the type index (custom doodads with no category, items that
+  // didn't get a hit on ItemFunc.txt, slocs which are editor markers).
+  function unitIconPath(u: main.UnitDTO): string {
+    const info = unitTypes[u.type_id]
+    return info ? info.icon_art : ''
+  }
+  function doodadIconPath(d: main.DoodadDTO): string {
+    const info = doodadTypes[d.type_id]
+    return info ? info.icon_art : ''
   }
   function isHero(e: unitsdoo.Entity): boolean {
     return e.HeroLevel > 0 || (e.TypeID.length > 0 && e.TypeID[0] >= 'A' && e.TypeID[0] <= 'Z')
@@ -902,6 +941,22 @@
                     <li class:selected={selectedIds.has(u.creation_number)}
                         on:click={(e) => clickRow(e, 'unit', u.creation_number)}
                         title="{u.type_id} #{u.creation_number}">
+                      {#if u.type_id === 'sloc'}
+                        <!-- Slocs have no command-button icon — use a colored
+                             swatch in the team color so the row visually
+                             telegraphs which player it belongs to. -->
+                        <span class="icon-slot swatch"
+                              style="background: {teamColorCSS(u.player)};"
+                              aria-hidden="true"></span>
+                      {:else}
+                        {#await loadIconURL(unitIconPath(u)) then iconURL}
+                          {#if iconURL}
+                            <img class="icon-slot row-icon" src={iconURL} alt="" />
+                          {:else}
+                            <span class="icon-slot placeholder" aria-hidden="true"></span>
+                          {/if}
+                        {/await}
+                      {/if}
                       <span class="name">{unitDisplayName(u)}</span>
                       <span class="cat dim">{unitCategory(u)}</span>
                       <button class="pan-btn"
@@ -926,6 +981,13 @@
                           <li class:selected={selectedDoodadIds.has(d.creation_number)}
                               on:click={(e) => clickRow(e, 'doodad', d.creation_number)}
                               title="{d.type_id} #{d.creation_number}">
+                            {#await loadIconURL(doodadIconPath(d)) then iconURL}
+                              {#if iconURL}
+                                <img class="icon-slot row-icon" src={iconURL} alt="" />
+                              {:else}
+                                <span class="icon-slot placeholder" aria-hidden="true"></span>
+                              {/if}
+                            {/await}
                             <span class="name">{doodadDisplayName(d)}</span>
                             <span class="cat dim">{doodadCategoryFor(d)}</span>
                             <button class="pan-btn"
@@ -986,16 +1048,25 @@
           {@const d = primaryDoodad}
           <Accordion id="p:identity" label="Identity" open={isOpen('p:identity', true)}
                      on:toggle={onSectionToggle}>
-            <dl class="props">
-              <dt>Kind</dt>               <dd>Doodad</dd>
-              <dt>Type ID</dt>            <dd class="mono">{d.type_id}</dd>
-              {#if d.skin_id && d.skin_id !== d.type_id}
-                <dt>Skin ID</dt>          <dd class="mono">{d.skin_id}</dd>
-              {/if}
-              <dt>Creation #</dt>         <dd class="mono">{d.creation_number}</dd>
-              <dt>Name</dt>               <dd>{doodadDisplayName(d)}</dd>
-              <dt>Category</dt>           <dd>{doodadCategoryFor(d)}</dd>
-            </dl>
+            <div class="identity">
+              {#await loadIconURL(doodadIconPath(d)) then iconURL}
+                {#if iconURL}
+                  <img class="identity-icon" src={iconURL} alt="" />
+                {:else}
+                  <span class="identity-icon placeholder" aria-hidden="true"></span>
+                {/if}
+              {/await}
+              <dl class="props identity-props">
+                <dt>Kind</dt>               <dd>Doodad</dd>
+                <dt>Type ID</dt>            <dd class="mono">{d.type_id}</dd>
+                {#if d.skin_id && d.skin_id !== d.type_id}
+                  <dt>Skin ID</dt>          <dd class="mono">{d.skin_id}</dd>
+                {/if}
+                <dt>Creation #</dt>         <dd class="mono">{d.creation_number}</dd>
+                <dt>Name</dt>               <dd>{doodadDisplayName(d)}</dd>
+                <dt>Category</dt>           <dd>{doodadCategoryFor(d)}</dd>
+              </dl>
+            </div>
           </Accordion>
           <Accordion id="p:transform" label="Transform" open={isOpen('p:transform', true)}
                      on:toggle={onSectionToggle}>
@@ -1046,14 +1117,41 @@
           {@const e = primaryEntity}
           <Accordion id="p:identity" label="Identity" open={isOpen('p:identity', true)}
                      on:toggle={onSectionToggle}>
-            <dl class="props">
-              <dt>Type ID</dt>            <dd class="mono">{e.TypeID}</dd>
-              {#if e.SkinID && e.SkinID !== e.TypeID}
-                <dt>Skin ID</dt>          <dd class="mono">{e.SkinID}</dd>
+            <div class="identity">
+              {#if e.TypeID === 'sloc'}
+                <!-- Slocs have no command-button icon — use the team-color
+                     swatch at identity-icon size so the panel echoes the
+                     Explorer row's visual cue. -->
+                <span class="identity-icon swatch"
+                      style="background: {teamColorCSS(e.Player)};"
+                      aria-hidden="true"></span>
+              {:else}
+                {@const iconAsset = (unitTypes[e.TypeID]?.icon_art) ?? ''}
+                {#await loadIconURL(iconAsset) then iconURL}
+                  {#if iconURL}
+                    <img class="identity-icon" src={iconURL} alt="" />
+                  {:else}
+                    <span class="identity-icon placeholder" aria-hidden="true"></span>
+                  {/if}
+                {/await}
               {/if}
-              <dt>Creation #</dt>         <dd class="mono">{e.CreationNumber}</dd>
-              <dt>Player</dt>             <dd>{playerLabel(e.Player)}</dd>
-            </dl>
+              <dl class="props identity-props">
+                <dt>Type ID</dt>            <dd class="mono">{e.TypeID}</dd>
+                {#if e.SkinID && e.SkinID !== e.TypeID}
+                  <dt>Skin ID</dt>          <dd class="mono">{e.SkinID}</dd>
+                {/if}
+                <dt>Creation #</dt>         <dd class="mono">{e.CreationNumber}</dd>
+                {#if e.TypeID === 'sloc'}
+                  <dt>Kind</dt>             <dd>Start Location</dd>
+                {:else if unitTypes[e.TypeID]?.name}
+                  <dt>Name</dt>             <dd>{unitTypes[e.TypeID].name}</dd>
+                {/if}
+                {#if unitTypes[e.TypeID]?.category}
+                  <dt>Category</dt>         <dd>{unitTypes[e.TypeID].category}</dd>
+                {/if}
+                <dt>Player</dt>             <dd>{playerLabel(e.Player)}</dd>
+              </dl>
+            </div>
           </Accordion>
           <Accordion id="p:transform" label="Transform" open={isOpen('p:transform', true)}
                      on:toggle={onSectionToggle}>
@@ -1270,6 +1368,31 @@
   }
   .explorer-list li:hover { background: #1f1f23; }
   .explorer-list li.selected { background: #1e3a8a; color: #e4e4e7; }
+
+  /* Row icon / placeholder slot. Reserves a fixed 18x18 box at the start
+     of every row so the name column aligns whether the row has an icon,
+     a team-color swatch, or just the placeholder square. The placeholder
+     is a neutral dim square that's deliberately subdued — it shouldn't
+     read as a missing image. */
+  .explorer-list li .icon-slot {
+    flex: 0 0 auto;
+    width: 18px; height: 18px;
+    display: inline-block;
+    border-radius: 2px;
+  }
+  .explorer-list li .icon-slot.row-icon {
+    object-fit: cover;
+    background: #1c1c1f; /* shows briefly during decode */
+  }
+  .explorer-list li .icon-slot.placeholder {
+    background: #27272a;
+    border: 1px solid #3f3f46;
+  }
+  .explorer-list li .icon-slot.swatch {
+    border: 1px solid rgba(255,255,255,0.15);
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.4);
+  }
+
   .explorer-list li .name {
     color: #e4e4e7; font-weight: 500; flex: 0 1 auto; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1295,6 +1418,29 @@
   .doodad-subs :global(.acc-header) {
     padding-left: 24px;
   }
+
+  /* Identity section header: 56px icon on the left, props grid on the right.
+     The icon mirrors the kind cue the Explorer row icons give, scaled up so
+     the Properties panel reads "this is what's selected" at a glance. */
+  .identity {
+    display: grid; grid-template-columns: 56px 1fr;
+    gap: 0 12px; padding: 10px 16px; align-items: start;
+  }
+  .identity-icon {
+    width: 56px; height: 56px; border-radius: 4px;
+    background: #1c1c1f; object-fit: cover;
+    border: 1px solid #27272a;
+  }
+  .identity-icon.placeholder {
+    background: #27272a; border: 1px solid #3f3f46;
+  }
+  .identity-icon.swatch {
+    border: 1px solid rgba(255,255,255,0.18);
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.4);
+  }
+  /* Props grid inside .identity nests without its own padding — the parent
+     .identity already supplies the section padding. */
+  .identity-props { padding: 0 !important; }
 
   /* Properties */
   .props {
