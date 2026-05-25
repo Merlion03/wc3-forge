@@ -161,6 +161,10 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
   }
   function onKeyDown(e: KeyboardEvent) { keysDown.add(e.key.toLowerCase()) }
   function onKeyUp(e: KeyboardEvent) { keysDown.delete(e.key.toLowerCase()) }
+  // If the window loses focus (alt-tab, click on another app) while a pan
+  // key is held, the keyup never reaches us and the camera drifts forever.
+  // Clear all held keys on blur / hide so the next focus starts fresh.
+  function onBlur() { keysDown.clear() }
 
   canvas.addEventListener('mousemove', onMouseMove)
   canvas.addEventListener('mouseleave', onMouseLeave)
@@ -170,6 +174,8 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
   canvas.addEventListener('wheel', onWheel, { passive: false })
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
+  window.addEventListener('blur', onBlur)
+  document.addEventListener('visibilitychange', onBlur)
 
   // Per-frame: keyboard pan only (edge pan removed — the cursor leaving the
   // window would strand the camera mid-pan). Driven by RAF, throttled to
@@ -242,6 +248,8 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
       canvas.removeEventListener('wheel', onWheel)
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onBlur)
+      document.removeEventListener('visibilitychange', onBlur)
     },
   }
 }
