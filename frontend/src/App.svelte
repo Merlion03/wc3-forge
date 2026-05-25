@@ -77,6 +77,11 @@
   let terrainPickModeOn: boolean = $state(false)
   let terrainCell: TerrainCellInfo | null = $state(null)
 
+  // Gizmo mode (Phase C). Mirrors scene.getGizmoMode() — the source of truth
+  // lives in gizmo.ts; this is the reactive shadow that drives the header
+  // mode-switch UI. Defaults match the scene's own default.
+  let gizmoMode: 'move' | 'rotate' | 'scale' = $state('move')
+
   // Doodad-category visibility — owned here, mirrored to scene via
   // scene.setDoodadCategoryVisible. Categories absent from the map are
   // omitted from the View menu. Visibility is RENDERING-ONLY (never persists
@@ -538,6 +543,14 @@
         case 'minimap.toggle':
           toggleMinimap()
           break
+        case 'gizmo.mode': {
+          // Args: 'move' | 'rotate' | 'scale'. Drives the gizmo's mode UI +
+          // scene state from automated verification (WebView2 drops some
+          // synthetic input — same reason minimap.click exists).
+          const m = args[0]
+          if (m === 'move' || m === 'rotate' || m === 'scale') setGizmoMode(m)
+          break
+        }
         case 'minimap.click': {
           // Args: u v (normalized image-pixel coords, 0..1 each).
           // Synthesizes the click handler since WebView2 drops real synthetic
@@ -610,6 +623,28 @@
       e.preventDefault()
       toggleMinimap()
     }
+    // Gizmo mode hotkeys: W=move, E=rotate, R=scale (Blender-ish; we use W
+    // instead of G to avoid colliding with WASD camera pan if that returns
+    // someday). Bare keys only; ignore when typing in an input.
+    if (!e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
+        && (e.key === 'w' || e.key === 'W' || e.key === 'e' || e.key === 'E' || e.key === 'r' || e.key === 'R')) {
+      const tgt = e.target as HTMLElement | null
+      const tagName = tgt?.tagName?.toLowerCase()
+      if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
+      const next: 'move' | 'rotate' | 'scale' | null =
+        (e.key === 'w' || e.key === 'W') ? 'move' :
+        (e.key === 'e' || e.key === 'E') ? 'rotate' :
+        (e.key === 'r' || e.key === 'R') ? 'scale' : null
+      if (next) {
+        e.preventDefault()
+        setGizmoMode(next)
+      }
+    }
+  }
+
+  function setGizmoMode(m: 'move' | 'rotate' | 'scale') {
+    gizmoMode = m
+    scene?.setGizmoMode(m)
   }
 
   async function doSave() {
@@ -1235,6 +1270,33 @@
     </div>
 
     <div class="flex items-center gap-1.5">
+      <!-- Gizmo mode toggle (Phase C): Move / Rotate / Scale.
+           Bare hotkeys W / E / R. Active mode is highlighted; inactive modes
+           sit in muted-secondary so the active one reads at a glance. -->
+      <div class="flex items-center" role="group" aria-label="Gizmo mode">
+        <Button
+          size="sm"
+          variant={gizmoMode === 'move' ? 'default' : 'secondary'}
+          class="rounded-r-none {gizmoMode === 'move' ? 'bg-amber-500 text-white hover:bg-amber-600' : ''}"
+          onclick={() => setGizmoMode('move')}
+          title="Move (W) — drag arrows to translate"
+        >Move</Button>
+        <Button
+          size="sm"
+          variant={gizmoMode === 'rotate' ? 'default' : 'secondary'}
+          class="rounded-none border-l-0 {gizmoMode === 'rotate' ? 'bg-amber-500 text-white hover:bg-amber-600' : ''}"
+          onclick={() => setGizmoMode('rotate')}
+          title="Rotate (E) — drag the Z ring to rotate around vertical axis"
+        >Rotate</Button>
+        <Button
+          size="sm"
+          variant={gizmoMode === 'scale' ? 'default' : 'secondary'}
+          class="rounded-l-none border-l-0 {gizmoMode === 'scale' ? 'bg-amber-500 text-white hover:bg-amber-600' : ''}"
+          onclick={() => setGizmoMode('scale')}
+          title="Scale (R) — drag a cube to scale uniformly"
+        >Scale</Button>
+      </div>
+      <span class="mx-1 inline-block h-5 w-px bg-border" aria-hidden="true"></span>
       <Button
         size="sm"
         variant={terrainPickModeOn ? 'default' : 'secondary'}

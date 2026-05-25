@@ -566,6 +566,14 @@ export interface SceneAPI {
    * pipeline for terrain picking. No allocations beyond the returned array.
    */
   getViewportFrustumCorners(): Array<[number, number]> | null
+  /**
+   * Set the gizmo's active mode (move/rotate/scale). Cancels any in-progress
+   * drag. No-op if mode is unchanged. The mode-switch UI in App.svelte routes
+   * here on button click or W/E/R hotkey.
+   */
+  setGizmoMode(mode: 'move' | 'rotate' | 'scale'): void
+  /** Current gizmo mode — for UI display. */
+  getGizmoMode(): 'move' | 'rotate' | 'scale'
 }
 
 export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {
@@ -980,6 +988,11 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // needing a parallel cn → typeId map. Cheap, non-intrusive — the lib
     // never touches custom properties on its node objects.
     ;(inst as any).__wc3ForgeTypeId = unit.type_id
+    // Stash current rotation + scale so the gizmo's rotate/scale drag can
+    // snapshot the "orig" values without round-tripping through Go. Updated
+    // by the entity-changed event subscriber when rotation/scale mutate.
+    ;(inst as any).__wc3ForgeRotation = unit.rotation
+    ;(inst as any).__wc3ForgeScale = [unit.scale[0], unit.scale[1], unit.scale[2]]
     if (info.red || info.green || info.blue) {
       inst.setVertexColor([info.red / 255, info.green / 255, info.blue / 255, 1])
     }
@@ -1077,6 +1090,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     }
     inst.rotateLocal(rot)
     inst.uniformScale((d.scale[0] || 1) * (info.model_scale || 1))
+    // Stash placement rotation (yaw only, before pitch/roll composition) +
+    // raw scale + model_scale on the inst so the gizmo can snapshot orig
+    // values for its rotate/scale drag without needing a Go round-trip.
+    // Live-preview during rotate reapplies a yaw-only quat (loses pitch/roll
+    // visually until next map reload — acceptable cosmetic during drag).
+    ;(inst as any).__wc3ForgeRotation = d.rotation
+    ;(inst as any).__wc3ForgeScale = [d.scale[0] || 1, d.scale[1] || 1, d.scale[2] || 1]
+    ;(inst as any).__wc3ForgeModelScale = info.model_scale || 1
     // Record category so visibility toggles can find this instance by cat
     // without re-walking the type index. "" → "Uncategorized" so unknown rows
     // land in a single bucket that's still toggleable via the View menu.
@@ -1486,7 +1507,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       const gizmoHit = gizmo.rayPick(px, py, scene, canvas)
       if (gizmoHit) {
         gizmo.beginDrag(
-          gizmoHit.axis, px, py, scene, canvas,
+          gizmoHit, px, py, scene, canvas,
           gizmoSelectionItems,
           unitInstances, doodadInstances,
           unitTypeIndexCache,
@@ -1867,15 +1888,53 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // future Field values that don't map to scene state). Kind-branched so
   // unit + doodad position updates take their respective code paths.
   const ENTITY_EVENT = 'wc3-forge:entity-changed'
-  EventsOn(ENTITY_EVENT, (payload: { kind: string; id: number; field: string; position: number[] }) => {
+  type EntityChangedPayload = {
+    kind: string
+    id: number
+    field: string
+    position?: number[]
+    rotation?: number
+    scale?: number[]
+  }
+  // Update inst.localRotation to a yaw-only Z quat. Loses any pitch/roll
+  // that placeDoodad composed in — acceptable, same compromise as the
+  // gizmo's live-preview path. Next loadMap rebuilds the full composition.
+  function applyRotation(inst: any, rot: number) {
+    const h = rot / 2
+    const q: [number, number, number, number] = [0, 0, Math.sin(h), Math.cos(h)]
+    if (typeof inst.setRotation === 'function') {
+      inst.setRotation(q)
+    }
+    inst.__wc3ForgeRotation = rot
+  }
+  function applyScale(inst: any, s: number[]) {
+    // Visual is uniform via scale[0]; the stash captures all three for
+    // future per-axis surfaces and so the gizmo's orig snapshot reads
+    // what was actually committed.
+    const modelScale = inst.__wc3ForgeModelScale ?? 1
+    if (typeof inst.uniformScale === 'function') {
+      inst.uniformScale(s[0] * modelScale)
+    }
+    inst.__wc3ForgeScale = [s[0], s[1], s[2]]
+  }
+  EventsOn(ENTITY_EVENT, (payload: EntityChangedPayload) => {
     if (!payload) return
-    if (payload.field !== 'position') return
-    const p = payload.position
-    if (!p || p.length < 3) return
-    if (payload.kind === 'unit') {
-      updateUnitPositionImpl(payload.id, p[0], p[1], p[2])
-    } else if (payload.kind === 'doodad') {
-      updateDoodadPositionImpl(payload.id, p[0], p[1], p[2])
+    const kind = payload.kind
+    if (payload.field === 'position') {
+      const p = payload.position
+      if (!p || p.length < 3) return
+      if (kind === 'unit')        updateUnitPositionImpl(payload.id, p[0], p[1], p[2])
+      else if (kind === 'doodad') updateDoodadPositionImpl(payload.id, p[0], p[1], p[2])
+    } else if (payload.field === 'rotation') {
+      const r = payload.rotation
+      if (typeof r !== 'number') return
+      const inst = kind === 'unit' ? unitInstances.get(payload.id) : doodadInstances.get(payload.id)
+      if (inst) applyRotation(inst, r)
+    } else if (payload.field === 'scale') {
+      const s = payload.scale
+      if (!s || s.length < 3) return
+      const inst = kind === 'unit' ? unitInstances.get(payload.id) : doodadInstances.get(payload.id)
+      if (inst) applyScale(inst, s)
     }
   })
 
@@ -2208,6 +2267,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     },
     onPick(cb: PickCallback) {
       pickCallback = cb
+    },
+    setGizmoMode(m: 'move' | 'rotate' | 'scale') {
+      gizmo?.setMode(m)
+    },
+    getGizmoMode(): 'move' | 'rotate' | 'scale' {
+      return gizmo?.getMode() ?? 'move'
     },
     setReforgedMode(b: boolean) {
       if (b === currentReforged) return
