@@ -697,6 +697,41 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			if i > 0 && j > 0 && cornerRomp[idx-W-1] {
 				anyRomp = true
 			}
+			// Plateau-top ramp adjacency: catch corners that sit at the TOP
+			// of a ramp transition whose clifftrans MDX doesn't exist (e.g.
+			// flat-ramp AALL patterns Blizzard didn't ship). Without this,
+			// the corner sandwiched between two ramp cells at the plateau
+			// top stays Itbk, leaving a small wedge of base-floor texture
+			// inside the cliff-frame composite — e.g. corner (12, 68) on
+			// Enfo's FFB spear-tip plateau between ramp cells (11, 67) and
+			// (12, 67). HiveWE's `corner_romp[]` doesn't cover this case
+			// (gated on hierarchy.file_exists), so its `real_tile_texture`
+			// also misses it; but visually HiveWE renders these corners
+			// "as if" they were on the cliff because the surrounding cliff/
+			// ramp geometry visually completes the frame anyway.
+			//
+			// Heuristic: if this corner is touched by a cell whose BL is
+			// ramp-flagged AND at the SAME layer height as this corner,
+			// the corner sits at that ramp's TOP — treat it as romp-adjacent.
+			// The layer-height match prevents accidental fire on plateau
+			// corners adjacent to ramps at lower layers (where the ramp
+			// rises away from the corner, not toward it).
+			lhCorner := t.Tiles[idx].LayerHeight
+			isPlateauTopAdj := func(blIdx int) bool {
+				bl := t.Tiles[blIdx]
+				return bl.HasRamp() && bl.LayerHeight == lhCorner
+			}
+			if !anyRomp {
+				if i < W-1 && j < H-1 && isPlateauTopAdj(idx) {
+					anyRomp = true
+				} else if i > 0 && j < H-1 && isPlateauTopAdj(idx-1) {
+					anyRomp = true
+				} else if i < W-1 && j > 0 && isPlateauTopAdj(idx-W) {
+					anyRomp = true
+				} else if i > 0 && j > 0 && isPlateauTopAdj(idx-W-1) {
+					anyRomp = true
+				}
+			}
 			if !anyRomp && !(anyCliff && !t.Tiles[idx].HasRamp()) {
 				continue
 			}
