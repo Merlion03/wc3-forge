@@ -29,6 +29,7 @@
 
 import * as MV_ns from 'mdx-m3-viewer'
 import { flog } from './debuglog'
+import { patchMdxParser } from './mdx-parser-patch'
 import {
   ListUnits, ListDoodads, GetUnitTypeIndex, GetDoodadTypeIndex, GetTerrain,
   GetPathingMap, MoveUnit,
@@ -42,6 +43,15 @@ import { computeCliffPlacements, renderCliffs, type CliffRendering } from './cli
 import {
   buildSlocRenderer, type SlocRenderer, type SlocMarker,
 } from './sloc-markers'
+
+// Apply the MDX parser patch BEFORE any viewer code touches the library — the
+// lib's MdxModel constructor parses on construction, and the patch fixes a
+// Reforged-1.32+ format mismatch that otherwise leaves loaded models with
+// zero bones / zero geosets (so the model "loads" silently but renders
+// nothing). See mdx-parser-patch.ts for the failure mode and patch details.
+// Runs at module-load time (before createScene is even called), guarded by
+// an idempotency flag so multiple imports don't double-wrap.
+patchMdxParser()
 
 const MV: any = (MV_ns as any).default ?? MV_ns
 
