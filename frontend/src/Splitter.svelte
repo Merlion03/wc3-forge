@@ -1,46 +1,59 @@
 <script lang="ts">
-  // Horizontal drag-resize handle for stacked vertical sections. Sits between
-  // two flex children inside a column flexbox; while dragged, calls onDrag(dy)
-  // each frame with the pointer's delta since the last call. Parent owns the
-  // pixel sizes and decides how to apportion the delta — this component is
-  // purely the gesture surface.
+  // Drag-resize splitter handle. Defaults to the original "horizontal bar that
+  // drags vertically" mode (between stacked sections in a column flexbox) and
+  // also supports a "vertical bar that drags horizontally" mode (between
+  // side-by-side sections in a row layout, e.g. between the viewport and the
+  // right column).
+  //
+  // The component is purely the gesture surface — the parent owns the pixel
+  // sizes and decides how to apportion the delta.
   //
   // Design choices:
-  //  - 4px tall strip; visible 1px line via background-clip, expands on hover
+  //  - 4px thick strip; visible 1px line via inset background, expands on hover
   //    so the drag affordance is obvious-but-not-loud (matches VS Code's
   //    sidebar-section dividers).
-  //  - cursor: ns-resize on the strip + globally during drag (so the cursor
-  //    doesn't flicker when the pointer briefly leaves the 4px strip while
-  //    dragging fast).
+  //  - cursor: ns-resize / ew-resize on the strip + globally during drag (so
+  //    the cursor doesn't flicker when the pointer briefly leaves the 4px
+  //    strip while dragging fast).
   //  - PointerEvents (not Mouse) — captures the pointer so move/up fire even
   //    if the cursor leaves the window. setPointerCapture is critical: without
   //    it, Wails/WebView2 stops delivering pointer events outside the strip
   //    bounds when the drag goes fast.
+  //
+  // Direction prop:
+  //  - 'horizontal' (default): the SEPARATOR line is horizontal, drag axis is
+  //    vertical (ns-resize). Callback receives dy.
+  //  - 'vertical': the separator line is vertical, drag axis is horizontal
+  //    (ew-resize). Callback receives dx.
 
-  export let onDrag: (dy: number) => void
+  export let onDrag: (delta: number) => void
   // Optional callback fired on drag-end so consumers can persist final sizes
   // (e.g. snap-to-min, save to localStorage). Not used yet but cheap to plumb.
   export let onDragEnd: (() => void) | undefined = undefined
+  export let direction: 'horizontal' | 'vertical' = 'horizontal'
 
   let dragging = false
-  let lastY = 0
+  let lastCoord = 0
+
+  $: cursor = direction === 'vertical' ? 'ew-resize' : 'ns-resize'
 
   function onPointerDown(e: PointerEvent) {
     if (e.button !== 0) return
     dragging = true
-    lastY = e.clientY
+    lastCoord = direction === 'vertical' ? e.clientX : e.clientY
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
     // Lock cursor + disable text-selection during drag so the user doesn't
     // accidentally select panel text while dragging. Cleared on pointerup.
-    document.body.style.cursor = 'ns-resize'
+    document.body.style.cursor = cursor
     document.body.style.userSelect = 'none'
     e.preventDefault()
   }
   function onPointerMove(e: PointerEvent) {
     if (!dragging) return
-    const dy = e.clientY - lastY
-    lastY = e.clientY
-    if (dy !== 0) onDrag(dy)
+    const cur = direction === 'vertical' ? e.clientX : e.clientY
+    const d = cur - lastCoord
+    lastCoord = cur
+    if (d !== 0) onDrag(d)
   }
   function onPointerUp(e: PointerEvent) {
     if (!dragging) return
@@ -54,8 +67,9 @@
 
 <div class="splitter"
      class:dragging
+     class:vertical={direction === 'vertical'}
      role="separator"
-     aria-orientation="horizontal"
+     aria-orientation={direction}
      on:pointerdown={onPointerDown}
      on:pointermove={onPointerMove}
      on:pointerup={onPointerUp}
@@ -71,6 +85,12 @@
     background: transparent;
     position: relative;
     z-index: 2;
+  }
+  .splitter.vertical {
+    height: auto;
+    width: 4px;
+    align-self: stretch;
+    cursor: ew-resize;
   }
   .splitter .line {
     position: absolute;
