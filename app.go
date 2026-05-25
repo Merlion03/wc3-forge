@@ -697,6 +697,41 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			if i > 0 && j > 0 && cornerRomp[idx-W-1] {
 				anyRomp = true
 			}
+			// Plateau-top ramp adjacency: catch corners that sit at the TOP
+			// of a ramp transition whose clifftrans MDX doesn't exist (e.g.
+			// flat-ramp AALL patterns Blizzard didn't ship). Without this,
+			// the corner sandwiched between two ramp cells at the plateau
+			// top stays Itbk, leaving a small wedge of base-floor texture
+			// inside the cliff-frame composite — e.g. corner (12, 68) on
+			// Enfo's FFB spear-tip plateau between ramp cells (11, 67) and
+			// (12, 67). HiveWE's `corner_romp[]` doesn't cover this case
+			// (gated on hierarchy.file_exists), so its `real_tile_texture`
+			// also misses it; but visually HiveWE renders these corners
+			// "as if" they were on the cliff because the surrounding cliff/
+			// ramp geometry visually completes the frame anyway.
+			//
+			// Heuristic: if this corner is touched by a cell whose BL is
+			// ramp-flagged AND at the SAME layer height as this corner,
+			// the corner sits at that ramp's TOP — treat it as romp-adjacent.
+			// The layer-height match prevents accidental fire on plateau
+			// corners adjacent to ramps at lower layers (where the ramp
+			// rises away from the corner, not toward it).
+			lhCorner := t.Tiles[idx].LayerHeight
+			isPlateauTopAdj := func(blIdx int) bool {
+				bl := t.Tiles[blIdx]
+				return bl.HasRamp() && bl.LayerHeight == lhCorner
+			}
+			if !anyRomp {
+				if i < W-1 && j < H-1 && isPlateauTopAdj(idx) {
+					anyRomp = true
+				} else if i > 0 && j < H-1 && isPlateauTopAdj(idx-1) {
+					anyRomp = true
+				} else if i < W-1 && j > 0 && isPlateauTopAdj(idx-W) {
+					anyRomp = true
+				} else if i > 0 && j > 0 && isPlateauTopAdj(idx-W-1) {
+					anyRomp = true
+				}
+			}
 			if !anyRomp && !(anyCliff && !t.Tiles[idx].HasRamp()) {
 				continue
 			}
@@ -1044,6 +1079,36 @@ func (a *App) MoveUnit(creationNumber uint32, x, y, z float32) error {
 // either kind, so no additional Wails wiring is needed here.
 func (a *App) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 	return forge.Current.MoveDoodad(creationNumber, x, y, z)
+}
+
+// RotateUnit sets the facing angle (radians, Z-axis only) of the unit with the
+// given creation_number. The gizmo's rotate-handle commits via this method.
+// Mirrors MoveUnit's error-handling shape: no-op on same value, dirty-flip on
+// first edit, entity-changed event fires after unlock.
+func (a *App) RotateUnit(creationNumber uint32, rotation float32) error {
+	return forge.Current.RotateUnit(creationNumber, rotation)
+}
+
+// RotateDoodad sets the facing angle (radians, Z-axis only) of the doodad with
+// the given creation_number. Mirrors MoveDoodad's wire contract and shape.
+// See session.RotateDoodad for the fixed_rot clamping contract (Phase C).
+func (a *App) RotateDoodad(creationNumber uint32, rotation float32) error {
+	return forge.Current.RotateDoodad(creationNumber, rotation)
+}
+
+// ScaleUnit sets the per-axis scale of the unit with the given creation_number.
+// sx/sy/sz are runtime-normalized values (1.0 = default size, matching the
+// BlzSetUnitScale convention). The session mutator clears the on-disk scaleRaw
+// preservation field so Encode emits the new value instead of the stale bits.
+func (a *App) ScaleUnit(creationNumber uint32, sx, sy, sz float32) error {
+	return forge.Current.ScaleUnit(creationNumber, sx, sy, sz)
+}
+
+// ScaleDoodad sets the per-axis scale of the doodad with the given
+// creation_number. Doodad scale is stored raw on disk (no /128 divide at
+// Parse), so the values passed here are written verbatim by Encode.
+func (a *App) ScaleDoodad(creationNumber uint32, sx, sy, sz float32) error {
+	return forge.Current.ScaleDoodad(creationNumber, sx, sy, sz)
 }
 
 // IsDirty reports whether the session has unsaved edits. The header Save

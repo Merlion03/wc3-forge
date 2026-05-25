@@ -445,6 +445,20 @@ func readEntity(r *reader, subversion uint32) (Entity, error) {
 	return e, nil
 }
 
+// ClearScaleRaw zeroes the unexported scaleRaw preservation field on e so that
+// the next Encode call derives on-disk scale from e.Scale*128 rather than
+// preserving the original raw bytes. Call this whenever the public Scale field
+// is changed by a mutator (e.g. Session.ScaleUnit) — otherwise Encode silently
+// keeps the OLD on-disk bits because it prefers scaleRaw when non-zero.
+//
+// This accessor is needed because scaleRaw is unexported (its only purpose is
+// byte-faithful round-tripping of the original file; callers that hand-edit
+// Scale must opt out of that preservation). Doodads do NOT have this issue —
+// their Scale is stored raw on disk with no /128 divide at Parse.
+func ClearScaleRaw(e *Entity) {
+	e.scaleRaw = [3]float32{}
+}
+
 // isPrintableFourCC reports whether all 4 bytes are in the printable ASCII range
 // 0x20..0x7E. This is the same criterion HiveWE uses for its skin_id peek
 // heuristic (`std::all_of(..., c >= 0x20 && c <= 0x7E)`).

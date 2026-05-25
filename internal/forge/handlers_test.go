@@ -71,6 +71,79 @@ func TestHandleMapSave_MPQSentinelMessage(t *testing.T) {
 	}
 }
 
+// TestHandleUnitsRotate_InvalidParams asserts the param-unmarshal path surfaces
+// a clean error for malformed input.
+func TestHandleUnitsRotate_InvalidParams(t *testing.T) {
+	if _, err := handleUnitsRotate(json.RawMessage(`{"creation_number":"bad"}`)); err == nil {
+		t.Fatal("expected error for malformed creation_number")
+	}
+}
+
+// TestHandleUnitsRotate_NoMap asserts the "no map loaded" path returns an error.
+func TestHandleUnitsRotate_NoMap(t *testing.T) {
+	prev := Current
+	t.Cleanup(func() { Current = prev })
+	Current = &Session{}
+	_, err := handleUnitsRotate(json.RawMessage(`{"creation_number":1,"rotation":1.57}`))
+	if err == nil {
+		t.Fatal("expected error when no map loaded")
+	}
+}
+
+// TestHandleDoodadsRotate_InvalidParams mirrors the units variant.
+func TestHandleDoodadsRotate_InvalidParams(t *testing.T) {
+	if _, err := handleDoodadsRotate(json.RawMessage(`{"creation_number":"bad"}`)); err == nil {
+		t.Fatal("expected error for malformed creation_number")
+	}
+}
+
+// TestHandleDoodadsRotate_NoMap asserts "no map loaded" returns an error.
+func TestHandleDoodadsRotate_NoMap(t *testing.T) {
+	prev := Current
+	t.Cleanup(func() { Current = prev })
+	Current = &Session{}
+	_, err := handleDoodadsRotate(json.RawMessage(`{"creation_number":1,"rotation":1.57}`))
+	if err == nil {
+		t.Fatal("expected error when no map loaded")
+	}
+}
+
+// TestHandleUnitsScale_InvalidParams asserts malformed input returns an error.
+func TestHandleUnitsScale_InvalidParams(t *testing.T) {
+	if _, err := handleUnitsScale(json.RawMessage(`{"creation_number":"bad"}`)); err == nil {
+		t.Fatal("expected error for malformed creation_number")
+	}
+}
+
+// TestHandleUnitsScale_NoMap asserts "no map loaded" returns an error.
+func TestHandleUnitsScale_NoMap(t *testing.T) {
+	prev := Current
+	t.Cleanup(func() { Current = prev })
+	Current = &Session{}
+	_, err := handleUnitsScale(json.RawMessage(`{"creation_number":1,"sx":1.0,"sy":1.0,"sz":1.0}`))
+	if err == nil {
+		t.Fatal("expected error when no map loaded")
+	}
+}
+
+// TestHandleDoodadsScale_InvalidParams mirrors the units variant.
+func TestHandleDoodadsScale_InvalidParams(t *testing.T) {
+	if _, err := handleDoodadsScale(json.RawMessage(`{"creation_number":"bad"}`)); err == nil {
+		t.Fatal("expected error for malformed creation_number")
+	}
+}
+
+// TestHandleDoodadsScale_NoMap asserts "no map loaded" returns an error.
+func TestHandleDoodadsScale_NoMap(t *testing.T) {
+	prev := Current
+	t.Cleanup(func() { Current = prev })
+	Current = &Session{}
+	_, err := handleDoodadsScale(json.RawMessage(`{"creation_number":1,"sx":1.0,"sy":1.0,"sz":1.0}`))
+	if err == nil {
+		t.Fatal("expected error when no map loaded")
+	}
+}
+
 // TestHandleMapSave_OK confirms the happy path: a folder-backed session with
 // no dirty edits returns ok:true.
 func TestHandleMapSave_OK(t *testing.T) {

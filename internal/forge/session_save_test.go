@@ -406,6 +406,296 @@ func TestApplyInfoUpdates_TypeMismatch(t *testing.T) {
 	}
 }
 
+// TestRotateUnit_Save_RoundTrip mirrors TestMoveUnit_Save_RoundTrip but for
+// rotation. Open, mutate Rotation, save, reopen, assert the new angle survived.
+func TestRotateUnit_Save_RoundTrip(t *testing.T) {
+	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("fixture %q not available: %v", src, err)
+	}
+	tmp := t.TempDir()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(src, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644); err != nil {
+			t.Fatalf("write %s: %v", e.Name(), err)
+		}
+	}
+
+	s := &Session{}
+	var dirtyHistory []bool
+	s.OnDirtyChanged(func(d bool) { dirtyHistory = append(dirtyHistory, d) })
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	units := s.Units()
+	if units == nil || len(units.Entities) == 0 {
+		t.Fatalf("expected entities in fixture, got none")
+	}
+	first := units.Entities[0]
+	cn := first.CreationNumber
+	origRot := first.Rotation
+
+	newRot := origRot + 1.5707963 // +90° in radians
+	if err := s.RotateUnit(cn, newRot); err != nil {
+		t.Fatalf("RotateUnit: %v", err)
+	}
+	if !s.IsDirty() {
+		t.Errorf("expected dirty after RotateUnit")
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if s.IsDirty() {
+		t.Errorf("expected clean after Save")
+	}
+	if len(dirtyHistory) < 2 || !dirtyHistory[0] || dirtyHistory[len(dirtyHistory)-1] {
+		t.Errorf("dirty history = %v, want [true, ... false]", dirtyHistory)
+	}
+
+	s2 := &Session{}
+	if err := s2.Open(tmp); err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	var got *unitsdoo.Entity
+	for i := range s2.Units().Entities {
+		if s2.Units().Entities[i].CreationNumber == cn {
+			got = &s2.Units().Entities[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("entity %d disappeared on re-open", cn)
+	}
+	if got.Rotation != newRot {
+		t.Errorf("Rotation after reopen = %v, want %v", got.Rotation, newRot)
+	}
+}
+
+// TestScaleUnit_Save_RoundTrip mirrors TestMoveUnit_Save_RoundTrip but for
+// scale. The key assertion is that scaleRaw invalidation works end-to-end:
+// the re-opened entity must carry the NEW scale, not the old on-disk bits.
+func TestScaleUnit_Save_RoundTrip(t *testing.T) {
+	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("fixture %q not available: %v", src, err)
+	}
+	tmp := t.TempDir()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(src, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644); err != nil {
+			t.Fatalf("write %s: %v", e.Name(), err)
+		}
+	}
+
+	s := &Session{}
+	var dirtyHistory []bool
+	s.OnDirtyChanged(func(d bool) { dirtyHistory = append(dirtyHistory, d) })
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	units := s.Units()
+	if units == nil || len(units.Entities) == 0 {
+		t.Fatalf("expected entities in fixture, got none")
+	}
+	first := units.Entities[0]
+	cn := first.CreationNumber
+
+	newScale := [3]float32{2.0, 2.0, 2.0}
+	if err := s.ScaleUnit(cn, 2.0, 2.0, 2.0); err != nil {
+		t.Fatalf("ScaleUnit: %v", err)
+	}
+	if !s.IsDirty() {
+		t.Errorf("expected dirty after ScaleUnit")
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if s.IsDirty() {
+		t.Errorf("expected clean after Save")
+	}
+	if len(dirtyHistory) < 2 || !dirtyHistory[0] || dirtyHistory[len(dirtyHistory)-1] {
+		t.Errorf("dirty history = %v, want [true, ... false]", dirtyHistory)
+	}
+
+	// Re-open — the critical assertion for the scaleRaw gotcha.
+	s2 := &Session{}
+	if err := s2.Open(tmp); err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	var got *unitsdoo.Entity
+	for i := range s2.Units().Entities {
+		if s2.Units().Entities[i].CreationNumber == cn {
+			got = &s2.Units().Entities[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("entity %d disappeared on re-open", cn)
+	}
+	// This is the scaleRaw-invalidation regression assertion: if ClearScaleRaw
+	// was NOT called in ScaleUnit, Encode would preserve the old raw bits and
+	// the re-parsed Scale would NOT equal newScale.
+	if got.Scale != newScale {
+		t.Errorf("Scale after reopen = %v, want %v (scaleRaw invalidation may be broken)", got.Scale, newScale)
+	}
+}
+
+// TestRotateUnit_NoOp_DoesNotDirty asserts same-value RotateUnit is a no-op.
+func TestRotateUnit_NoOp_DoesNotDirty(t *testing.T) {
+	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("fixture %q not available: %v", src, err)
+	}
+	tmp := t.TempDir()
+	entries, _ := os.ReadDir(src)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
+		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
+	}
+	s := &Session{}
+	var dirtyHistory []bool
+	s.OnDirtyChanged(func(d bool) { dirtyHistory = append(dirtyHistory, d) })
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	units := s.Units()
+	if units == nil || len(units.Entities) == 0 {
+		t.Fatalf("expected entities")
+	}
+	cn := units.Entities[0].CreationNumber
+	rot := units.Entities[0].Rotation
+
+	if err := s.RotateUnit(cn, rot); err != nil {
+		t.Fatalf("RotateUnit (no-op): %v", err)
+	}
+	if s.IsDirty() {
+		t.Errorf("same-rotation RotateUnit flipped dirty")
+	}
+	if len(dirtyHistory) != 0 {
+		t.Errorf("same-rotation RotateUnit fired %d dirty events", len(dirtyHistory))
+	}
+}
+
+// TestRotateUnit_FiresEntityChanged asserts RotateUnit emits an entity-changed
+// event with Field="rotation" and the correct Rotation value in the payload.
+func TestRotateUnit_FiresEntityChanged(t *testing.T) {
+	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("fixture %q not available: %v", src, err)
+	}
+	tmp := t.TempDir()
+	entries, _ := os.ReadDir(src)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
+		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
+	}
+	s := &Session{}
+	var changes []EntityChange
+	s.OnEntityChanged(func(c EntityChange) { changes = append(changes, c) })
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	units := s.Units()
+	if units == nil || len(units.Entities) == 0 {
+		t.Fatalf("expected entities")
+	}
+	cn := units.Entities[0].CreationNumber
+	rot := units.Entities[0].Rotation
+	newRot := rot + 0.5
+
+	if err := s.RotateUnit(cn, newRot); err != nil {
+		t.Fatalf("RotateUnit: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 entity-change event, got %d", len(changes))
+	}
+	got := changes[0]
+	if got.Kind != "unit" {
+		t.Errorf("Kind = %q, want unit", got.Kind)
+	}
+	if got.Field != "rotation" {
+		t.Errorf("Field = %q, want rotation", got.Field)
+	}
+	if got.Rotation != newRot {
+		t.Errorf("Rotation = %v, want %v", got.Rotation, newRot)
+	}
+}
+
+// TestScaleUnit_FiresEntityChanged asserts ScaleUnit emits an entity-changed
+// event with Field="scale" and the correct Scale values in the payload.
+func TestScaleUnit_FiresEntityChanged(t *testing.T) {
+	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("fixture %q not available: %v", src, err)
+	}
+	tmp := t.TempDir()
+	entries, _ := os.ReadDir(src)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
+		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
+	}
+	s := &Session{}
+	var changes []EntityChange
+	s.OnEntityChanged(func(c EntityChange) { changes = append(changes, c) })
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	units := s.Units()
+	if units == nil || len(units.Entities) == 0 {
+		t.Fatalf("expected entities")
+	}
+	cn := units.Entities[0].CreationNumber
+	newScale := [3]float32{1.5, 1.5, 1.5}
+
+	if err := s.ScaleUnit(cn, 1.5, 1.5, 1.5); err != nil {
+		t.Fatalf("ScaleUnit: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 entity-change event, got %d", len(changes))
+	}
+	got := changes[0]
+	if got.Kind != "unit" {
+		t.Errorf("Kind = %q, want unit", got.Kind)
+	}
+	if got.Field != "scale" {
+		t.Errorf("Field = %q, want scale", got.Field)
+	}
+	if got.Scale != newScale {
+		t.Errorf("Scale = %v, want %v", got.Scale, newScale)
+	}
+}
+
 // TestMPQ_SaveReturnsSentinel asserts MPQ-backed sessions reject Save with
 // the documented sentinel error so the UI can show a friendly toast.
 func TestMPQ_SaveReturnsSentinel(t *testing.T) {

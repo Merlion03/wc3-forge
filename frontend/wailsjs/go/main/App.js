@@ -102,8 +102,24 @@ export function OpenMapDialog() {
   return window['go']['main']['App']['OpenMapDialog']();
 }
 
+export function RotateDoodad(arg1, arg2) {
+  return window['go']['main']['App']['RotateDoodad'](arg1, arg2);
+}
+
+export function RotateUnit(arg1, arg2) {
+  return window['go']['main']['App']['RotateUnit'](arg1, arg2);
+}
+
 export function SaveMap() {
   return window['go']['main']['App']['SaveMap']();
+}
+
+export function ScaleDoodad(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['ScaleDoodad'](arg1, arg2, arg3, arg4);
+}
+
+export function ScaleUnit(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['ScaleUnit'](arg1, arg2, arg3, arg4);
 }
 
 export function SelectUnit(arg1) {

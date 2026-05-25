@@ -9,15 +9,24 @@
   // centered on terrain.center_offset). We convert minimap-pixel → world-coord
   // and call SceneAPI.panTo to move the 3D camera. Same affordance HiveWE has.
   //
-  // Camera-frustum overlay is intentionally NOT drawn (deferred). The HTML
-  // overlay updates the image once per map-load; a per-frame frustum overlay
-  // would need RAF + canvas redraws and adds polish without changing the
-  // core "click to navigate" workflow.
+  // Camera-frustum overlay: an SVG <polygon> stroked on top of the image.
+  // Each canvas-corner's screen→world ray is intersected with the z=0 ground
+  // plane (delegated to SceneAPI.getViewportFrustumCorners — same math the
+  // terrain picker uses). Those 4 world points are mapped to minimap pixel
+  // coords via the inverse of the click-to-pan formula below. A RAF tick
+  // re-reads the corners every frame so the polygon tracks live camera
+  // panning / zoom. Cost is tiny (4 ray-cast + plane intersections + an SVG
+  // attribute write); cheap enough not to bother with delta-checking.
+  //
+  // SVG over Canvas: pure DOM, Svelte-reactive, no extra GL state to babysit.
+  // The polygon's points are in a normalized [0..1] viewBox so the same
+  // numbers work regardless of the rendered overlay's pixel size. The
+  // container's overflow:hidden naturally clips edges that fall outside the
+  // minimap when the camera is at the world border or near-vertical zoom.
   //
   // Visibility is owned by App.svelte (which gates the mount), as is the
   // global 'M' hotkey — this component just renders when mounted.
 
-  import { onMount, onDestroy } from 'svelte'
   import { GetMinimapBytes, GetTerrain } from '../wailsjs/go/main/App.js'
   import { decodeImageBytes } from './icon-loader'
   import type { SceneAPI } from './scene-instances'
@@ -60,11 +69,94 @@
   // don't double-fire on the same generation.
   let lastAppliedGen = -1
 
+  // Frustum polygon — 4 minimap-pixel-space (px, py) tuples in TL→TR→BR→BL
+  // order, normalized to the [0..1] range so the SVG viewBox math is trivial.
+  // Empty array means "don't draw" (no map, or camera math returned null).
+  // Updated per-RAF by tickFrustum() below; the SVG points attribute is a
+  // $derived that rebuilds whenever frustumPts changes.
+  let frustumPts = $state<Array<[number, number]>>([])
+  // Stringified SVG points attribute. Recomputed reactively whenever
+  // frustumPts changes. Use a 4-corner POLYGON (closed implicitly by <polygon>).
+  let frustumPointsAttr = $derived(
+    frustumPts.length === 4
+      ? frustumPts.map(([u, v]) => `${u.toFixed(4)},${v.toFixed(4)}`).join(' ')
+      : '',
+  )
+
   // Hot-path reactive: whenever mapLoadGen advances, reload the minimap.
+  // mapLoadGen=0 is a valid generation (map may already be loaded by the
+  // time we mount), so the lastAppliedGen=-1 sentinel ensures the first
+  // run fires too — no separate onMount() initial-load needed.
   $effect(() => {
     if (mapLoadGen !== lastAppliedGen) {
       lastAppliedGen = mapLoadGen
       void reload()
+    }
+  })
+
+  // Per-frame frustum-poll RAF loop + the global __minimapClick hook. Setup
+  // runs once at mount; the returned cleanup tears down the RAF + global on
+  // unmount. Idiomatic Svelte 5 (single $effect with cleanup, no onMount /
+  // onDestroy pair).
+  $effect(() => {
+    // Start the per-frame frustum-poll RAF loop. Cheap (4 ray casts +
+    // assignment), and naturally pauses when the tab is backgrounded.
+    let rafId = requestAnimationFrame(tickFrustum)
+    function tickFrustum() {
+      rafId = requestAnimationFrame(tickFrustum)
+      if (!scene || !dataURL || terrainW <= 1 || terrainH <= 1) {
+        if (frustumPts.length !== 0) frustumPts = []
+        return
+      }
+      const corners = scene.getViewportFrustumCorners()
+      if (!corners || corners.length !== 4) {
+        if (frustumPts.length !== 0) frustumPts = []
+        return
+      }
+      const worldW = (terrainW - 1) * STUDS_PER_CELL
+      const worldH = (terrainH - 1) * STUDS_PER_CELL
+      const next: Array<[number, number]> = []
+      for (const [wx, wy] of corners) {
+        const u = (wx - centerOffset[0]) / worldW
+        const v = 1 - (wy - centerOffset[1]) / worldH
+        next.push([u, v])
+      }
+      frustumPts = next
+    }
+
+    // Test-driver hook: simulates a click at normalized (u, v) coords in the
+    // minimap image's pixel space (0..1 each, origin top-left). Used by the
+    // verification harness because WebView2 drops synthetic mouse input on
+    // the actual canvas, but the same click-to-pan math is reachable here.
+    ;(window as any).__minimapClick = (u: number, v: number) => {
+      if (!scene) return false
+      if (terrainW <= 1 || terrainH <= 1) return false
+      const cu = Math.max(0, Math.min(1, u))
+      const cv = Math.max(0, Math.min(1, v))
+      const worldW = (terrainW - 1) * STUDS_PER_CELL
+      const worldH = (terrainH - 1) * STUDS_PER_CELL
+      const x = centerOffset[0] + cu * worldW
+      const y = centerOffset[1] + (1 - cv) * worldH
+      scene.panTo(x, y)
+      try {
+        const w: any = window
+        if (w.go?.main?.App?.LogJS) {
+          w.go.main.App.LogJS(
+            `[Minimap] click u=${cu} v=${cv} -> world x=${x.toFixed(1)} y=${y.toFixed(1)}`,
+          )
+        }
+      } catch {}
+      return { x, y }
+    }
+
+    return () => {
+      // Stop the frustum-poll RAF + drop the global hook. No subscriptions
+      // to tear down beyond these (App.svelte owns the toggle state and we
+      // just unmount when it flips false).
+      if (rafId) cancelAnimationFrame(rafId)
+      try {
+        delete (window as any).__minimapClick
+      } catch {}
     }
   })
 
@@ -131,45 +223,6 @@
     const y = centerOffset[1] + (1 - v) * worldH
     scene.panTo(x, y)
   }
-
-  onMount(() => {
-    // Initial load when the component mounts. mapLoadGen=0 is a valid
-    // generation (map may already be loaded by the time we mount), so kick
-    // an explicit first reload here independently of the reactive block.
-    void reload()
-    // Test-driver hook: simulates a click at normalized (u, v) coords in the
-    // minimap image's pixel space (0..1 each, origin top-left). Used by the
-    // verification harness because WebView2 drops synthetic mouse input on
-    // the actual canvas, but the same click-to-pan math is reachable here.
-    ;(window as any).__minimapClick = (u: number, v: number) => {
-      if (!scene) return false
-      if (terrainW <= 1 || terrainH <= 1) return false
-      const cu = Math.max(0, Math.min(1, u))
-      const cv = Math.max(0, Math.min(1, v))
-      const worldW = (terrainW - 1) * STUDS_PER_CELL
-      const worldH = (terrainH - 1) * STUDS_PER_CELL
-      const x = centerOffset[0] + cu * worldW
-      const y = centerOffset[1] + (1 - cv) * worldH
-      scene.panTo(x, y)
-      try {
-        const w: any = window
-        if (w.go?.main?.App?.LogJS) {
-          w.go.main.App.LogJS(
-            `[Minimap] click u=${cu} v=${cv} -> world x=${x.toFixed(1)} y=${y.toFixed(1)}`,
-          )
-        }
-      } catch {}
-      return { x, y }
-    }
-  })
-
-  onDestroy(() => {
-    // No subscriptions to tear down — App.svelte owns the toggle state and
-    // we just unmount when it flips false.
-    try {
-      delete (window as any).__minimapClick
-    } catch {}
-  })
 </script>
 
 <!-- Bottom-right anchor — overlays the viewport, doesn't take space in the
@@ -178,7 +231,9 @@
      overlay's height tracks the image's natural aspect ratio so non-1:1
      maps (e.g. 160×128 tile maps like Enfo's FFB) display undistorted.
      pointer-events:auto so clicks land on the minimap, but typing still
-     goes to the viewport (no focus stealing). -->
+     goes to the viewport (no focus stealing). overflow-hidden clips any
+     frustum-polygon edge that falls outside the minimap (camera looking
+     past the world border, extreme zoom-out). -->
 <div
   class="absolute right-3 bottom-3 w-48 max-h-48 bg-card/80 border border-border rounded shadow-lg overflow-hidden z-20 pointer-events-auto backdrop-blur-sm"
   style="height: calc(192px / {aspect});"
@@ -196,6 +251,32 @@
       draggable="false"
       title="Click to pan camera to this location"
     />
+    {#if frustumPointsAttr}
+      <!-- Frustum-corner polygon. viewBox is [0,1]×[0,1] so the
+           normalized (u,v) frustumPts numbers map directly to viewBox coords;
+           the rendered SVG inherits the overlay's pixel size. preserveAspectRatio
+           is "none" so the polygon stretches to match the IMAGE's aspect (which
+           the overlay's height var already accounts for). pointer-events-none
+           keeps clicks routing to the underlying <img> for click-to-pan.
+           drop-shadow lifts the line off busy minimap textures without
+           needing a heavier stroke. -->
+      <svg
+        class="absolute inset-0 w-full h-full pointer-events-none [filter:drop-shadow(0_0_1px_rgba(0,0,0,0.85))]"
+        viewBox="0 0 1 1"
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        <polygon
+          points={frustumPointsAttr}
+          fill="none"
+          stroke="#fbbf24"
+          stroke-width="1.5"
+          stroke-linejoin="round"
+          vector-effect="non-scaling-stroke"
+          opacity="0.85"
+        />
+      </svg>
+    {/if}
   {:else}
     <div
       class="flex items-center justify-center w-full h-full min-h-[80px] text-muted-foreground text-[11px] text-center px-2 box-border"
