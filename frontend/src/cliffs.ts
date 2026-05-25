@@ -1,5 +1,6 @@
 // Per-cell cliff mesh selection + placement. Mirrors HiveWE's
-// `update_cliff_meshes` in `src/base/terrain.ixx`.
+// `update_cliff_meshes` in `src/base/terrain.ixx`. Placement logic =
+// computeCliffPlacements; rendering = createCliffRenderer in cliff-shader.ts.
 //
 // Algorithm sketch:
 //   For each cell (i, j) whose four corners are NOT all at the same layer
@@ -18,29 +19,46 @@
 //   time and stored in the bottom-left corner's `cliff_var`. We try the
 //   stored variation; if the file 404s we fall back to variation 0.
 //
-//   Ramps (sloped transitions) are a separate special case — three-cell
-//   spans with a rampflag pattern. Not implemented in this first pass;
-//   filed as future work. They render as smooth slopes between layers.
+//   Ramps (sloped transitions) are a 2-cell span with a clifftrans MDX.
+//   See passes 1 + 2 below.
+//
+// ── Rendering pipeline (HiveWE-faithful) ─────────────────────────────────
+//
+// The OLD path used mdx-m3-viewer's instance system (model.addInstance() +
+// inst.rotateLocal + inst.move + inst.setScene), but that path renders
+// cliffs at a FIXED layer-Z mesh-top — ramps' sloped tops didn't conform
+// to the actual ramp surface, leaving voids.
+//
+// The NEW path (this file + cliff-shader.ts) implements HiveWE's cliff.vert
+// per-vertex displacement: each cliff vertex looks up the corresponding
+// final-ground-height at its corner and the mesh top drapes over the
+// terrain corners (vertical for pure cliffs, sloped for ramps).
+//
+// The 90° unrotation of the cliff MDX (HiveWE's vec3(vPos.y, -vPos.x, vPos.z)
+// swap) lives INSIDE the new cliff vertex shader. The previous per-instance
+// `inst.rotateLocal(CLIFF_UNROTATE_QUAT)` is REMOVED — the new path doesn't
+// create lib instances, and the shader handles the rotation in-pipe.
 
 import { flog } from './debuglog'
 import type { ModelViewer } from 'mdx-m3-viewer'
-
-// Axis-angle quaternion for -π/2 rotation around +Z (game-space yaw).
-// Used to "unrotate" cliff MDX meshes — see comment at the application site
-// in renderCliffs() below.
-//   q = [x, y, z, w] with axis = (0,0,1), angle = -π/2
-//   x=0, y=0, z=sin(-π/4)=-√2/2, w=cos(-π/4)=√2/2
-const CLIFF_UNROTATE_QUAT: number[] = [0, 0, -Math.SQRT1_2, Math.SQRT1_2]
+import {
+  createCliffRenderer,
+  uploadFinalHeights,
+  type CliffInstance,
+  type CliffRenderer,
+} from './cliff-shader'
 
 interface TerrainCliffData {
   width: number   // vertex count along X
   height: number  // vertex count along Y
   center_offset: [number, number]
+  heights: number[]            // final heights in studs (FinalZ + ramp +64 bump)
   layer_height: number[]
   cliff_tex: number[]
   cliff_var: number[]
   ramp_flags: number[]
   cliff_palette: string[]
+  cliff_palette_textures: string[]
 }
 
 export interface CliffPlacement {
@@ -48,6 +66,8 @@ export interface CliffPlacement {
   path: string
   /** World position of the cell's bottom-left corner at the base layer's Z. */
   pos: [number, number, number]
+  /** Cliff palette index (CornerCliffTexture[BL] from .w3e). */
+  paletteIdx: number
 }
 
 export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
@@ -60,28 +80,27 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
   const cx = t.center_offset[0]
   const cy = t.center_offset[1]
 
-  // Cliff palette FourCC determines which subdirectory of cliff models we use.
-  // HiveWE caches cliff_to_ground per cliffset; the cliff palette index lives
-  // on the bottom-left corner of each cell. For a first pass we ignore the
-  // cliff-tileset distinction and always read the variations from the
-  // canonical Cliffs/ tree — that matches stock WC3 where all cliff models
-  // share the same `Doodads/Terrain/Cliffs/` path (the tileset only affects
-  // the wraparound TEXTURE, not the mesh selection).
-
   const idx = (i: number, j: number) => j * W + i
   const ramp = (k: number) => (t.ramp_flags[k] & 1) !== 0
 
-  // `consumedByRamp` is the set of bottom-left-corner indices for cells that
-  // got covered by a ramp `clifftrans` mesh. Those cells must NOT also get a
-  // regular cliff mesh — the clifftrans IS the cliff transition for them.
-  // This mirrors HiveWE's `corner_romp` flag, which is similarly computed
-  // during the ramp pass and consulted in the regular cliff pass.
+  // `consumedByRamp` mirrors HiveWE's `corner_romp` — corners covered by a
+  // ramp clifftrans piece. Regular-cliff placement skips cells whose BL is
+  // in this set. (Go side computes this same flag for cell_skip; we
+  // recompute here in parallel since we need the per-placement decision.)
   const consumedByRamp = new Set<number>()
 
+  // Resolve cliff palette idx for a cell — clamped to non-negative, since
+  // cliff_tex stores 0..15 and a value of 15 is "no cliff". HiveWE's
+  // `texture == 15 ⇒ texture -= 14` quirk is applied for the palette
+  // lookup (so 15 → 1).
+  function resolvePaletteIdx(blIdx: number): number {
+    const raw = t.cliff_tex[blIdx] & 0xF
+    if (raw === 15) return 1
+    return raw
+  }
+
   // Filename char for one corner of a clifftrans piece. Non-ramp corners use
-  // a normal 'A'+offset encoding; ramp corners use 'L' + offset * -4. The
-  // letter L is the marker that says "this corner sits on the ramp surface",
-  // and the *-4 scaling spreads ramp-step combinations across distinct chars.
+  // a normal 'A'+offset encoding; ramp corners use 'L' + offset * -4.
   function rampChar(isRamp: boolean, layerHeight: number, base: number): number {
     const baseChar = isRamp ? 76 /* 'L' */ : 65 /* 'A' */
     const scale = isRamp ? -4 : 1
@@ -89,18 +108,6 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
   }
 
   // --- Pass 1: vertical ramps (3 corners tall on each side) ---
-  //
-  // A vertical ramp occupies cells (i, j) and (i, j+1). One column of corners
-  // ramps from one layer to another; the adjacent column either stays flat
-  // (one layer) or ramps the other direction. The pattern HiveWE detects:
-  //
-  //   col_i:    bl(ramp=R) tl(ramp=R) ttl(ramp=R)   // 3 corners agree on ramp
-  //   col_i+1:  br(ramp=S) tr(ramp=S) ttr(ramp=S)   // also agree, but S!=R
-  //   layer_height[tl] == min(lh[bl], lh[ttl])      // middle is the lower end
-  //   layer_height[tr] == min(lh[br], lh[ttr])
-  //
-  // The bl/ttl pair is one ramp-side, the br/ttr pair is the other. The
-  // *layer_height* difference between bl and ttl is what makes the ramp.
   for (let j = 0; j < H - 2; j++) {
     for (let i = 0; i < W - 1; i++) {
       const bl = idx(i, j), br = idx(i + 1, j)
@@ -121,10 +128,6 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
       if (rBR !== rTR || rBR !== rTTR) continue
       if (rBL === rBR) continue
 
-      // Require an actual layer-height transition across the spanning
-      // corners (BL, TTL, BR, TTR). If all four are at the same layer,
-      // the cells are ramp-flagged but flat — Blizzard doesn't ship a
-      // clifftrans asset for those, and there's nothing to transition.
       if (lhBL === lhTTL && lhBL === lhBR && lhBL === lhTTR) continue
 
       const base = Math.min(ae, cf)
@@ -138,9 +141,8 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
       out.push({
         path,
         pos: [cx + i * 128, cy + j * 128, (base - 2) * 128],
+        paletteIdx: resolvePaletteIdx(bl),
       })
-      // The clifftrans piece covers cells (i, j) and (i, j+1) — skip both
-      // in the regular cliff pass.
       consumedByRamp.add(bl)
       consumedByRamp.add(tl)
     }
@@ -165,7 +167,6 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
       if (rTL !== rTR || rTL !== rTRR) continue
       if (rBL === rTL) continue
 
-      // Same flat-ramp filter as vertical.
       if (lhBL === lhBRR && lhBL === lhTL && lhBL === lhTRR) continue
 
       const base = Math.min(ae, bf)
@@ -179,6 +180,7 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
       out.push({
         path,
         pos: [cx + i * 128, cy + j * 128, (base - 2) * 128],
+        paletteIdx: resolvePaletteIdx(bl),
       })
       consumedByRamp.add(bl)
       consumedByRamp.add(br)
@@ -186,11 +188,6 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
   }
 
   // --- Pass 3: regular cliff transitions ---
-  //
-  // is_corner_ramp_entrance: cells where all 4 corners are ramp-flagged AND
-  // the diagonals aren't symmetric. These are the "openings" of a ramp where
-  // it meets level ground — covered by the adjacent ramp clifftrans mesh, so
-  // a regular cliff piece would double up. HiveWE has the same skip.
   function isRampEntrance(i: number, j: number): boolean {
     if (i >= W - 1 || j >= H - 1) return false
     const bl = idx(i, j), br = idx(i + 1, j)
@@ -216,13 +213,11 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
       const lh_tl = t.layer_height[tl]
       const lh_tr = t.layer_height[tr]
 
-      // Skip cells where all 4 corners are at the same layer (no cliff
-      // transition needed — flat ground).
       if (lh_bl === lh_br && lh_bl === lh_tl && lh_bl === lh_tr) continue
 
       const base = Math.min(lh_tl, lh_tr, lh_br, lh_bl)
       const fileName = String.fromCharCode(
-        65 + lh_tl - base, // 'A' + offset
+        65 + lh_tl - base,
         65 + lh_tr - base,
         65 + lh_br - base,
         65 + lh_bl - base,
@@ -235,6 +230,7 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
       out.push({
         path,
         pos: [cx + i * 128, cy + j * 128, (base - 2) * 128],
+        paletteIdx: resolvePaletteIdx(bl),
       })
     }
   }
@@ -242,24 +238,79 @@ export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
 }
 
 export interface CliffRendering {
+  /** Draw all cliff instances. Call from the per-frame render loop AFTER
+   *  terrain.draw and BEFORE viewer.render() so cliffs sit at the right
+   *  depth relative to MDX-rendered units/doodads. */
+  draw(viewProj: Float32Array): void
   /** Number of cliff instances actually placed (some MDXs may 404). */
   placed: number
-  /** Disposal: detach all instances from the scene. */
+  /** Disposal: release all GL resources for this load. */
   dispose(): void
 }
 
 export async function renderCliffs(
+  gl: WebGLRenderingContext,
   viewer: ModelViewer,
-  scene: any,
   pathSolver: any,
   placements: CliffPlacement[],
-): Promise<CliffRendering> {
-  const instances: any[] = []
-  let placed = 0
-  let failed = 0
-  // Group placements by path so each unique MDX loads once. mdx-m3-viewer's
-  // resourceMap already dedupes, but grouping lets us bail early when an
-  // MDX 404s instead of retrying per instance.
+  t: TerrainCliffData,
+): Promise<CliffRendering | null> {
+  // 1. Upload the final-heights array as a float texture for the cliff
+  //    vertex shader's per-vertex displacement lookup.
+  const heights = new Float32Array(t.heights)
+  const finalHeights = uploadFinalHeights(gl, heights, t.width, t.height)
+  if (!finalHeights) {
+    flog('[cliffs] finalHeights upload failed; cliffs disabled')
+    return null
+  }
+
+  // 2. Load cliff-palette textures (one per CliffPalette entry). Skip
+  //    silently when a palette has no SLK path — that palette won't be
+  //    used by any instance with the right `paletteIdx`, or if it is, the
+  //    cliff-shader.ts draw loop skips it (better silent than magenta).
+  const paletteTextures: { tex: WebGLTexture | null; width: number; height: number }[] =
+    new Array(t.cliff_palette.length).fill(null).map(() => ({ tex: null, width: 0, height: 0 }))
+  const palettePromises: Promise<void>[] = []
+  for (let p = 0; p < t.cliff_palette.length; p++) {
+    const stem = t.cliff_palette_textures?.[p]
+    if (!stem) {
+      flog(`[cliffs] cliff palette[${p}] (${t.cliff_palette[p]}) has no SLK texture path`)
+      continue
+    }
+    // Try .dds first (Reforged CASC ships these as DDS), the asset handler's
+    // BLP↔DDS swap covers SD-installs too.
+    const path = stem + '.dds'
+    palettePromises.push(
+      viewer.load(path, pathSolver).then((res: any) => {
+        if (!res || !res.webglResource) {
+          flog(`[cliffs] cliff palette[${p}] (${t.cliff_palette[p]}) failed to load: ${path}`)
+          return
+        }
+        paletteTextures[p] = {
+          tex: res.webglResource as WebGLTexture,
+          width: res.width as number,
+          height: res.height as number,
+        }
+      }).catch((e: unknown) => {
+        flog(`[cliffs] cliff palette[${p}] load threw:`, e instanceof Error ? e.message : String(e))
+      }),
+    )
+  }
+  await Promise.all(palettePromises)
+
+  // 3. Create the renderer.
+  const renderer = createCliffRenderer(gl, {
+    finalHeights,
+    centerOffset: t.center_offset,
+    paletteTextures,
+  })
+  if (!renderer) {
+    gl.deleteTexture(finalHeights.tex)
+    return null
+  }
+
+  // 4. Load each unique MDX (via mdx-m3-viewer's parser — we only borrow
+  //    the parsed geometry buffers, not the instance system).
   const byPath = new Map<string, CliffPlacement[]>()
   for (const p of placements) {
     const list = byPath.get(p.path) ?? []
@@ -267,57 +318,47 @@ export async function renderCliffs(
     byPath.set(p.path, list)
   }
 
+  let placed = 0
+  let failed = 0
   for (const [path, group] of byPath) {
-    // Try the requested path; if it 404s (lib resolves the promise with
-    // undefined rather than throwing on missing assets), retry with the
-    // variation-0 fallback path. Cliffs only ship variations 0..N where N
-    // varies per pattern, and authored maps sometimes reference variations
-    // that no longer exist. Without HiveWE's `Cliffs.slk` variation table
-    // we can't pre-clamp, so we fall back at fetch time.
     let model: any
     try { model = await viewer.load(path, pathSolver) } catch { /* fall through */ }
-    if (!model || typeof model.addInstance !== 'function') {
+    if (!model || !model.geosets || model.geosets.length === 0) {
       const fallback = path.replace(/(\d+)\.mdx$/i, '0.mdx')
       if (fallback !== path) {
         try { model = await viewer.load(fallback, pathSolver) } catch { /* ignore */ }
       }
     }
-    if (!model || typeof model.addInstance !== 'function') {
+    if (!model || !model.geosets || model.geosets.length === 0) {
       failed += group.length
-      // Sample a few unique missing paths so we can spot pattern issues.
       if (failed === group.length || failed < 10) {
         flog(`[cliffs miss] ${path} (×${group.length} cells)`)
       }
       continue
     }
-    for (const p of group) {
-      const inst = model.addInstance()
-      inst.move(p.pos)
-      // WC3 cliff meshes carry a baked-in 90° yaw vs world-space — HiveWE's
-      // cliff.vert "unrotates" them at the vertex stage via
-      // `(vPosition.y, -vPosition.x, vPosition.z)`. That swap is a -90°
-      // rotation around +Z (right-hand rule): (x,y,z)→(y,-x,z). We don't
-      // have a custom vertex shader for cliffs in wc3-forge; instead we
-      // rotate every cliff instance -π/2 around +Z so the lib's standard
-      // MDX shader produces the same result.
-      inst.rotateLocal(CLIFF_UNROTATE_QUAT)
-      inst.setScene(scene)
-      instances.push(inst)
-      placed++
-    }
+    const insts: CliffInstance[] = group.map(p => ({
+      cellWorldX: p.pos[0],
+      cellWorldY: p.pos[1],
+      baseZ: p.pos[2],
+      paletteIdx: p.paletteIdx,
+    }))
+    renderer.addMesh(path, model, insts)
+    placed += group.length
   }
   if (failed > 0) {
     flog(`[cliffs] placed=${placed} failed=${failed} unique-paths=${byPath.size}`)
   } else {
     flog(`[cliffs] placed=${placed} unique-paths=${byPath.size}`)
   }
+
   return {
     placed,
+    draw(viewProj) { renderer.draw(viewProj) },
     dispose() {
-      for (const inst of instances) {
-        try { inst.detach() } catch { /* already detached */ }
-      }
-      instances.length = 0
+      renderer.dispose()
+      gl.deleteTexture(finalHeights.tex)
+      // Palette textures are owned by mdx-m3-viewer's resourceMap — don't
+      // delete; the next loadMap may reuse them.
     },
   }
 }

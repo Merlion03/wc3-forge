@@ -242,6 +242,15 @@ type TerrainDTO struct {
 	GroundVar    []uint32 `json:"ground_var"`
 	RampFlags    []uint32 `json:"ramp_flags"`
 	CliffPalette []string `json:"cliff_palette"` // cliff tileset FourCCs
+	// CliffPaletteTextures is one `texdir/texfile` asset path stem per cliff
+	// palette FourCC, sourced from TerrainArt/CliffTypes.slk. JS appends
+	// `.dds` (or `.blp` fallback) and loads via viewer.load. Empty string when
+	// the SLK lookup failed. Parallel-indexed with CliffPalette. Used by the
+	// custom cliff vertex/fragment shader (cliff-shader.ts), since HiveWE's
+	// `vOffset.a = corner_cliff_texture` indexes into a 2D-array-texture of
+	// these (one layer per palette); WebGL1 lacks sampler2DArray so we bind
+	// them per-palette.
+	CliffPaletteTextures []string `json:"cliff_palette_textures"`
 	// Per-corner water data. WaterZ is the per-vertex water surface
 	// elevation in studs (the per-tileset WaterInfo.Offset gets added
 	// JS-side because Offset comes from Water.slk and lives with the
@@ -357,46 +366,133 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		}
 	}
 
-	// Compute per-cell "skip terrain quad" mask. Pragmatic adaptation of
-	// HiveWE's update_ground_exists logic (terrain.ixx line 1043-1055).
+	// Compute per-corner `corner_romp` flag — strict HiveWE port from
+	// terrain.ixx::update_cliff_meshes (lines 1083-1187). A corner is "romp"
+	// iff it sits on a ramp clifftrans piece that wc3-forge will actually
+	// render. The strict rule is needed for the cell-skip pass below to match
+	// HiveWE's update_ground_exists exactly.
 	//
-	// HiveWE skips terrain on cells that are (cliff || romp) && !ramp_entrance.
-	// In HiveWE the cliff mesh is rendered via a custom vertex shader that
-	// per-vertex displaces by the smooth ground height (cliff.vert line 35:
-	// `vec4(..., rotated_world_position.z + height, 1)`), so the cliff MDX's
-	// top surface conforms exactly to the surrounding terrain corners and
-	// fully covers the skipped cell.
+	// Two passes: vertical and horizontal ramps. Each spans 2 cells; HiveWE
+	// detects them by checking 3-corner-tall (vertical) or 3-corner-wide
+	// (horizontal) ramp-flag patterns with the middle-row corners at the
+	// min of the endpoints' layer_height.
 	//
-	// We render cliff MDX instances via the stock mdx-m3-viewer shader
-	// without that per-vertex displacement, so the cliff mesh's top surface
-	// is at a FIXED layer-height Z. For "pure" cliff cells (all 4 corners on
-	// a single edge — patterns like AABB/ABBA), the cliff mesh's flat top
-	// matches the cell's flat-top corners and the skip works cleanly.
+	// We don't have access to the clifftrans MDX file existence at this stage
+	// — Blizzard ships all the standard variants, so we conservatively assume
+	// every spanning ramp gets a clifftrans. If the rare missing variant
+	// shows up, that single ramp endpoint will show a small visible void;
+	// acceptable tradeoff vs replicating the asset-existence check on the
+	// Go side.
+	cornerRomp := make([]bool, n)
+	// Vertical ramps — span (i, j) and (i, j+1)
+	for j := 0; j < H-2; j++ {
+		for i := 0; i < W-1; i++ {
+			bl := j*W + i
+			br := bl + 1
+			tl := bl + W
+			tr := bl + W + 1
+			ttl := bl + 2*W
+			ttr := bl + 2*W + 1
+			lhBL := int(t.Tiles[bl].LayerHeight)
+			lhBR := int(t.Tiles[br].LayerHeight)
+			lhTL := int(t.Tiles[tl].LayerHeight)
+			lhTR := int(t.Tiles[tr].LayerHeight)
+			lhTTL := int(t.Tiles[ttl].LayerHeight)
+			lhTTR := int(t.Tiles[ttr].LayerHeight)
+			ae := lhBL
+			if lhTTL < ae {
+				ae = lhTTL
+			}
+			cf := lhBR
+			if lhTTR < cf {
+				cf = lhTTR
+			}
+			if lhTL != ae || lhTR != cf {
+				continue
+			}
+			rBL := t.Tiles[bl].HasRamp()
+			rTL := t.Tiles[tl].HasRamp()
+			rTTL := t.Tiles[ttl].HasRamp()
+			rBR := t.Tiles[br].HasRamp()
+			rTR := t.Tiles[tr].HasRamp()
+			rTTR := t.Tiles[ttr].HasRamp()
+			if rBL != rTL || rBL != rTTL || rBR != rTR || rBR != rTTR || rBL == rBR {
+				continue
+			}
+			// Flat-ramp filter: all four spanning corners at same layer ⇒
+			// degenerate AAAA-shape clifftrans that Blizzard doesn't ship.
+			if lhBL == lhTTL && lhBL == lhBR && lhBL == lhTTR {
+				continue
+			}
+			cornerRomp[bl] = true
+			cornerRomp[tl] = true
+		}
+	}
+	// Horizontal ramps — span (i, j) and (i+1, j)
+	for j := 0; j < H-1; j++ {
+		for i := 0; i < W-2; i++ {
+			bl := j*W + i
+			br := bl + 1
+			brr := bl + 2
+			tl := bl + W
+			tr := bl + W + 1
+			trr := bl + W + 2
+			lhBL := int(t.Tiles[bl].LayerHeight)
+			lhBR := int(t.Tiles[br].LayerHeight)
+			lhBRR := int(t.Tiles[brr].LayerHeight)
+			lhTL := int(t.Tiles[tl].LayerHeight)
+			lhTR := int(t.Tiles[tr].LayerHeight)
+			lhTRR := int(t.Tiles[trr].LayerHeight)
+			ae := lhBL
+			if lhBRR < ae {
+				ae = lhBRR
+			}
+			bf := lhTL
+			if lhTRR < bf {
+				bf = lhTRR
+			}
+			if lhBR != ae || lhTR != bf {
+				continue
+			}
+			rBL := t.Tiles[bl].HasRamp()
+			rBR := t.Tiles[br].HasRamp()
+			rBRR := t.Tiles[brr].HasRamp()
+			rTL := t.Tiles[tl].HasRamp()
+			rTR := t.Tiles[tr].HasRamp()
+			rTRR := t.Tiles[trr].HasRamp()
+			if rBL != rBR || rBL != rBRR || rTL != rTR || rTL != rTRR || rBL == rTL {
+				continue
+			}
+			if lhBL == lhBRR && lhBL == lhTL && lhBL == lhTRR {
+				continue
+			}
+			cornerRomp[bl] = true
+			cornerRomp[br] = true
+		}
+	}
+
+	// Compute per-cell "skip terrain quad" mask — STRICT HiveWE port of
+	// update_ground_exists (terrain.ixx line 1043-1055):
+	//   gpu_ground_exists[idx] = !(((corner_cliff[idx] || corner_romp[idx])
+	//                                && !is_corner_ramp_entrance(i, j))
+	//                              || corner_special_doodad[idx])
 	//
-	// But for "ramp-endpoint" cells — cells with a layer-height transition
-	// AND at least one ramp-flagged corner — the adjacent ramp clifftrans MDX
-	// only covers the cells along the ramp axis (corner_romp[bl] and
-	// [tl]/[br] for vertical/horizontal ramps), not the cells at the ramp's
-	// LATERAL endpoints. The regular cliff piece for the endpoint cell has a
-	// fixed-layer top, which doesn't match the half-base-half-elevated corner
-	// heights of the endpoint cell — leaving visible triangular holes where
-	// neither the terrain quad nor any MDX covers the surface.
+	// (We don't track corner_special_doodad — its consumers are rare and the
+	// data isn't surfaced in our doodadsdoo parser yet.)
 	//
-	// Pragmatic fix: also keep the terrain quad when ANY of the 4 corners is
-	// ramp-flagged. This covers the lateral ramp endpoints (where one of the
-	// inner corners is ramp-flagged but allRamp is false). The "pokes through
-	// cliff face" bug that bd5f495 originally fixed remains suppressed for
-	// pure-cliff cells (no ramp involvement), which is the common case.
-	//
-	// HiveWE doesn't need this because its cliff vertex shader displaces the
-	// mesh top to match the actual ground; replicating that displacement would
-	// be a larger change (custom MDX shader) and is deferred.
+	// Now safe to use the strict rule because the new cliff-shader.ts
+	// per-vertex displaces the cliff MDX to match `final_heights[corner]`,
+	// matching HiveWE's cliff.vert line 35. The cliff/ramp meshes fully
+	// cover the cells we skip; no pragmatic "keep any ramp corner" widening
+	// needed (that was a978b4b's workaround for missing displacement).
 	numCells := (W - 1) * (H - 1)
 	cellSkip := make([]uint32, numCells)
 	for j := 0; j < H-1; j++ {
 		for i := 0; i < W-1; i++ {
 			bl := j*W + i
-			if !cellCliff[bl] {
+			isCliff := cellCliff[bl]
+			isRomp := cornerRomp[bl]
+			if !isCliff && !isRomp {
 				continue
 			}
 			br := bl + 1
@@ -406,20 +502,67 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			rBR := t.Tiles[br].HasRamp()
 			rTL := t.Tiles[tl].HasRamp()
 			rTR := t.Tiles[tr].HasRamp()
-			// HiveWE's is_corner_ramp_entrance: all-4-corners-ramp AND not
-			// diagonal-symmetric. Such cells must keep their terrain — the
-			// adjacent ramp clifftrans needs the quad to blend with ground.
 			allRamp := rBL && rBR && rTL && rTR
 			isRampEntrance := allRamp && !(t.Tiles[bl].LayerHeight == t.Tiles[tr].LayerHeight && t.Tiles[tl].LayerHeight == t.Tiles[br].LayerHeight)
-			// Any-ramp-corner check: lateral endpoint cells of a horizontal/
-			// vertical ramp have only the inner column/row ramp-flagged. Our
-			// regular cliff MDX doesn't fully cover their diagonal-top
-			// surface, so keep terrain. anyRamp covers both this case AND
-			// the allRamp-but-symmetric case (which would otherwise also be
-			// skipped here even though clifftrans usually covers it).
-			anyRamp := rBL || rBR || rTL || rTR
-			if !isRampEntrance && !anyRamp {
+			if !isRampEntrance {
 				cellSkip[j*(W-1)+i] = 1
+			}
+		}
+	}
+
+	// Apply ramp-base +0.5-layer bump to heights, faithful port of
+	// terrain.ixx::update_ground_heights lines 952-988. In HiveWE units the
+	// bump is +0.5 layer-step; in our stud space one layer = 128 studs, so
+	// the bump is +64 studs.
+	//
+	// For each cell whose all-four-corners are ramp AND non-symmetric, the
+	// ramp-base corners (at the lower endpoint of the ramp's layer transition)
+	// get their FinalZ lifted by +64 so the cliff vertex shader's lookup
+	// returns a height that matches the actual ramp surface. Without this,
+	// the cliff displacement assumes the corner sits at the lower layer
+	// (which is geometrically the floor of the ramp, NOT the ramp surface),
+	// and the ramp clifftrans MDX slope ends in mid-air at the ramp's base.
+	//
+	// The bump must be applied IDEMPOTENTLY (HiveWE iterates over multiple
+	// tile-cells and writes the same corner index multiple times) — we use
+	// direct assignment matching HiveWE's pattern.
+	for j := 0; j < H-1; j++ {
+		for i := 0; i < W-1; i++ {
+			bl := j*W + i
+			br := bl + 1
+			tl := bl + W
+			tr := bl + W + 1
+			if !(t.Tiles[bl].HasRamp() && t.Tiles[tl].HasRamp() && t.Tiles[br].HasRamp() && t.Tiles[tr].HasRamp()) {
+				continue
+			}
+			lhBL := t.Tiles[bl].LayerHeight
+			lhBR := t.Tiles[br].LayerHeight
+			lhTL := t.Tiles[tl].LayerHeight
+			lhTR := t.Tiles[tr].LayerHeight
+			if lhBL == lhTR && lhTL == lhBR {
+				continue
+			}
+			base := lhBL
+			if lhBR < base {
+				base = lhBR
+			}
+			if lhTL < base {
+				base = lhTL
+			}
+			if lhTR < base {
+				base = lhTR
+			}
+			if lhBL == base {
+				heights[bl] = t.Tiles[bl].Z() + (float32(lhBL)-2.0)*128.0 + 64.0
+			}
+			if lhBR == base {
+				heights[br] = t.Tiles[br].Z() + (float32(lhBR)-2.0)*128.0 + 64.0
+			}
+			if lhTL == base {
+				heights[tl] = t.Tiles[tl].Z() + (float32(lhTL)-2.0)*128.0 + 64.0
+			}
+			if lhTR == base {
+				heights[tr] = t.Tiles[tr].Z() + (float32(lhTR)-2.0)*128.0 + 64.0
 			}
 		}
 	}
@@ -495,7 +638,8 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		CliffVar:        cliffVar,
 		GroundVar:       groundVar,
 		RampFlags:       rampFlags,
-		CliffPalette:  t.CliffTilesets,
+		CliffPalette:         t.CliffTilesets,
+		CliffPaletteTextures: CliffPaletteTexturePaths(t.CliffTilesets),
 		WaterZ:        waterZ,
 		HasWater:      hasWater,
 		Water:         WaterColors(t.Tileset),

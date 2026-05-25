@@ -222,6 +222,7 @@ export namespace main {
 	    ground_var: number[];
 	    ramp_flags: number[];
 	    cliff_palette: string[];
+	    cliff_palette_textures: string[];
 	    water_z: number[];
 	    has_water: number[];
 	    water: WaterInfo;
@@ -251,6 +252,7 @@ export namespace main {
 	        this.ground_var = source["ground_var"];
 	        this.ramp_flags = source["ramp_flags"];
 	        this.cliff_palette = source["cliff_palette"];
+	        this.cliff_palette_textures = source["cliff_palette_textures"];
 	        this.water_z = source["water_z"];
 	        this.has_water = source["has_water"];
 	        this.water = this.convertValues(source["water"], WaterInfo);
