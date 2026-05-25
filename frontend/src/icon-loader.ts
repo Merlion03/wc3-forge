@@ -71,9 +71,33 @@ async function decodeIcon(assetPath: string): Promise<string> {
   if (magic === 0x31504c42 /* 'BLP1' */) {
     return decodeBLP(buf)
   }
+  if (magic === 0x32504c42 /* 'BLP2' */) {
+    return decodeBLP(buf)
+  }
   if (magic === 0x20534444 /* 'DDS ' */) {
     return decodeDDS(buf)
   }
+  return ''
+}
+
+/**
+ * Decode raw image bytes (already known format) into a PNG data URL. Used by
+ * non-asset-handler callers — e.g. the Minimap panel, which fetches its bytes
+ * through App.GetMinimapBytes (the source file lives at the map root, not in
+ * the CASC asset namespace, so going through /asset/ would 404).
+ *
+ * extHint disambiguates TGA from BLP/DDS (TGA has no magic bytes). Empty
+ * string falls through to magic-byte sniffing identical to decodeIcon's.
+ */
+export function decodeImageBytes(buf: Uint8Array, extHint: string): string {
+  if (buf.byteLength < 4) return ''
+  if (extHint === 'tga') return decodeTGA(buf)
+  const magic = (buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24)) >>> 0
+  if (magic === 0x31504c42 || magic === 0x32504c42) return decodeBLP(buf)
+  if (magic === 0x20534444) return decodeDDS(buf)
+  // Fallback to extHint when magic didn't match (rare formats).
+  if (extHint === 'blp') return decodeBLP(buf)
+  if (extHint === 'dds') return decodeDDS(buf)
   return ''
 }
 
@@ -112,5 +136,22 @@ function decodeDDS(buf: Uint8Array): string {
     mip.height,
   )
   ctx.putImageData(imageData, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
+// Decode a TGA buffer via mdx-m3-viewer's parsers.tga.Image. Used for legacy
+// maps' war3mapPreview.tga minimap. Most modern Reforged maps ship .blp/.dds,
+// so this is a fallback path — but a cheap one (the lib already includes it
+// for unit-portrait textures so there's no extra dep cost).
+function decodeTGA(buf: Uint8Array): string {
+  const img = new parsers.tga.Image()
+  img.load(buf)
+  if (!img.data) return ''
+  const canvas = document.createElement('canvas')
+  canvas.width = img.width
+  canvas.height = img.height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return ''
+  ctx.putImageData(img.data, 0, 0)
   return canvas.toDataURL('image/png')
 }

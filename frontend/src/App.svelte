@@ -20,6 +20,7 @@
   import ViewMenu from './ViewMenu.svelte'
   import AssetPreview from './AssetPreview.svelte'
   import MapInfoEditor from './MapInfoEditor.svelte'
+  import Minimap from './Minimap.svelte'
   import { showToast } from './toast'
   import { loadIconURL } from './icon-loader'
   import { TEAM_COLORS_RGB } from './sloc-markers'
@@ -142,6 +143,34 @@
     showMapInfoEditor = false
   }
 
+  // ----- Minimap overlay (bottom-right of viewport) -----
+  //
+  // Shows the map's BAKED minimap image (war3mapMap.blp / .dds / TGA fallback)
+  // — author-drawn, NOT a render of terrain. Matches HiveWE's minimap panel
+  // behavior. The component owns its own image-fetch + decode + click-to-pan
+  // math; this page-level state controls only visibility + map-load gen.
+  //
+  // Visibility persists in localStorage so the user's preference survives
+  // app restarts. Hotkey 'M' toggles. Click on the image pans the 3D camera.
+  const MINIMAP_LS_KEY = 'wc3-forge:showMinimap'
+  let showMinimap: boolean = (() => {
+    try {
+      const raw = localStorage.getItem(MINIMAP_LS_KEY)
+      // Default to ON for new users — the panel is small and not in the way,
+      // and being visible by default mirrors HiveWE's default.
+      return raw === null ? true : raw === '1'
+    } catch { return true }
+  })()
+  // Generation counter bumped whenever the loaded map changes (Open / Close /
+  // map-changed event). The Minimap component watches this prop and reloads
+  // its image + cached terrain coords on every bump. Avoids the component
+  // having to subscribe to its own MAP_EVENT — single source of truth here.
+  let mapLoadGen: number = 0
+  function toggleMinimap() {
+    showMinimap = !showMinimap
+    try { localStorage.setItem(MINIMAP_LS_KEY, showMinimap ? '1' : '0') } catch {}
+  }
+
   // ----- File menu (header dropdown) -----
   let fileMenuOpen: boolean = false
   let fileMenuEl: HTMLDivElement | null = null
@@ -223,6 +252,11 @@
     }
     EventsOn(MAP_EVENT, async () => {
       status = await Status()
+      // Bump the minimap-reload generation on every map-changed event so the
+      // Minimap component refetches its image + terrain coords. Covers both
+      // load (status.loaded=true → new minimap) and close (loaded=false →
+      // component renders "no minimap" placeholder).
+      mapLoadGen += 1
       if (status.loaded) {
         await reloadMap()
       } else {
@@ -315,7 +349,14 @@
 
     const s = await Status()
     status = s
-    if (s.loaded) await reloadMap()
+    if (s.loaded) {
+      // Initial map-already-loaded path (e.g. --open=<path> startup flag).
+      // Bump the minimap-reload generation so the Minimap component (which
+      // mounts after this onMount but listens on the prop reactively) picks
+      // up the image without waiting for the next MAP_EVENT.
+      mapLoadGen += 1
+      await reloadMap()
+    }
     const sel = await GetSelection()
     ingestSelection(sel)
     try { dirty = await IsDirty() } catch { dirty = false }
@@ -373,6 +414,22 @@
         case 'mapinfo.close':
           closeMapInfoEditor()
           break
+        case 'minimap.toggle':
+          toggleMinimap()
+          break
+        case 'minimap.click': {
+          // Args: u v (normalized image-pixel coords, 0..1 each).
+          // Synthesizes the click handler since WebView2 drops real synthetic
+          // mouse input — this exposes the same panTo computation for
+          // verification automation.
+          const u = parseFloat(args[0])
+          const v = parseFloat(args[1])
+          if (isFinite(u) && isFinite(v)) {
+            const fn = (window as any).__minimapClick
+            if (typeof fn === 'function') fn(u, v)
+          }
+          break
+        }
       }
     })
     // Test-driver hook (also exposed on window for in-page console use):
@@ -412,6 +469,17 @@
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.key === 'I' || e.key === 'i')) {
       e.preventDefault()
       openMapInfoEditor()
+    }
+    // Minimap toggle hotkey: bare 'M'. No modifiers — matches the WC3 in-game
+    // convention. Ignore when an input/textarea has focus so position-edit
+    // typing doesn't accidentally hide the minimap, and ignore when modifiers
+    // are held (so Ctrl+M / Alt+M stay free for future shortcuts).
+    if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+      const tgt = e.target as HTMLElement | null
+      const tagName = tgt?.tagName?.toLowerCase()
+      if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
+      e.preventDefault()
+      toggleMinimap()
     }
   }
 
@@ -998,6 +1066,12 @@
               title="Toggle Reforged graphics. Reloads the current map without resetting the camera.">
         Reforged Graphics{reforged ? ' ✓' : ''}
       </button>
+      <button on:click={toggleMinimap}
+              class="mode-toggle"
+              class:on={showMinimap}
+              title="Toggle the minimap overlay (bottom-right of viewport). Shortcut: M">
+        Minimap{showMinimap ? ' ✓' : ''}
+      </button>
       <span class="header-divider" aria-hidden="true"></span>
       <button on:click={launchTestMap}
               disabled={testMapDisabled}
@@ -1016,6 +1090,9 @@
   <div class="split">
     <section class="viewport">
       <canvas bind:this={canvas}></canvas>
+      {#if showMinimap}
+        <Minimap {scene} {mapLoadGen} />
+      {/if}
     </section>
 
     <div class="right-col" bind:this={rightColEl}>

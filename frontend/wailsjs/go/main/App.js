@@ -26,6 +26,10 @@ export function GetMapBytes() {
   return window['go']['main']['App']['GetMapBytes']();
 }
 
+export function GetMinimapBytes() {
+  return window['go']['main']['App']['GetMinimapBytes']();
+}
+
 export function GetPathingMap() {
   return window['go']['main']['App']['GetPathingMap']();
 }

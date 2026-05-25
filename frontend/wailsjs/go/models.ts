@@ -115,6 +115,22 @@ export namespace main {
 	        this.unit_count = source["unit_count"];
 	    }
 	}
+	export class MinimapDTO {
+	    bytes: string;
+	    ext: string;
+	    found: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new MinimapDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.bytes = source["bytes"];
+	        this.ext = source["ext"];
+	        this.found = source["found"];
+	    }
+	}
 	export class PathingMapDTO {
 	    width: number;
 	    height: number;
