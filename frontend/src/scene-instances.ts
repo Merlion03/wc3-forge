@@ -545,11 +545,26 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const otherExtPath = stem + otherExt
 
     let model: any
+    let chosenPath: string | undefined
     for (const p of [variantPath, fallbackPath, otherExtPath]) {
       if (model && typeof model.addInstance === 'function') break
-      try { model = await viewer.load(p, pathSolver) } catch { /* swallow, try next */ }
+      try { model = await viewer.load(p, pathSolver); chosenPath = p } catch { /* swallow, try next */ }
     }
     if (!model || typeof model.addInstance !== 'function') return null
+
+    // DIAGNOSTIC: print per-doodad geometry counts so we can correlate
+    // "log says placed=N" with "user sees actual MDX on screen." If geosets
+    // is 0 the parser patch isn't doing what it claimed; if geosets > 0 but
+    // user sees nothing, the bug is downstream (texture load, material
+    // linking, etc.). Limit to first 12 to keep the log readable.
+    if ((doodadInstances.size + 1) <= 12) {
+      const g = model.geosets?.length ?? -1
+      const b = model.batches?.length ?? -1
+      const bones = model.bones?.length ?? -1
+      const seqs = model.sequences?.length ?? -1
+      const mats = model.materials?.length ?? -1
+      flog(`[doodad geom] cn=${d.creation_number} type=${d.type_id} path=${chosenPath} geosets=${g} batches=${b} bones=${bones} mats=${mats} seqs=${seqs}`)
+    }
 
     const inst = model.addInstance()
     inst.move([d.position[0], d.position[1], d.position[2]])
