@@ -372,10 +372,17 @@ export interface SceneAPI {
    * unchanged, never persisted. Re-applied on every loadMap so hidden
    * categories stay hidden across map opens.
    *
-   * Implementation: instances are detached/re-attached via setScene(null)
-   * vs setScene(scene). The MDX library doesn't have a `show(b)` per-instance
-   * affordance that's universally supported, but setScene controls render
-   * participation cleanly across all model types.
+   * Implementation: per-instance `hide()` / `show()`. The lib's
+   * `setScene(null)` would crash (it calls `null.addInstance(this)`); its
+   * own ModelInstance docs explicitly recommend hide/show for W3X work:
+   *
+   *   "When working with Warcraft 3 instances, it is preferable to use
+   *    hide() and show(). These hide and show also internal instances of
+   *    this instance."
+   *
+   * The MdxModelInstance subclass overrides hide() to recurse into
+   * attachment instances too, which is exactly what we want — otherwise
+   * weapons / attached effects would render free-floating.
    */
   setDoodadCategoryVisible(category: string, visible: boolean): void
   /**
@@ -834,12 +841,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // land in a single bucket that's still toggleable via the View menu.
     const cat = (info.category && info.category.length > 0) ? info.category : 'Uncategorized'
     doodadCategoryByCn.set(d.creation_number, cat)
-    // Respect the user's existing category-visibility choice. If they hid
-    // "Trees/Destructibles" before opening this map, don't briefly flash trees
-    // on the way to hidden — attach the instance to the scene only when its
-    // category is currently visible.
+    // Always attach to scene so the lib's internal lists are populated;
+    // visibility is controlled via show()/hide(). The previous gate of
+    // `setScene(scene)` ONLY when visible meant a later show() couldn't
+    // un-hide it (no scene → not in the render list at all). Calling
+    // hide() before there's a scene is fine — `rendered` is just a boolean
+    // flag — and the lib's update path skips instances whose `scene` is
+    // null OR whose `rendered` is false.
+    inst.setScene(scene)
     const visible = doodadVisibility.get(cat) !== false
-    if (visible) inst.setScene(scene)
+    if (!visible) inst.hide()
     rollSequence(inst, 'stand')
     // Only doodads with multiple 'stand' variations need the per-frame reroll.
     // Single-stand and no-stand cases are no-ops — exclude them from the loop.
@@ -1958,24 +1969,30 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     },
     setDoodadCategoryVisible(category: string, visible: boolean) {
       // "*" affects every category. Walk the per-instance category map and
-      // attach/detach by setScene; setScene(null) detaches without disposing,
-      // so toggling back on is cheap (no model re-load).
+      // flip visibility via show()/hide() — see SceneAPI doc comment for
+      // why we don't use setScene(null) (it crashes — lib calls
+      // null.addInstance(this)).
+      let touched = 0
       if (category === '*') {
         // Mirror across all categories so future loadMap respects the choice.
         for (const c of doodadCategoriesPresent) doodadVisibility.set(c, visible)
         for (const inst of doodadInstances.values()) {
-          if (visible) inst.setScene(scene)
-          else inst.setScene(null)
+          if (visible) inst.show()
+          else inst.hide()
+          touched++
         }
+        flog(`[setDoodadCategoryVisible] cat=* visible=${visible} touched=${touched}`)
         return
       }
       doodadVisibility.set(category, visible)
       for (const [cn, inst] of doodadInstances) {
         const c = doodadCategoryByCn.get(cn) ?? 'Uncategorized'
         if (c !== category) continue
-        if (visible) inst.setScene(scene)
-        else inst.setScene(null)
+        if (visible) inst.show()
+        else inst.hide()
+        touched++
       }
+      flog(`[setDoodadCategoryVisible] cat=${category} visible=${visible} touched=${touched}`)
     },
     getDoodadCategories() { return [...doodadCategoriesPresent] },
     // Pick-correctness self-test. For each unit and doodad instance, project
