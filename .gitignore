@@ -42,6 +42,12 @@ Thumbs.db
 # Runtime log
 /wc3-forge.log
 
+# Diagnostic helper output: scripts/extract-mdx pulls MDX files out of the
+# user's local CASC install into ./tmp-mdx/ for hex inspection + parser
+# regression testing (scripts/test-mdx-parse-with-patch.cjs reads them).
+# Personal install data, never check in.
+/tmp-mdx/
+
 # Frontend build artifacts (frontend/dist content is rebuilt every time;
 # the directory itself must exist for go:embed to succeed — kept via gitkeep)
 /frontend/node_modules/
