@@ -419,7 +419,7 @@ export interface PickHit { kind: PickKind; id: number }
 
 // Imported from terrain-picker so consumers can reference the result shape
 // without a separate import. Re-exported below the interface stub.
-import { pickTerrainCell, type TerrainCellInfo } from './terrain-picker'
+import { pickTerrainCell, rayGroundPlane, type TerrainCellInfo } from './terrain-picker'
 export type { TerrainCellInfo } from './terrain-picker'
 export type TerrainPickCallback = (cell: TerrainCellInfo | null) => void
 /**
@@ -549,6 +549,22 @@ export interface SceneAPI {
    * is loaded.
    */
   getDoodadCategories(): string[]
+  /**
+   * Project the camera's view frustum onto the z=0 ground plane. Returns the
+   * 4 world (X, Y) intersection points for the canvas corners in TL → TR →
+   * BR → BL order (matching the order callers will draw the polygon outline).
+   *
+   * Returns null if any corner's ray fails to hit the plane (e.g. ray
+   * parallel to ground, intersection behind camera, or any intermediate
+   * NaN). The camera's PITCH_MIN clamp keeps us out of the parallel-ray
+   * regime in normal use; the null return is defensive for any unexpected
+   * camera state. Callers (the minimap overlay) skip drawing on null.
+   *
+   * Cheap to call per-frame: 4 screenToWorldRay calls + 4 ray/plane
+   * intersections, all of which are already happening elsewhere in the
+   * pipeline for terrain picking. No allocations beyond the returned array.
+   */
+  getViewportFrustumCorners(): Array<[number, number]> | null
 }
 
 export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {
@@ -2202,6 +2218,43 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       flog(`[setDoodadCategoryVisible] cat=${category} visible=${visible} touched=${touched}`)
     },
     getDoodadCategories() { return [...doodadCategoriesPresent] },
+    getViewportFrustumCorners(): Array<[number, number]> | null {
+      // Project each canvas corner through the camera and intersect the
+      // resulting world-space ray with z=0. Reuses the same ray math
+      // terrain-picking already uses (rayGroundPlane / screenToWorldRay).
+      //
+      // Canvas dimensions: use the actual GL viewport (kept synced to
+      // canvas.width/height by the RAF loop). clientWidth/Height are CSS
+      // pixels which would mismatch screenToWorldRay's NDC math under a
+      // non-1:1 devicePixelRatio. The viewport is also already a Float32Array
+      // shaped exactly the way screenToWorldRay wants it.
+      const W = canvas.width
+      const H = canvas.height
+      if (W <= 0 || H <= 0) return null
+      const vp = (scene as any).viewport as Float32Array
+      if (!vp) return null
+      const cornersPx: Array<[number, number]> = [
+        [0, 0],         // TL
+        [W, 0],         // TR
+        [W, H],         // BR
+        [0, H],         // BL
+      ]
+      const out = new Float32Array(6)
+      const screen = new Float32Array(2)
+      const result: Array<[number, number]> = []
+      for (const [px, py] of cornersPx) {
+        screen[0] = px
+        screen[1] = py
+        scene.camera.screenToWorldRay(out, screen, vp)
+        const ox = out[0], oy = out[1], oz = out[2]
+        const dx = out[3] - ox, dy = out[4] - oy, dz = out[5] - oz
+        const hit = rayGroundPlane(ox, oy, oz, dx, dy, dz)
+        if (!hit) return null
+        if (!isFinite(hit[0]) || !isFinite(hit[1])) return null
+        result.push(hit)
+      }
+      return result
+    },
     // Pick-correctness self-test. For each unit and doodad instance, project
     // its world-space bound-center to canvas pixels (via worldToCanvasPx),
     // then call rayPick at that pixel and compare the returned hit's id+kind
