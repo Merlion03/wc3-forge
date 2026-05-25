@@ -10,6 +10,10 @@ export function CloseMap() {
   return window['go']['main']['App']['CloseMap']();
 }
 
+export function EmitTestCommand(arg1) {
+  return window['go']['main']['App']['EmitTestCommand'](arg1);
+}
+
 export function GetDoodad(arg1) {
   return window['go']['main']['App']['GetDoodad'](arg1);
 }

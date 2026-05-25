@@ -256,6 +256,12 @@ function rollSequence(instance: any, type: string): boolean {
 
 export type PickKind = 'unit' | 'doodad'
 export interface PickHit { kind: PickKind; id: number }
+
+// Imported from terrain-picker so consumers can reference the result shape
+// without a separate import. Re-exported below the interface stub.
+import { pickTerrainCell, type TerrainCellInfo } from './terrain-picker'
+export type { TerrainCellInfo } from './terrain-picker'
+export type TerrainPickCallback = (cell: TerrainCellInfo | null) => void
 /**
  * How a pick result combines with the current selection.
  *   - 'set'    — replace selection with hits (plain click; empty hits clears)
@@ -334,6 +340,39 @@ export interface SceneAPI {
   setPathingVisible(visible: boolean): void
   /** Current pathing-overlay visibility — for UI display. */
   isPathingVisible(): boolean
+  /**
+   * Toggle terrain-pick mode. When active, plain LMB clicks on the canvas
+   * route to the terrain picker (onTerrainPick callback) instead of the
+   * entity ray-pick. Drag-pan + rubber-band + camera controls still work.
+   * Cursor changes to crosshair over the canvas when active.
+   */
+  setTerrainPickMode(active: boolean): void
+  /** Current terrain-pick-mode flag — for UI display. */
+  isTerrainPickMode(): boolean
+  /**
+   * Register the terrain-pick callback. Fires on canvas click when terrain
+   * pick mode is active. `cell` is null when the click misses the map (e.g.
+   * sky background or outside the map's bounds).
+   */
+  onTerrainPick(cb: TerrainPickCallback): void
+  /**
+   * Hide or show every doodad instance in a category. Pass "*" to affect
+   * every doodad. Visibility is rendering-only — the underlying data is
+   * unchanged, never persisted. Re-applied on every loadMap so hidden
+   * categories stay hidden across map opens.
+   *
+   * Implementation: instances are detached/re-attached via setScene(null)
+   * vs setScene(scene). The MDX library doesn't have a `show(b)` per-instance
+   * affordance that's universally supported, but setScene controls render
+   * participation cleanly across all model types.
+   */
+  setDoodadCategoryVisible(category: string, visible: boolean): void
+  /**
+   * Categories currently present in the loaded map's doodads (order matches
+   * App.svelte's DOODAD_CAT_ORDER curated-first ordering). Empty when no map
+   * is loaded.
+   */
+  getDoodadCategories(): string[]
 }
 
 export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {
@@ -435,6 +474,39 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // in WC3 — same reason the selected* sets above are split.
   const unitInstances = new Map<number, any>()
   const doodadInstances = new Map<number, any>()
+  // Per-doodad-instance category tag (resolved at placement time from the
+  // SLK type-index). Lets setDoodadCategoryVisible flip a whole category's
+  // visibility in O(visible-instances) without re-walking the type index.
+  // Same set of keys as `doodadInstances`; cleared together in clearInstances.
+  const doodadCategoryByCn = new Map<number, string>()
+  // Per-category visibility (true = visible / default). Categories absent
+  // from this map are considered visible. Persists across loadMap so hiding
+  // "Trees/Destructibles" in one map keeps trees hidden when a new map opens.
+  const doodadVisibility = new Map<string, boolean>()
+  // Ordered list of categories present in the current map. Recomputed at the
+  // end of loadMap so the View menu can render an up-to-date checkbox list.
+  // Curated order first (Trees/Destructibles, Structures, …), then remainder
+  // alphabetized — matches App.svelte's DOODAD_CAT_ORDER constant.
+  let doodadCategoriesPresent: string[] = []
+  const DOODAD_CAT_ORDER = [
+    'Trees/Destructibles',
+    'Structures',
+    'Props',
+    'Bridges/Ramps',
+    'Cliff/Terrain',
+    'Terrain',
+    'Water',
+    'Environment',
+    'Pathing Blockers',
+    'Cinematic',
+  ]
+  // Terrain-pick mode state. When true, plain LMB clicks fire the terrain-
+  // pick callback instead of the entity ray-pick. The most-recent TerrainDTO
+  // is cached on loadMap so the picker reads cell data without a round-trip
+  // to Go.
+  let terrainPickMode = false
+  let terrainPickCallback: TerrainPickCallback | null = null
+  let cachedTerrainDTO: any = null
   // Subset of doodad instances whose model has MORE THAN ONE 'stand' sequence
   // — only these benefit from per-frame sequenceEnded checks. Most doodads
   // (trees, rocks, props) have a single stand variation: rolling at placement
@@ -711,7 +783,17 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     }
     inst.rotateLocal(rot)
     inst.uniformScale((d.scale[0] || 1) * (info.model_scale || 1))
-    inst.setScene(scene)
+    // Record category so visibility toggles can find this instance by cat
+    // without re-walking the type index. "" → "Uncategorized" so unknown rows
+    // land in a single bucket that's still toggleable via the View menu.
+    const cat = (info.category && info.category.length > 0) ? info.category : 'Uncategorized'
+    doodadCategoryByCn.set(d.creation_number, cat)
+    // Respect the user's existing category-visibility choice. If they hid
+    // "Trees/Destructibles" before opening this map, don't briefly flash trees
+    // on the way to hidden — attach the instance to the scene only when its
+    // category is currently visible.
+    const visible = doodadVisibility.get(cat) !== false
+    if (visible) inst.setScene(scene)
     rollSequence(inst, 'stand')
     // Only doodads with multiple 'stand' variations need the per-frame reroll.
     // Single-stand and no-stand cases are no-ops — exclude them from the loop.
@@ -736,6 +818,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     }
     doodadInstances.clear()
     doodadInstancesToReroll.clear()
+    // Drop the per-instance category tags. The doodadVisibility map (per-cat
+    // user choices) intentionally persists across loadMap.
+    doodadCategoryByCn.clear()
+    doodadCategoriesPresent = []
     // Slocs hold no GL resources of their own — they live in the renderer's
     // marker list. Replace with empty list so the next loadMap re-populates.
     slocRenderer?.setMarkers([])
@@ -1192,6 +1278,20 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const dist = Math.hypot(e.clientX - d.clientX, e.clientY - d.clientY)
     if (dist > CLICK_PIXEL_THRESHOLD) return
 
+    // Terrain-pick mode takes over plain clicks. Modifier-held clicks are
+    // intentionally still entity-pick / no-op so users can briefly pop out
+    // of terrain-pick to add/remove an entity from selection without leaving
+    // the mode (matches the convention rubber-band mode also follows). The
+    // terrain-pick callback receives null when the click misses the map
+    // (sky, outside bounds) — caller decides whether to clear UI or ignore.
+    if (terrainPickMode && !d.shift && !d.ctrl) {
+      if (terrainPickCallback && cachedTerrainDTO) {
+        const cell = pickTerrainCell(d.x, d.y, canvas, scene, cachedTerrainDTO)
+        terrainPickCallback(cell)
+      }
+      return
+    }
+
     const hit = rayPick(d.x, d.y)
     if (!pickCallback) return
 
@@ -1263,6 +1363,15 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // ongoing drag (LMB without downAt is weird but safe to ignore; RMB/MMB
     // = camera pan, no point updating cursor under a pan).
     if (e.buttons !== 0) return
+    // Terrain-pick mode owns the cursor — keep crosshair regardless of what's
+    // under the pointer. The picker itself doesn't care whether anything's
+    // there; it picks a terrain cell or null. Without this short-circuit the
+    // hover-pick below would flip the cursor to "pointer" / "move" any time
+    // the user passed over an entity, which is misleading.
+    if (terrainPickMode) {
+      if (canvas.style.cursor !== 'crosshair') canvas.style.cursor = 'crosshair'
+      return
+    }
     const now = performance.now()
     if (now - lastHoverTs < HOVER_THROTTLE_MS) return
     lastHoverTs = now
@@ -1348,6 +1457,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       // Terrain first so it's visible even while units/doodads stream in.
       try {
         const t = await GetTerrain()
+        // Cache for the terrain-pick path — picker reads cell data straight
+        // from this without a Go round-trip per click.
+        cachedTerrainDTO = t
         const gl = (viewer as any).gl as WebGLRenderingContext
         terrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
         if (terrain && !keepCamera) {
@@ -1502,6 +1614,22 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       for (const line of sampleAudits) {
         flog(`[doodad audit] ${line}`)
       }
+      // Build the ordered present-categories list for the View menu. Curated
+      // first (mirrors App.svelte's DOODAD_CAT_ORDER), then remaining cats
+      // alphabetized, "Uncategorized" pinned last.
+      const presentSet = new Set<string>()
+      for (const c of doodadCategoryByCn.values()) presentSet.add(c)
+      const ordered: string[] = []
+      for (const c of DOODAD_CAT_ORDER) {
+        if (presentSet.has(c)) { ordered.push(c); presentSet.delete(c) }
+      }
+      const rest = [...presentSet].sort((a, b) => {
+        if (a === 'Uncategorized') return 1
+        if (b === 'Uncategorized') return -1
+        return a.localeCompare(b)
+      })
+      ordered.push(...rest)
+      doodadCategoriesPresent = ordered
     },
     clear() {
       clearInstances()
@@ -1626,5 +1754,40 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     isPathingVisible() {
       return pathingVisible
     },
+    setTerrainPickMode(active: boolean) {
+      if (active === terrainPickMode) return
+      terrainPickMode = active
+      // Visual feedback: crosshair cursor over the canvas. Clear any active
+      // hover-pick cursor when leaving the mode so we don't leave the user
+      // staring at "move" / "pointer" cursors that no longer make sense.
+      if (active) canvas.style.cursor = 'crosshair'
+      else canvas.style.cursor = ''
+    },
+    isTerrainPickMode() { return terrainPickMode },
+    onTerrainPick(cb: TerrainPickCallback) {
+      terrainPickCallback = cb
+    },
+    setDoodadCategoryVisible(category: string, visible: boolean) {
+      // "*" affects every category. Walk the per-instance category map and
+      // attach/detach by setScene; setScene(null) detaches without disposing,
+      // so toggling back on is cheap (no model re-load).
+      if (category === '*') {
+        // Mirror across all categories so future loadMap respects the choice.
+        for (const c of doodadCategoriesPresent) doodadVisibility.set(c, visible)
+        for (const inst of doodadInstances.values()) {
+          if (visible) inst.setScene(scene)
+          else inst.setScene(null)
+        }
+        return
+      }
+      doodadVisibility.set(category, visible)
+      for (const [cn, inst] of doodadInstances) {
+        const c = doodadCategoryByCn.get(cn) ?? 'Uncategorized'
+        if (c !== category) continue
+        if (visible) inst.setScene(scene)
+        else inst.setScene(null)
+      }
+    },
+    getDoodadCategories() { return [...doodadCategoriesPresent] },
   }
 }

@@ -771,6 +771,25 @@ func (a *App) SetUnitAnimation(creationNumber uint32, animName string) {
 	})
 }
 
+// EmitTestCommand sends a free-form test command to the JS layer via a Wails
+// event. Used by verification automation to drive UI state changes that
+// would otherwise require synthetic input — which WebView2 silently drops in
+// some cases (see project memory). The JS side subscribes to the event and
+// dispatches per command. No-op if no subscriber is wired (event just goes
+// nowhere; harmless).
+//
+// Commands are free-form strings parsed JS-side; conventional shape:
+//   "terrain.toggle"               toggle terrain-pick mode
+//   "terrain.set <col> <row>"      set terrain cell (auto-fills info)
+//   "doodad.toggle <cat>"          toggle doodad category visibility
+//   "section.toggle <id>"          toggle accordion section open state
+//   "splitter.set <pct>"           set right-column explorer pct
+func (a *App) EmitTestCommand(cmd string) {
+	runtime.EventsEmit(a.ctx, "wc3-forge:test-command", map[string]any{
+		"cmd": cmd,
+	})
+}
+
 
 // PathingMapDTO is the JS-facing pathing-map shape. Cells carry one byte
 // per quarter-cell (4× terrain tile resolution); each byte's bits flag

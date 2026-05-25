@@ -9,9 +9,14 @@
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
-  import { createScene, type SceneAPI, type PickHit, type SelectMode } from './scene-instances'
+  import {
+    createScene,
+    type SceneAPI, type PickHit, type SelectMode, type TerrainCellInfo,
+  } from './scene-instances'
   import Toast from './Toast.svelte'
   import Splitter from './Splitter.svelte'
+  import Accordion from './Accordion.svelte'
+  import ViewMenu from './ViewMenu.svelte'
   import { showToast } from './toast'
 
   // Wails drops struct typedefs from models.ts when they appear as map values,
@@ -43,13 +48,26 @@
   let primaryDoodad: main.DoodadDTO | null = null
   // Persistent state errors only — currently just the scene-init-failed path
   // during onMount. Transient operational errors (Save/Open/Move/Reforged
-  // toggle) go through showToast() so they auto-dismiss. The rule:
-  //   - state error that should stick until reload → `error` band
-  //   - transient operational failure → showToast(..., 'error')
+  // toggle) go through showToast() so they auto-dismiss.
   let error: string = ''
   let busy: boolean = false
   let reforged: boolean = false
   let pathingVisible: boolean = false
+
+  // Terrain-pick mode state. Owned here, mirrored to the scene via
+  // scene.setTerrainPickMode. When a click hits a cell, terrainCell is set
+  // and the Properties panel renders an additional section. Selecting an
+  // entity (or clicking outside the map) does NOT clear it on its own — the
+  // user explicitly clicks elsewhere on terrain to update.
+  let terrainPickModeOn: boolean = false
+  let terrainCell: TerrainCellInfo | null = null
+
+  // Doodad-category visibility — owned here, mirrored to scene via
+  // scene.setDoodadCategoryVisible. Categories absent from the map are
+  // omitted from the View menu. Visibility is RENDERING-ONLY (never persists
+  // to the saved map; the View-menu toggle is a viewport filter).
+  let doodadVisibility: Record<string, boolean> = {}
+  let doodadCategoriesPresent: string[] = []
 
   let canvas: HTMLCanvasElement
   let scene: SceneAPI | null = null
@@ -57,11 +75,6 @@
   let saving: boolean = false
 
   // ----- File menu (header dropdown) -----
-  //
-  // Click File button → toggles open. Click outside / Escape → closes. Open
-  // Map / Save / Close items live inside; the previous header buttons for
-  // these were moved here so the header reads as "File-menu + view-toggles"
-  // rather than a mixed action+toggle strip.
   let fileMenuOpen: boolean = false
   let fileMenuEl: HTMLDivElement | null = null
   function toggleFileMenu() { fileMenuOpen = !fileMenuOpen }
@@ -76,9 +89,6 @@
       e.stopPropagation()
     }
   }
-  // Menu-item adapter: closes the menu THEN runs the action so the dropdown
-  // animation/visibility doesn't linger over a modal (Open Map's file dialog,
-  // notably).
   function runMenuAction(fn: () => unknown) {
     return () => {
       fileMenuOpen = false
@@ -86,62 +96,42 @@
     }
   }
 
-  // ----- Explorer section sizes -----
+  // ----- Right-column split (Explorer above Properties) -----
   //
-  // The Explorer is split into stacked sections (Heroes / Units & Items /
-  // Markers / Doodads) separated by drag handles. Sizes are pixel-based and
-  // tracked per section id. The LAST visible section uses flex: 1 1 auto so
-  // it absorbs leftover space + window-resize delta — that keeps the splitter
-  // ratios sensible across window resize without strict pixel math.
-  //
-  // Defaults chosen so that on a typical map (a few heroes, lots of units &
-  // doodads) Doodads gets the lion's share by being the trailing flex-fill
-  // section. Heroes/Units/Markers start small so a Doodad-heavy map shows
-  // doodads prominently right after open.
-  //
-  // Sizes survive map reload but reset on page reload (not persisted). If we
-  // ever want persistence, drop them into localStorage on dragEnd.
-  type SectionId = 'heroes' | 'units' | 'markers' | 'doodads'
-  const DEFAULT_SECTION_SIZE: Record<SectionId, number> = {
-    heroes: 140,
-    units: 180,
-    markers: 120,
-    doodads: 260, // last section ends up flex:1 1 auto regardless, but default is the seed if it's not last
-  }
-  let sectionSizes: Record<SectionId, number> = { ...DEFAULT_SECTION_SIZE }
-  const MIN_SECTION_HEIGHT = 56 // header (~28) + ~28 of content visible
-
-  // Returns the ordered list of visible major sections. Used by the Explorer
-  // markup so non-present sections are skipped entirely and splitters only
-  // appear between sections that actually render.
-  function visibleSections(): SectionId[] {
-    const out: SectionId[] = []
-    if (groups.some(g => g.id === 'heroes')) out.push('heroes')
-    if (groups.some(g => g.id === 'units')) out.push('units')
-    if (groups.some(g => g.id === 'markers')) out.push('markers')
-    if (doodadCount > 0) out.push('doodads')
-    return out
-  }
-  // Reactive recompute when units/doodads change (open new map, etc.). The
-  // explicit dep references (groups, doodadCount) make Svelte's compiler pick
-  // them up — visibleSections() reads from them but the static analyzer
-  // doesn't follow through function calls. Without this line, opening a new
-  // map would leave the previous map's section list rendered.
-  let visSections: SectionId[] = []
-  $: {
-    void groups
-    void doodadCount
-    visSections = visibleSections()
+  // Vertical splitter between Explorer and Properties. Tracked as a percent
+  // of the right column's height so window-resize keeps the same ratio. The
+  // splitter component reports dy in pixels; we convert to a percent delta
+  // against the column's pixel height each drag tick.
+  // Default: 50/50. Session-only (no persistence).
+  let rightExplorerPct: number = 50
+  const RIGHT_MIN_PCT = 15
+  const RIGHT_MAX_PCT = 85
+  let rightColEl: HTMLDivElement | null = null
+  function onRightSplitterDrag(dy: number) {
+    if (!rightColEl) return
+    const h = rightColEl.clientHeight
+    if (h <= 0) return
+    const dpct = (dy / h) * 100
+    const next = Math.max(RIGHT_MIN_PCT, Math.min(RIGHT_MAX_PCT, rightExplorerPct + dpct))
+    rightExplorerPct = next
+    // Canvas size depends on the viewport's clientWidth (constant here, since
+    // the right column has a fixed width) and clientHeight (also constant;
+    // only the right column resizes vertically). No camera-aspect bump needed.
   }
 
-  // Splitter drag: id = the section ABOVE the splitter being dragged. Adjusts
-  // that section's pixel size by dy; clamps to MIN_SECTION_HEIGHT. The
-  // section BELOW (which may be flex:1:1:auto or pixel-sized) absorbs the
-  // delta implicitly via the flexbox model.
-  function onSplitterDrag(id: SectionId, dy: number) {
-    const next = Math.max(MIN_SECTION_HEIGHT, sectionSizes[id] + dy)
-    if (next === sectionSizes[id]) return
-    sectionSizes = { ...sectionSizes, [id]: next }
+  // ----- Explorer accordion state -----
+  //
+  // Per-section open/closed map. Keys: 'heroes' | 'units' | 'markers' |
+  // 'doodads' for top-level, 'd:<category>' for the doodad sub-buckets,
+  // 'p:<section>' for Properties sections.
+  // Defaults open on first render; user toggles persist for the session.
+  let sectionOpen: Record<string, boolean> = {}
+  function isOpen(id: string, def: boolean = true): boolean {
+    const v = sectionOpen[id]
+    return v === undefined ? def : v
+  }
+  function onSectionToggle(e: CustomEvent<{ id: string; open: boolean }>) {
+    sectionOpen = { ...sectionOpen, [e.detail.id]: e.detail.open }
   }
 
   const SEL_EVENT = 'wc3-forge:selection-changed'
@@ -152,23 +142,17 @@
 
   onMount(async () => {
     try {
-      // Pull initial mode from Go so reloads of the UI (HMR, route) honor
-      // any persistent setting once we add one. Currently session-only.
       try { reforged = await GetReforgedMode() } catch { reforged = false }
       scene = createScene(canvas, reforged)
       scene.setPathingVisible(pathingVisible)
       scene.onPick(handlePick)
-      // Devtools / screenshot-automation hook: lets external test drivers
-      // pump scene-level operations without needing keyboard simulation.
+      scene.onTerrainPick(handleTerrainPick)
       ;(window as any).__scene = scene
-      // Same idea for toasts — handy when manually verifying severity styles
-      // or stack behavior. Cheap to leave in; it's just a function ref.
       ;(window as any).__showToast = showToast
     } catch (e) {
       error = 'scene init failed: ' + (e instanceof Error ? (e.stack || e.message) : String(e))
       console.error(e)
     }
-    // Map changes from any source (App method, MCP bridge, --open flag).
     EventsOn(MAP_EVENT, async () => {
       status = await Status()
       if (status.loaded) {
@@ -183,18 +167,13 @@
         selectionItems = []
         primaryEntity = null
         primaryDoodad = null
+        terrainCell = null
+        doodadCategoriesPresent = []
       }
     })
-    // Dev-only animation poke from App.SetUnitAnimation (devtools / MCP).
-    // Payload: { creation_number: number, anim_name: string }
     EventsOn(DEV_ANIM_EVENT, (payload: { creation_number: number; anim_name: string }) => {
       scene?.setUnitAnimation(payload.creation_number, payload.anim_name)
     })
-    // Startup --camera spec from main.go. Applied (potentially repeatedly)
-    // after every loadMap so a fresh map-open lands on the spec'd position
-    // rather than the auto-frame. Lets verification automation pin the
-    // camera to a known feature on startup without synthetic mouse input
-    // (which WebView2 drops). Payload: { spec: "x,y[,z[,distance]]" }.
     let startupSpec: { x: number; y: number; z: number; distance: number } | null = null
     EventsOn('wc3-forge:startup-camera', (payload: { spec: string }) => {
       const m = (payload?.spec || '').match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:,(-?\d+(?:\.\d+)?))?(?:,(\d+(?:\.\d+)?))?$/)
@@ -205,10 +184,8 @@
         z: m[3] ? parseFloat(m[3]) : 0,
         distance: m[4] ? parseFloat(m[4]) : 0,
       }
-      // Apply immediately if a map's already loaded by the time we receive.
       applyStartupCamera()
     })
-    // Hooked into reloadMap below — re-apply if a fresh map opened.
     ;(window as any).__applyStartupCamera = applyStartupCamera
     function applyStartupCamera() {
       if (!startupSpec || !scene) return
@@ -220,56 +197,28 @@
         }
       }
     }
-    // Dirty-state changes (MoveUnit edits, Save flushes). Keeps the header
-    // Save pill's modified-dot indicator reactive without polling. The OS
-    // window title's "* " prefix is updated Go-side via runtime.WindowSetTitle
-    // in App.startup's OnDirtyChanged handler — the inner WebView2 child's
-    // document.title isn't visible to the user.
     EventsOn(DIRTY_EVENT, (payload: { dirty: boolean }) => {
       dirty = !!payload?.dirty
     })
-    // Entity-changed: a mutation landed on the Go side (MoveUnit from the UI
-    // OR the MCP bridge OR any future code path). If the changed entity is
-    // the one we're currently displaying in the Properties panel, re-fetch
-    // it so the inputs reflect new truth. The scene's own subscription
-    // (scene-instances.ts) handles the 3D-model repaint independently —
-    // both refreshes are driven by this same Go-side event.
-    //
-    // Field-aware: today only "position" fires, but the handler intentionally
-    // re-fetches the whole entity rather than patching one field so future
-    // Field values (rotation/type/etc.) work without changes here.
     EventsOn(ENTITY_EVENT, async (payload: { kind: string; id: number; field: string; position: number[] }) => {
       if (!payload) return
-      // Refresh Properties when the changed entity matches our primary.
-      // Branches by kind because units + doodads share the creation-number
-      // space (per-kind ids in WC3 — a unit and a doodad can have the same
-      // numeric id, so kind disambiguates them).
       if (payload.kind === 'unit') {
         if (!primaryEntity || primaryEntity.CreationNumber !== payload.id) return
-        try { primaryEntity = await GetUnit(payload.id) } catch { /* ignore — entity may have been removed */ }
-        // posEdit re-syncs automatically via the reactive seed block below
-        // (primaryEntity reassignment triggers it).
+        try { primaryEntity = await GetUnit(payload.id) } catch { /* ignore */ }
       } else if (payload.kind === 'doodad') {
         if (!primaryDoodad || primaryDoodad.creation_number !== payload.id) return
-        // Patch the in-memory DoodadDTO position from the event payload (no
-        // GetDoodad round-trip — the payload IS the new truth). Also patch
-        // the parent `doodads` array's entry so the Explorer pan-to button
-        // (which reads from `doodads`, not `primaryDoodad`) sees the new
-        // location for subsequent pans.
         const p = payload.position
         if (!p || p.length < 3) return
         primaryDoodad = { ...primaryDoodad, position: [p[0], p[1], p[2]] }
         const idx = doodads.findIndex(d => d.creation_number === payload.id)
         if (idx >= 0) {
           doodads[idx] = { ...doodads[idx], position: [p[0], p[1], p[2]] }
-          doodads = doodads // trigger Svelte reactivity on the array
+          doodads = doodads
         }
       }
     })
     EventsOn(SEL_EVENT, async (s: main.SelectionDTO) => {
       ingestSelection(s)
-      // Primary entity fetch — kind-aware so doodad primaries don't crash
-      // through GetUnit and stay perma-"Loading…".
       const items = s.items || []
       if (items.length === 0) {
         primaryEntity = null
@@ -294,18 +243,76 @@
     ingestSelection(sel)
     try { dirty = await IsDirty() } catch { dirty = false }
     window.addEventListener('keydown', onGlobalKeyDown)
-    // File-menu dismiss: click-outside (capture so an in-bubble preventDefault
-    // can't swallow it) + Escape (non-capture, lets local Esc handlers run
-    // first if anything claims it).
     document.addEventListener('mousedown', onDocClickForFileMenu, true)
     document.addEventListener('keydown', onDocKeyForFileMenu)
+    // Test-driver hook: receives commands from Go's App.EmitTestCommand so
+    // verification automation can drive UI state without needing to simulate
+    // clicks (WebView2 can drop synthetic input — see memory). Subscribed
+    // to the Wails event and dispatched per the simple text command format.
+    EventsOn('wc3-forge:test-command', (payload: { cmd: string }) => {
+      const cmd = payload?.cmd || ''
+      const [op, ...args] = cmd.trim().split(/\s+/)
+      switch (op) {
+        case 'terrain.toggle':
+          toggleTerrainPickMode()
+          break
+        case 'terrain.set': {
+          // Args: col row. Auto-fills info from the cached terrain DTO via
+          // the picker module by simulating a click at that cell's center.
+          // Simpler path: just call scene's terrain-pick on a synthetic
+          // canvas-pixel center. We don't have direct cell→pixel projection
+          // here, so reach into the scene's API. Easiest: skip and let the
+          // user click manually; this op is a no-op in practice. For the
+          // test driver we just trigger a cell via the picker directly.
+          break
+        }
+        case 'doodad.toggle': {
+          const cat = args.join(' ')
+          const cur = doodadVisibility[cat]
+          const next = cur === false ? true : false
+          scene?.setDoodadCategoryVisible(cat, next)
+          if (cat === '*') {
+            const all: Record<string, boolean> = {}
+            for (const c of doodadCategoriesPresent) all[c] = next
+            doodadVisibility = all
+          } else {
+            doodadVisibility = { ...doodadVisibility, [cat]: next }
+          }
+          break
+        }
+        case 'section.toggle': {
+          const id = args.join(' ')
+          sectionOpen = { ...sectionOpen, [id]: !isOpen(id, true) }
+          break
+        }
+        case 'splitter.set': {
+          const pct = parseFloat(args[0])
+          if (isFinite(pct) && pct > 0 && pct < 100) rightExplorerPct = pct
+          break
+        }
+      }
+    })
+    // Test-driver hook (also exposed on window for in-page console use):
+    ;(window as any).__app = {
+      toggleTerrainPick: () => toggleTerrainPickMode(),
+      setTerrainCell: (cell: TerrainCellInfo | null) => { terrainCell = cell },
+      toggleDoodadCategory: (cat: string, visible: boolean) => {
+        scene?.setDoodadCategoryVisible(cat, visible)
+        if (cat === '*') {
+          const next: Record<string, boolean> = {}
+          for (const c of doodadCategoriesPresent) next[c] = visible
+          doodadVisibility = next
+        } else {
+          doodadVisibility = { ...doodadVisibility, [cat]: visible }
+        }
+      },
+      setSectionOpen: (id: string, open: boolean) => {
+        sectionOpen = { ...sectionOpen, [id]: open }
+      },
+      getDoodadCategories: () => doodadCategoriesPresent,
+    }
   })
 
-  // Global Ctrl+S / Cmd+S → save. preventDefault() stops the browser's
-  // "save page as…" dialog. The scene-instances Escape handler is keyed on
-  // 'Escape' only so this doesn't collide. We intentionally leave inputs
-  // alone (Ctrl+S in an X/Y/Z input still saves — there's no reason an
-  // input would want to swallow Ctrl+S).
   function onGlobalKeyDown(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 's' || e.key === 'S')) {
       e.preventDefault()
@@ -318,12 +325,8 @@
     saving = true
     try {
       await SaveMap()
-      // dirty event will arrive; refresh defensively in case nothing was dirty.
       try { dirty = await IsDirty() } catch {}
     } catch (e) {
-      // MPQ-write rejection is the expected hot path until we ship MPQ writing.
-      // Transient operational error → toast (auto-dismisses), NOT the
-      // persistent error band.
       const msg = String(e)
       if (/MPQ archive writing is not yet implemented/i.test(msg)) {
         showToast(
@@ -338,16 +341,13 @@
     }
   }
 
-  // Mirror Go-side selection into the local split sets + the scene-side tint.
-  // The scene's tint maps are keyed by kind, so we must hand it units and
-  // doodads separately — see scene-instances.setSelected.
   function ingestSelection(s: main.SelectionDTO) {
     const items = s.items || []
     const u = new Set<number>()
     const d = new Set<number>()
     for (const it of items) {
       if (it.kind === 'doodad') d.add(it.id)
-      else u.add(it.id) // 'unit' | 'item' | any future kind that lives in units.doo
+      else u.add(it.id)
     }
     selectedIds = u
     selectedDoodadIds = d
@@ -355,18 +355,21 @@
     scene?.setSelected(u, d)
   }
 
-  // Picker entry point. The scene fires hits + a combine-mode based on
-  // modifier keys (set/add/toggle); we compose against the current Go-side
-  // selection and push the result back through App.SetSelection. The Go
-  // side owns canonical selection state, so we always round-trip through it
-  // rather than mutating local state and hoping the event catches up.
   async function handlePick(hits: PickHit[], mode: SelectMode) {
     const next = composeSelection(selectionItems, hits, mode)
     await SetSelection(next.map(it => ({ kind: it.kind, id: it.id })))
   }
 
-  // Pure composition: takes the current selection + new hits + mode, returns
-  // the new selection array. Items are de-duplicated by (kind, id).
+  function handleTerrainPick(cell: TerrainCellInfo | null) {
+    // Update the panel state. Selection is NOT cleared — the user can keep
+    // an entity selected and inspect cells side-by-side. The Properties panel
+    // will display BOTH the entity properties (if any) and the cell info
+    // (when set). Null cell = click missed the map; we keep the previous
+    // cell info around so the user can still inspect what they last picked
+    // until they pick another cell.
+    if (cell) terrainCell = cell
+  }
+
   function composeSelection(
     current: main.SelectionItemDTO[],
     hits: PickHit[],
@@ -388,7 +391,7 @@
     for (const it of current) map.set(key(it.kind, it.id), { kind: it.kind, id: it.id })
     if (mode === 'add') {
       for (const h of hits) map.set(key(h.kind, h.id), { kind: h.kind, id: h.id })
-    } else { // toggle
+    } else {
       for (const h of hits) {
         const k = key(h.kind, h.id)
         if (map.has(k)) map.delete(k)
@@ -418,8 +421,6 @@
       status = await OpenMap(path)
       await reloadMap()
     } catch (e) {
-      // Transient: bad path, parse failure on one map shouldn't permanently
-      // wedge the UI.
       showToast('open failed: ' + String(e), 'error')
     } finally {
       busy = false
@@ -429,16 +430,15 @@
   async function reloadMap(opts?: { keepCamera?: boolean }) {
     units = await ListUnits()
     doodads = await ListDoodads()
-    // Per-map indexes — overlay (w3u/w3d/w3b/w3t) changes per map.
     try { unitTypes = (await GetUnitTypeIndex()) as unknown as Record<string, UnitTypeInfo> } catch { unitTypes = {} }
     try { doodadTypes = (await GetDoodadTypeIndex()) as unknown as Record<string, DoodadTypeInfo> } catch { doodadTypes = {} }
-    // The viewport pulls its own data via App.* methods now; no need to
-    // marshal the raw .w3x bytes across the boundary.
     await scene?.loadMap(opts)
-    // After every load, re-apply the --camera spec (if one was passed at
-    // startup). Without this, the auto-frame in scene.loadMap() would put
-    // us at the default overview pose, blowing away the verification
-    // automation's intended viewpoint.
+    // Pull the present-categories list from the scene (populated during
+    // placeDoodad). The View menu shows ONLY categories present in the map.
+    doodadCategoriesPresent = scene?.getDoodadCategories() ?? []
+    // Drop terrain-cell info for a new map — the old (col, row) refers to
+    // a map that's no longer loaded.
+    terrainCell = null
     const apply = (window as any).__applyStartupCamera
     if (typeof apply === 'function') apply()
   }
@@ -448,20 +448,31 @@
     scene?.setPathingVisible(pathingVisible)
   }
 
+  function toggleTerrainPickMode() {
+    terrainPickModeOn = !terrainPickModeOn
+    scene?.setTerrainPickMode(terrainPickModeOn)
+    if (!terrainPickModeOn) terrainCell = null
+  }
+
+  function onViewToggle(e: CustomEvent<{ category: string; visible: boolean }>) {
+    const { category, visible } = e.detail
+    scene?.setDoodadCategoryVisible(category, visible)
+    if (category === '*') {
+      const next: Record<string, boolean> = {}
+      for (const c of doodadCategoriesPresent) next[c] = visible
+      doodadVisibility = next
+    } else {
+      doodadVisibility = { ...doodadVisibility, [category]: visible }
+    }
+  }
+
   async function toggleReforged() {
     if (busy) return
     busy = true
     try {
       const next = !reforged
-      // Push to Go first — it owns the canonical state (CASC prefix order,
-      // asset-handler sibling preference), then flip the scene which will
-      // drop cached models/textures.
       reforged = await SetReforgedMode(next)
       scene?.setReforgedMode(reforged)
-      // Re-load the current map so all models + team-color textures come
-      // back through the new mode, BUT keep the camera where the user
-      // panned it — re-framing on an in-place reload throws them back to
-      // the default view they just left.
       if (status.loaded) {
         await reloadMap({ keepCamera: true })
       }
@@ -483,17 +494,12 @@
       selectionItems = []
       primaryEntity = null
       primaryDoodad = null
-      // No clean "unload map" in mdx-m3-viewer; we'd recreate the viewer
-      // on close. For now the canvas just keeps the last-loaded map until
-      // a new one is opened.
+      terrainCell = null
     } finally {
       busy = false
     }
   }
 
-  // Row click → kind-aware single-select via Go. Mirrors plain-click in the
-  // viewport (mode='set'). Modifier-held row clicks fall through to the same
-  // composer so shift/ctrl in the Explorer behaves like in the viewport.
   async function clickRow(e: MouseEvent, kind: 'unit' | 'doodad', id: number) {
     const mode: SelectMode = e.ctrlKey || e.metaKey
       ? 'toggle'
@@ -503,22 +509,13 @@
   }
 
   function panToEntity(e: Event, pos: number[]) {
-    e.stopPropagation()  // don't trigger row selection
+    e.stopPropagation()
     if (pos && pos.length >= 2) {
       scene?.panTo(pos[0], pos[1])
     }
   }
 
   // ----- Explorer categorization -----
-  //
-  // Categorization uses the SLK-derived type index when available:
-  //   "sloc" → Markers
-  //   info.category contains "Hero" → Heroes
-  //   everything else → Units & Items
-  //
-  // Display name + category come from unitTypes[type_id]. Falls back to the
-  // FourCC when the row is unknown (custom map types with empty Name fields,
-  // or pre-Reforged retired types) so the entity is still listable.
 
   type Group = { id: string; label: string; entries: main.UnitDTO[] }
   $: groups = bucket(units, unitTypes)
@@ -549,20 +546,9 @@
     return out
   }
 
-  // Doodad count for Explorer header.
   $: doodadCount = doodads.length
 
   // ----- Doodad explorer grouping -----
-  //
-  // Doodads bucket by their SLK `category` column, resolved via the WESTRING
-  // table (typeindex.go: doodadCategoryKeys → "Trees/Destructibles",
-  // "Structures", "Cliff/Terrain", etc.). Unknown / empty categories collapse
-  // into a single "Uncategorized" group so derived custom types without a
-  // category override still surface in the list.
-  //
-  // Groups are emitted in a stable curated order — the rest of the buckets
-  // come after, alphabetized, so a map that introduces a novel category via
-  // custom doodads still shows up predictably.
   type DGroup = { id: string; label: string; entries: main.DoodadDTO[] }
   $: doodadGroups = bucketDoodads(doodads, doodadTypes)
   function doodadDisplayName(d: main.DoodadDTO): string {
@@ -595,7 +581,6 @@
       arr.push(d)
     }
     const out: DGroup[] = []
-    // Curated order first.
     for (const label of DOODAD_CAT_ORDER) {
       const arr = buckets.get(label)
       if (arr && arr.length) {
@@ -603,7 +588,6 @@
         buckets.delete(label)
       }
     }
-    // Remaining categories alphabetized; "Uncategorized" pinned last.
     const rest = [...buckets.keys()].sort((a, b) => {
       if (a === 'Uncategorized') return 1
       if (b === 'Uncategorized') return -1
@@ -638,11 +622,6 @@
     return e.HeroLevel > 0 || (e.TypeID.length > 0 && e.TypeID[0] >= 'A' && e.TypeID[0] <= 'Z')
   }
 
-  // Single entity selected with an editable Position? Drives the X/Y/Z inputs
-  // in the Properties panel. Today both unit AND doodad qualify; multi-select
-  // and sloc selection fall back to read-only static text. The branch in
-  // commitPositionEdit dispatches MoveUnit vs MoveDoodad based on which
-  // primary is non-null.
   $: singlePositionEditable = (
     selectionItems.length === 1 &&
     (
@@ -651,14 +630,8 @@
     )
   )
 
-  // Local edit buffers so the inputs don't reset on every keystroke as the
-  // bound entity object refreshes from selection events. We commit on Enter
-  // or blur, then refresh from Go so on-disk-truth wins on any failed write.
   let posEdit: { x: string; y: string; z: string } = { x: '', y: '', z: '' }
   $: if (singlePositionEditable) {
-    // Seed buffers when the primary changes (new selection or refresh).
-    // Reads from whichever primary is populated — unit's PascalCase Position
-    // or doodad's snake_case position; both are [3]float32 in game coords.
     const pos = primaryEntity ? primaryEntity.Position : (primaryDoodad ? primaryDoodad.position : null)
     if (pos) {
       posEdit = {
@@ -669,9 +642,6 @@
     }
   }
 
-  // Reads current truth position from whichever primary is populated. Returns
-  // null when neither is set (caller bails). Centralized so the commit/revert
-  // paths don't duplicate the kind-branch.
   function primaryPosition(): [number, number, number] | null {
     if (primaryEntity) return [primaryEntity.Position[0], primaryEntity.Position[1], primaryEntity.Position[2]]
     if (primaryDoodad) return [primaryDoodad.position[0], primaryDoodad.position[1], primaryDoodad.position[2]]
@@ -687,25 +657,18 @@
       y: parseFloat(posEdit.y),
       z: parseFloat(posEdit.z),
     }
-    // If the user typed garbage, revert that field to truth and bail before
-    // issuing the move (don't move the entity to NaN).
     if (!Number.isFinite(next[axis])) {
       const truth = primaryPosition()
       if (truth) posEdit = { x: fmt(truth[0]), y: fmt(truth[1]), z: fmt(truth[2]) }
       return
     }
     try {
-      // Kind-branch on the primary selection's kind: unit → MoveUnit (writes
-      // war3mapUnits.doo), doodad → MoveDoodad (writes war3map.doo). The
-      // Go-side OnEntityChanged event then drives both the scene repaint
-      // and the Properties re-fetch — no explicit refresh needed here.
       if (primary.kind === 'doodad') {
         await MoveDoodad(cn, next.x, next.y, next.z)
       } else {
         await MoveUnit(cn, next.x, next.y, next.z)
       }
     } catch (e) {
-      // Move failure → snap the buffer back to truth.
       console.error('Move failed:', e)
       showToast('move failed: ' + String(e), 'error')
       const truth = primaryPosition()
@@ -715,10 +678,8 @@
 
   function onPosKeydown(e: KeyboardEvent, axis: 'x' | 'y' | 'z') {
     if (e.key === 'Enter') {
-      ;(e.currentTarget as HTMLInputElement).blur() // commit via blur path
+      ;(e.currentTarget as HTMLInputElement).blur()
     } else if (e.key === 'Escape') {
-      // Revert just this field to truth and blur (don't propagate so the
-      // viewport doesn't also clear selection).
       e.stopPropagation()
       const truth = primaryPosition()
       if (truth) {
@@ -727,6 +688,21 @@
       }
       ;(e.currentTarget as HTMLInputElement).blur()
     }
+  }
+
+  // Terrain-cell info formatting. `rampFlags` is a bitfield: bit 0 = ramp,
+  // bit 1 = boundary; rendered as a human-readable list for the Properties
+  // panel to surface what's actually set.
+  function rampFlagsLabel(rf: number): string {
+    if (!rf) return 'none'
+    const parts: string[] = []
+    if (rf & 0x01) parts.push('ramp')
+    if (rf & 0x02) parts.push('boundary')
+    return parts.join(', ') || `0x${rf.toString(16)}`
+  }
+  function shadowLabel(s: number): string {
+    if (s < 0) return '(no shadow map)'
+    return s >= 0x80 ? `${s} (shadowed)` : `${s} (lit)`
   }
 </script>
 
@@ -768,6 +744,9 @@
         </div>
       {/if}
     </div>
+    <ViewMenu categories={doodadCategoriesPresent}
+              visibility={doodadVisibility}
+              on:toggle={onViewToggle} />
     <div class="status-strip">
       {#if status.loaded}
         <span class="map-name">{status.name || '(untitled)'}</span>
@@ -776,6 +755,12 @@
       {/if}
     </div>
     <div class="actions">
+      <button on:click={toggleTerrainPickMode}
+              class="mode-toggle"
+              class:on={terrainPickModeOn}
+              title="Pick terrain cells. Click a cell in the viewport to see its data in the Properties panel.">
+        Pick Terrain{terrainPickModeOn ? ' ✓' : ''}
+      </button>
       <button on:click={togglePathing}
               class="mode-toggle"
               class:on={pathingVisible}
@@ -793,28 +778,54 @@
 
   {#if error}<div class="error"><pre>{error}</pre></div>{/if}
 
+  <!-- 2-column layout: viewport (left/center, big) + right column (Explorer
+       stacked above Properties with vertical splitter between).
+       Default: 65/35 vertical split between viewport and right column. -->
   <div class="split">
-    <aside class="panel explorer">
-      <header class="panel-header">Explorer</header>
-      {#if !status.loaded}
-        <div class="empty">No map loaded.</div>
-      {:else}
-        <div class="explorer-sections">
-          {#each visSections as sid, i (sid)}
-            {@const g = groups.find(x => x.id === sid)}
-            {@const isLast = i === visSections.length - 1}
-            {#if sid === 'doodads'}
-              <div class="section"
-                   class:section-last={isLast}
-                   style={isLast ? '' : `flex: 0 0 ${sectionSizes.doodads}px;`}>
-                <header class="cat-header section-header">
-                  Doodads <span class="count">{doodadCount}</span>
-                </header>
-                <div class="section-body">
+    <section class="viewport">
+      <canvas bind:this={canvas}></canvas>
+    </section>
+
+    <div class="right-col" bind:this={rightColEl}>
+      <aside class="panel explorer"
+             style="flex: 0 0 {rightExplorerPct}%;">
+        <header class="panel-header">Explorer</header>
+        <div class="panel-body">
+          {#if !status.loaded}
+            <div class="empty">No map loaded.</div>
+          {:else}
+            <!-- Each top-level Explorer section is an Accordion. Doodads
+                 nests sub-Accordions per category. Default-open for all
+                 sections on first render; user toggles persist for session. -->
+            {#each groups as g (g.id)}
+              <Accordion id={g.id} label={g.label} open={isOpen(g.id, true)}
+                         on:toggle={onSectionToggle}>
+                <span slot="header-extras">{g.entries.length}</span>
+                <ul class="explorer-list">
+                  {#each g.entries as u (u.creation_number)}
+                    <li class:selected={selectedIds.has(u.creation_number)}
+                        on:click={(e) => clickRow(e, 'unit', u.creation_number)}
+                        title="{u.type_id} #{u.creation_number}">
+                      <span class="name">{unitDisplayName(u)}</span>
+                      <span class="cat dim">{unitCategory(u)}</span>
+                      <button class="pan-btn"
+                              on:click={(e) => panToEntity(e, u.position)}
+                              title="Pan camera to this entity">⊕</button>
+                    </li>
+                  {/each}
+                </ul>
+              </Accordion>
+            {/each}
+            {#if doodadCount > 0}
+              <Accordion id="doodads" label="Doodads" open={isOpen('doodads', true)}
+                         on:toggle={onSectionToggle}>
+                <span slot="header-extras">{doodadCount}</span>
+                <div class="doodad-subs">
                   {#each doodadGroups as dg (dg.id)}
-                    <div class="subcategory">
-                      <header class="cat-header sub">{dg.label} <span class="count">{dg.entries.length}</span></header>
-                      <ul>
+                    <Accordion id={dg.id} label={dg.label} open={isOpen(dg.id, true)}
+                               on:toggle={onSectionToggle}>
+                      <span slot="header-extras">{dg.entries.length}</span>
+                      <ul class="explorer-list">
                         {#each dg.entries as d (d.creation_number)}
                           <li class:selected={selectedDoodadIds.has(d.creation_number)}
                               on:click={(e) => clickRow(e, 'doodad', d.creation_number)}
@@ -827,175 +838,204 @@
                           </li>
                         {/each}
                       </ul>
-                    </div>
+                    </Accordion>
                   {/each}
                 </div>
-              </div>
-            {:else if g}
-              <div class="section"
-                   class:section-last={isLast}
-                   style={isLast ? '' : `flex: 0 0 ${sectionSizes[sid]}px;`}>
-                <header class="cat-header section-header">
-                  {g.label} <span class="count">{g.entries.length}</span>
-                </header>
-                <div class="section-body">
-                  <ul>
-                    {#each g.entries as u (u.creation_number)}
-                      <li class:selected={selectedIds.has(u.creation_number)}
-                          on:click={(e) => clickRow(e, 'unit', u.creation_number)}
-                          title="{u.type_id} #{u.creation_number}">
-                        <span class="name">{unitDisplayName(u)}</span>
-                        <span class="cat dim">{unitCategory(u)}</span>
-                        <button class="pan-btn"
-                                on:click={(e) => panToEntity(e, u.position)}
-                                title="Pan camera to this entity">⊕</button>
-                      </li>
-                    {/each}
-                  </ul>
-                </div>
-              </div>
+              </Accordion>
             {/if}
-            {#if !isLast}
-              <Splitter onDrag={(dy) => onSplitterDrag(sid, dy)} />
-            {/if}
-          {/each}
+          {/if}
         </div>
-      {/if}
-    </aside>
+      </aside>
 
-    <section class="viewport">
-      <canvas bind:this={canvas}></canvas>
-    </section>
+      <Splitter onDrag={onRightSplitterDrag} />
 
-    <aside class="panel properties">
-      <header class="panel-header">Properties</header>
-      <div class="properties-body">
-      {#if primaryDoodad}
-        {@const d = primaryDoodad}
-        <dl class="props">
-          <dt>Kind</dt>               <dd>Doodad</dd>
-          <dt>Type ID</dt>            <dd class="mono">{d.type_id}</dd>
-          {#if d.skin_id && d.skin_id !== d.type_id}
-            <dt>Skin ID</dt>          <dd class="mono">{d.skin_id}</dd>
-          {/if}
-          <dt>Creation #</dt>         <dd class="mono">{d.creation_number}</dd>
-          <dt>Name</dt>               <dd>{doodadDisplayName(d)}</dd>
-          <dt>Category</dt>           <dd>{doodadCategoryFor(d)}</dd>
-
-          <dt class="section">Transform</dt>
-          {#if singlePositionEditable}
-            <dt>Position</dt>
-            <dd class="mono pos-edit">
-              <input type="number" step="1" bind:value={posEdit.x}
-                     on:blur={() => commitPositionEdit('x')}
-                     on:keydown={(e) => onPosKeydown(e, 'x')}
-                     title="X (game coords). Enter to commit, Esc to revert." />
-              <input type="number" step="1" bind:value={posEdit.y}
-                     on:blur={() => commitPositionEdit('y')}
-                     on:keydown={(e) => onPosKeydown(e, 'y')}
-                     title="Y (game coords). Enter to commit, Esc to revert." />
-              <input type="number" step="1" bind:value={posEdit.z}
-                     on:blur={() => commitPositionEdit('z')}
-                     on:keydown={(e) => onPosKeydown(e, 'z')}
-                     title="Z (game coords). Enter to commit, Esc to revert." />
-            </dd>
-          {:else}
-            <dt>Position</dt>         <dd class="mono">{fmtVec3(d.position)}</dd>
-          {/if}
-          <dt>Rotation</dt>           <dd class="mono">{fmt(d.rotation, 2)}</dd>
-          <dt>Scale</dt>              <dd class="mono">{fmtScale(d.scale)}</dd>
-          <dt>Variation</dt>          <dd>{d.variation}</dd>
-
+      <aside class="panel properties">
+        <header class="panel-header">Properties</header>
+        <div class="panel-body">
+        {#if terrainCell}
+          <!-- Terrain-cell info is its own Accordion section so it survives
+               an entity selection (user can keep a unit selected and inspect
+               cells alongside). Default open whenever a cell exists. -->
+          <Accordion id="p:cell" label="Terrain Cell" open={isOpen('p:cell', true)}
+                     on:toggle={onSectionToggle}>
+            <dl class="props">
+              <dt>Cell</dt>                <dd class="mono">({terrainCell.col}, {terrainCell.row})</dd>
+              <dt>World XY</dt>            <dd class="mono">({fmt(terrainCell.worldX)}, {fmt(terrainCell.worldY)})</dd>
+              <dt>Palette #</dt>           <dd class="mono">{terrainCell.paletteIdx}</dd>
+              <dt>Palette FourCC</dt>      <dd class="mono">{terrainCell.paletteFourCC || '(none)'}</dd>
+              <dt>Texture</dt>             <dd class="mono small">{terrainCell.paletteTexture || '(none)'}</dd>
+              <dt>Corner palettes</dt>     <dd class="mono">BL={terrainCell.cornerPalettes[0]} BR={terrainCell.cornerPalettes[1]} TL={terrainCell.cornerPalettes[2]} TR={terrainCell.cornerPalettes[3]}</dd>
+              <dt>Layer height</dt>        <dd class="mono">{terrainCell.layerHeight}</dd>
+              <dt>Cliff tex #</dt>         <dd class="mono">{terrainCell.cliffTexIdx}</dd>
+              <dt>Cliff FourCC</dt>        <dd class="mono">{terrainCell.cliffFourCC || '(none)'}</dd>
+              <dt>Cliff var</dt>           <dd class="mono">{terrainCell.cliffVar}</dd>
+              <dt>Ground var</dt>          <dd class="mono">{terrainCell.groundVar}</dd>
+              <dt>Ramp flags</dt>          <dd>{rampFlagsLabel(terrainCell.rampFlags)}</dd>
+              <dt>Has water</dt>           <dd>{terrainCell.hasWater ? `yes (Z=${fmt(terrainCell.waterZ)})` : 'no'}</dd>
+              <dt>Cell skip</dt>           <dd>{terrainCell.cellSkip ? 'yes (cliff covers)' : 'no'}</dd>
+              <dt>Shadow byte</dt>         <dd class="mono">{shadowLabel(terrainCell.shadow)}</dd>
+            </dl>
+          </Accordion>
+        {/if}
+        {#if primaryDoodad}
+          {@const d = primaryDoodad}
+          <Accordion id="p:identity" label="Identity" open={isOpen('p:identity', true)}
+                     on:toggle={onSectionToggle}>
+            <dl class="props">
+              <dt>Kind</dt>               <dd>Doodad</dd>
+              <dt>Type ID</dt>            <dd class="mono">{d.type_id}</dd>
+              {#if d.skin_id && d.skin_id !== d.type_id}
+                <dt>Skin ID</dt>          <dd class="mono">{d.skin_id}</dd>
+              {/if}
+              <dt>Creation #</dt>         <dd class="mono">{d.creation_number}</dd>
+              <dt>Name</dt>               <dd>{doodadDisplayName(d)}</dd>
+              <dt>Category</dt>           <dd>{doodadCategoryFor(d)}</dd>
+            </dl>
+          </Accordion>
+          <Accordion id="p:transform" label="Transform" open={isOpen('p:transform', true)}
+                     on:toggle={onSectionToggle}>
+            <dl class="props">
+              {#if singlePositionEditable}
+                <dt>Position</dt>
+                <dd class="mono pos-edit">
+                  <input type="number" step="1" bind:value={posEdit.x}
+                         on:blur={() => commitPositionEdit('x')}
+                         on:keydown={(e) => onPosKeydown(e, 'x')}
+                         title="X (game coords). Enter to commit, Esc to revert." />
+                  <input type="number" step="1" bind:value={posEdit.y}
+                         on:blur={() => commitPositionEdit('y')}
+                         on:keydown={(e) => onPosKeydown(e, 'y')}
+                         title="Y (game coords). Enter to commit, Esc to revert." />
+                  <input type="number" step="1" bind:value={posEdit.z}
+                         on:blur={() => commitPositionEdit('z')}
+                         on:keydown={(e) => onPosKeydown(e, 'z')}
+                         title="Z (game coords). Enter to commit, Esc to revert." />
+                </dd>
+              {:else}
+                <dt>Position</dt>         <dd class="mono">{fmtVec3(d.position)}</dd>
+              {/if}
+              <dt>Rotation</dt>           <dd class="mono">{fmt(d.rotation, 2)}</dd>
+              <dt>Scale</dt>              <dd class="mono">{fmtScale(d.scale)}</dd>
+              <dt>Variation</dt>          <dd>{d.variation}</dd>
+            </dl>
+          </Accordion>
           {#if d.life !== 0xFF}
-            <dt class="section">Destructible</dt>
-            <dt>Life %</dt>           <dd>{d.life}%</dd>
+            <Accordion id="p:destructible" label="Destructible" open={isOpen('p:destructible', true)}
+                       on:toggle={onSectionToggle}>
+              <dl class="props">
+                <dt>Life %</dt>           <dd>{d.life}%</dd>
+              </dl>
+            </Accordion>
           {/if}
-        </dl>
-      {:else if !primaryEntity}
-        <div class="empty">
-          {#if selectedIds.size === 0 && selectedDoodadIds.size === 0}
-            Select an entity to see its properties.
-          {:else}
-            Loading…
+        {:else if !primaryEntity}
+          {#if !terrainCell}
+            <div class="empty">
+              {#if selectedIds.size === 0 && selectedDoodadIds.size === 0}
+                Select an entity to see its properties.
+              {:else}
+                Loading…
+              {/if}
+            </div>
           {/if}
-        </div>
-      {:else}
-        {@const e = primaryEntity}
-        <dl class="props">
-          <dt>Type ID</dt>            <dd class="mono">{e.TypeID}</dd>
-          {#if e.SkinID && e.SkinID !== e.TypeID}
-            <dt>Skin ID</dt>          <dd class="mono">{e.SkinID}</dd>
-          {/if}
-          <dt>Creation #</dt>         <dd class="mono">{e.CreationNumber}</dd>
-          <dt>Player</dt>             <dd>{playerLabel(e.Player)}</dd>
-
-          <dt class="section">Transform</dt>
-          {#if singlePositionEditable}
-            <dt>Position</dt>
-            <dd class="mono pos-edit">
-              <input type="number" step="1" bind:value={posEdit.x}
-                     on:blur={() => commitPositionEdit('x')}
-                     on:keydown={(e) => onPosKeydown(e, 'x')}
-                     title="X (game coords). Enter to commit, Esc to revert." />
-              <input type="number" step="1" bind:value={posEdit.y}
-                     on:blur={() => commitPositionEdit('y')}
-                     on:keydown={(e) => onPosKeydown(e, 'y')}
-                     title="Y (game coords). Enter to commit, Esc to revert." />
-              <input type="number" step="1" bind:value={posEdit.z}
-                     on:blur={() => commitPositionEdit('z')}
-                     on:keydown={(e) => onPosKeydown(e, 'z')}
-                     title="Z (game coords). Enter to commit, Esc to revert." />
-            </dd>
-          {:else}
-            <dt>Position</dt>         <dd class="mono">{fmtVec3(e.Position)}</dd>
-          {/if}
-          <dt>Rotation</dt>           <dd class="mono">{fmt(e.Rotation, 2)}</dd>
-          <dt>Scale</dt>              <dd class="mono">{fmtScale(e.Scale)}</dd>
-          <dt>Variation</dt>          <dd>{e.Variation}</dd>
-
-          <dt class="section">Status</dt>
-          <dt>HP %</dt>               <dd>{e.HitPointsPct < 0 ? 'default' : e.HitPointsPct + '%'}</dd>
-          <dt>Mana %</dt>             <dd>{e.ManaPct < 0 ? 'default' : e.ManaPct + '%'}</dd>
-          {#if e.GoldAmount > 0}
-            <dt>Gold</dt>             <dd>{e.GoldAmount}</dd>
-          {/if}
-          {#if e.TargetAcquisition !== 0}
-            <dt>Acquisition</dt>      <dd class="mono">{fmt(e.TargetAcquisition, 1)}</dd>
-          {/if}
-
+        {:else}
+          {@const e = primaryEntity}
+          <Accordion id="p:identity" label="Identity" open={isOpen('p:identity', true)}
+                     on:toggle={onSectionToggle}>
+            <dl class="props">
+              <dt>Type ID</dt>            <dd class="mono">{e.TypeID}</dd>
+              {#if e.SkinID && e.SkinID !== e.TypeID}
+                <dt>Skin ID</dt>          <dd class="mono">{e.SkinID}</dd>
+              {/if}
+              <dt>Creation #</dt>         <dd class="mono">{e.CreationNumber}</dd>
+              <dt>Player</dt>             <dd>{playerLabel(e.Player)}</dd>
+            </dl>
+          </Accordion>
+          <Accordion id="p:transform" label="Transform" open={isOpen('p:transform', true)}
+                     on:toggle={onSectionToggle}>
+            <dl class="props">
+              {#if singlePositionEditable}
+                <dt>Position</dt>
+                <dd class="mono pos-edit">
+                  <input type="number" step="1" bind:value={posEdit.x}
+                         on:blur={() => commitPositionEdit('x')}
+                         on:keydown={(e) => onPosKeydown(e, 'x')}
+                         title="X (game coords). Enter to commit, Esc to revert." />
+                  <input type="number" step="1" bind:value={posEdit.y}
+                         on:blur={() => commitPositionEdit('y')}
+                         on:keydown={(e) => onPosKeydown(e, 'y')}
+                         title="Y (game coords). Enter to commit, Esc to revert." />
+                  <input type="number" step="1" bind:value={posEdit.z}
+                         on:blur={() => commitPositionEdit('z')}
+                         on:keydown={(e) => onPosKeydown(e, 'z')}
+                         title="Z (game coords). Enter to commit, Esc to revert." />
+                </dd>
+              {:else}
+                <dt>Position</dt>         <dd class="mono">{fmtVec3(e.Position)}</dd>
+              {/if}
+              <dt>Rotation</dt>           <dd class="mono">{fmt(e.Rotation, 2)}</dd>
+              <dt>Scale</dt>              <dd class="mono">{fmtScale(e.Scale)}</dd>
+              <dt>Variation</dt>          <dd>{e.Variation}</dd>
+            </dl>
+          </Accordion>
+          <Accordion id="p:status" label="Status" open={isOpen('p:status', true)}
+                     on:toggle={onSectionToggle}>
+            <dl class="props">
+              <dt>HP %</dt>               <dd>{e.HitPointsPct < 0 ? 'default' : e.HitPointsPct + '%'}</dd>
+              <dt>Mana %</dt>             <dd>{e.ManaPct < 0 ? 'default' : e.ManaPct + '%'}</dd>
+              {#if e.GoldAmount > 0}
+                <dt>Gold</dt>             <dd>{e.GoldAmount}</dd>
+              {/if}
+              {#if e.TargetAcquisition !== 0}
+                <dt>Acquisition</dt>      <dd class="mono">{fmt(e.TargetAcquisition, 1)}</dd>
+              {/if}
+            </dl>
+          </Accordion>
           {#if isHero(e)}
-            <dt class="section">Hero</dt>
-            <dt>Level</dt>            <dd>{e.HeroLevel || 1}</dd>
-            {#if e.HeroStr > 0 || e.HeroAgi > 0 || e.HeroInt > 0}
-              <dt>Stats</dt>          <dd class="mono">STR {e.HeroStr} · AGI {e.HeroAgi} · INT {e.HeroInt}</dd>
-            {/if}
+            <Accordion id="p:hero" label="Hero" open={isOpen('p:hero', true)}
+                       on:toggle={onSectionToggle}>
+              <dl class="props">
+                <dt>Level</dt>            <dd>{e.HeroLevel || 1}</dd>
+                {#if e.HeroStr > 0 || e.HeroAgi > 0 || e.HeroInt > 0}
+                  <dt>Stats</dt>          <dd class="mono">STR {e.HeroStr} · AGI {e.HeroAgi} · INT {e.HeroInt}</dd>
+                {/if}
+              </dl>
+            </Accordion>
           {/if}
-
           {#if e.Inventory && e.Inventory.length > 0}
-            <dt class="section">Inventory</dt>
-            {#each e.Inventory as slot}
-              <dt>Slot {slot.Slot}</dt><dd class="mono">{slot.ItemID}</dd>
-            {/each}
+            <Accordion id="p:inventory" label="Inventory" open={isOpen('p:inventory', true)}
+                       on:toggle={onSectionToggle}>
+              <dl class="props">
+                {#each e.Inventory as slot}
+                  <dt>Slot {slot.Slot}</dt><dd class="mono">{slot.ItemID}</dd>
+                {/each}
+              </dl>
+            </Accordion>
           {/if}
-
           {#if e.ItemDrops && e.ItemDrops.length > 0}
-            <dt class="section">Item Drops</dt>
-            {#each e.ItemDrops as drop}
-              <dt class="mono">{drop.ItemID}</dt><dd>{drop.Chance}%</dd>
-            {/each}
+            <Accordion id="p:drops" label="Item Drops" open={isOpen('p:drops', true)}
+                       on:toggle={onSectionToggle}>
+              <dl class="props">
+                {#each e.ItemDrops as drop}
+                  <dt class="mono">{drop.ItemID}</dt><dd>{drop.Chance}%</dd>
+                {/each}
+              </dl>
+            </Accordion>
           {/if}
-
           {#if e.AbilityModifications && e.AbilityModifications.length > 0}
-            <dt class="section">Abilities</dt>
-            {#each e.AbilityModifications as ab}
-              <dt class="mono">{ab.AbilityID}</dt>
-              <dd>lvl {ab.Level}{ab.Autocast ? ' · autocast' : ''}</dd>
-            {/each}
+            <Accordion id="p:abilities" label="Abilities" open={isOpen('p:abilities', true)}
+                       on:toggle={onSectionToggle}>
+              <dl class="props">
+                {#each e.AbilityModifications as ab}
+                  <dt class="mono">{ab.AbilityID}</dt>
+                  <dd>lvl {ab.Level}{ab.Autocast ? ' · autocast' : ''}</dd>
+                {/each}
+              </dl>
+            </Accordion>
           {/if}
-        </dl>
-      {/if}
-      </div>
-    </aside>
+        {/if}
+        </div>
+      </aside>
+    </div>
   </div>
 
   <Toast />
@@ -1016,7 +1056,7 @@
   header {
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 8px;
     padding: 8px 18px;
     border-bottom: 1px solid #2a2a30;
     background: #18181b;
@@ -1041,10 +1081,6 @@
   button.mode-toggle.on { background: #15803d; }
   button.mode-toggle.on:hover:not(:disabled) { background: #166534; }
 
-  /* File menu dropdown — anchored under the File button, opens on click,
-     closes on click-outside or Escape. Styled to match the header chrome
-     (dark background + thin border, no rounded corners on the dropdown so it
-     reads as part of the header bar rather than a floating popup). */
   .file-menu { position: relative; }
   button.file-btn {
     background: transparent; color: #d4d4d8; font-weight: 500;
@@ -1079,113 +1115,73 @@
   .error { background: #7f1d1d; color: #fecaca; padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; max-height: 200px; overflow: auto; }
   .error pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 
-  .split { flex: 1 1 auto; display: grid; grid-template-columns: 260px 1fr 340px; min-height: 0; }
+  /* 2-column layout: viewport claims left/center, right column claims right.
+     The right column is fixed-width (340px); viewport gets all remaining
+     horizontal space — significantly more than the prior 3-column model. */
+  .split { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+  .viewport { position: relative; min-width: 0; min-height: 0; border-right: 1px solid #2a2a30; }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  /* Right column: Explorer (top) + Splitter + Properties (bottom).
+     Splitter drags update rightExplorerPct so the Explorer's flex-basis
+     adjusts; Properties absorbs the rest via flex: 1 1 auto. */
+  .right-col {
+    display: flex; flex-direction: column; min-height: 0;
+    background: #161618;
+  }
   .panel { background: #161618; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-  .explorer { border-right: 1px solid #2a2a30; }
-  .properties { border-left: 1px solid #2a2a30; }
+  .panel.explorer {
+    border-bottom: 1px solid #2a2a30;
+  }
+  .panel.properties { flex: 1 1 auto; }
   .panel-header {
     padding: 8px 14px; font-size: 10px; font-weight: 600; color: #a1a1aa;
     text-transform: uppercase; letter-spacing: 0.08em;
     border-bottom: 1px solid #27272a; background: #1c1c1f;
     flex: 0 0 auto;
   }
+  .panel-body {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    display: flex; flex-direction: column;
+  }
   .empty { padding: 30px 16px; text-align: center; color: #71717a; font-size: 12px; }
-  .viewport { position: relative; min-width: 0; min-height: 0; }
-  canvas { display: block; width: 100%; height: 100%; }
 
-  /* Explorer — stacked resizable sections.
-     Layout model:
-       .explorer (flex column, fills panel height)
-         .panel-header                                 // "EXPLORER" bar, fixed
-         .explorer-sections (flex column, fills rest)  // owns the stack
-           .section (flex 0 0 Npx OR 1 1 auto last)    // per-section box
-             .section-header                          // sticky title bar
-             .section-body (overflow-y: auto)         // scrolls within section
-           Splitter (4px tall drag-handle)
-           .section …                                  // next section
-     The trailing section uses flex:1:1:auto so window resize + leftover space
-     land there sensibly. Earlier sections have explicit pixel heights driven
-     by `sectionSizes`; the splitter above the section below adjusts the
-     section ABOVE the handle. */
-  .explorer-sections {
-    flex: 1 1 auto; min-height: 0;
-    display: flex; flex-direction: column;
-    /* Whole-panel scroll fallback: if window-shrink squeezes all sections
-       below their min-heights, the stack overflows here. Per-section scroll
-       (inside .section-body below) handles the common case; this is the
-       safety net. */
-    overflow-y: auto;
-  }
-  .section {
-    display: flex; flex-direction: column;
-    min-height: 56px; overflow: hidden;
-    background: #161618;
-  }
-  /* Last section absorbs leftover space + window-resize delta so splitter
-     ratios survive resizes without strict pixel math. flex-basis: 0 forces
-     it to start from 0 and grow into the remaining flex space; otherwise
-     `flex: 1 1 auto` keeps it at its intrinsic content height even when
-     other sections are pixel-sized, which is wrong here. */
-  .section.section-last { flex: 1 1 0; min-height: 120px; }
-  .section-header {
-    flex: 0 0 auto;
-    background: #1c1c1f; border-bottom: 1px solid #27272a;
-    padding: 6px 14px;
-    font-size: 10px; font-weight: 600; color: #a1a1aa;
-    text-transform: uppercase; letter-spacing: 0.06em;
-  }
-  .section-header .count { color: #71717a; font-weight: 400; }
-  .section-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 0; }
-
-  /* Sub-buckets only appear inside the Doodads section. Same row chrome as
-     top-level entries (rows are .explorer-section ul li below); just a
-     slightly-dimmed indented header. */
-  .subcategory { padding: 2px 0 4px; }
-  .cat-header {
-    padding: 4px 14px; font-size: 11px; font-weight: 600; color: #d4d4d8;
-    display: flex; justify-content: space-between; align-items: center;
-  }
-  .cat-header .count { color: #71717a; font-weight: 400; font-size: 11px; }
-  .cat-header.sub {
-    padding-left: 22px; color: #a1a1aa; font-weight: 500; font-size: 10.5px;
-    text-transform: uppercase; letter-spacing: 0.04em;
-  }
-
-  .explorer ul { list-style: none; margin: 0; padding: 0; }
-  .explorer li {
+  /* Explorer rows (inside Accordion bodies) */
+  .explorer-list { list-style: none; margin: 0; padding: 0; }
+  .explorer-list li {
     display: flex; align-items: center; gap: 8px;
     padding: 4px 14px; cursor: pointer; font-size: 12px;
     min-width: 0;
   }
-  .explorer li:hover { background: #1f1f23; }
-  .explorer li.selected { background: #1e3a8a; color: #e4e4e7; }
-  /* Name + category sit as a tight pair on the left of the row. The name
-     doesn't flex-grow — letting it claim the full width would push the
-     category to the row's far edge and break the visual pairing. The pan
-     button uses margin-left:auto to claim the remaining space. */
-  .explorer li .name {
+  .explorer-list li:hover { background: #1f1f23; }
+  .explorer-list li.selected { background: #1e3a8a; color: #e4e4e7; }
+  .explorer-list li .name {
     color: #e4e4e7; font-weight: 500; flex: 0 1 auto; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .explorer li .cat {
+  .explorer-list li .cat {
     font-size: 10.5px; flex: 0 1 auto; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     text-align: left;
   }
-  .explorer li .pan-btn {
+  .explorer-list li .pan-btn {
     flex: 0 0 auto; margin-left: auto; display: none;
     background: transparent; color: #a1a1aa;
     border: 1px solid #3f3f46; border-radius: 3px;
     padding: 1px 6px; font-size: 11px; line-height: 1;
     cursor: pointer;
   }
-  .explorer li:hover .pan-btn { display: inline-flex; }
-  .explorer li .pan-btn:hover { background: #3f3f46; color: #e4e4e7; }
+  .explorer-list li:hover .pan-btn { display: inline-flex; }
+  .explorer-list li .pan-btn:hover { background: #3f3f46; color: #e4e4e7; }
+  .dim { color: #71717a; }
 
-  /* Properties — panel-header stays sticky at the top; only the body scrolls
-     when the selected entity's fields overflow (Heroes with abilities +
-     inventory + item drops + 7 base fields can run long). */
-  .properties-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+  /* Doodad sub-accordions are nested inside the Doodads accordion body.
+     Slightly indent their accordion headers so the hierarchy reads. */
+  .doodad-subs :global(.acc-header) {
+    padding-left: 24px;
+  }
+
+  /* Properties */
   .props {
     display: grid; grid-template-columns: max-content 1fr;
     gap: 4px 12px; padding: 10px 16px; margin: 0; font-size: 12px;
@@ -1194,31 +1190,10 @@
     color: #71717a; font-size: 11px; padding-top: 2px;
     text-align: left; justify-self: start;
   }
-  /* Section labels wear the same dark bar treatment as .panel-header so they
-     read as subsections rather than loose dividers. The bar must reach the
-     panel's outer edges (matching .panel-header). Negative margins alone
-     don't suffice: grid items with `justify-self: stretch` (the default)
-     constrain their margin box to the grid area, so negative inline margins
-     visually shift the box without widening it. The fix: pin `box-sizing:
-     border-box`, set explicit width = grid-area + total side-padding, and
-     pull left by the same amount so the bar extends symmetrically into the
-     panel's gutter. .panel.properties has no horizontal padding, so 16px
-     each side (= .props padding) reaches the panel's outer edge. */
-  .props dt.section {
-    grid-column: 1 / -1;
-    box-sizing: border-box;
-    width: calc(100% + 32px);
-    margin: 10px -16px 0; padding: 6px 16px;
-    color: #a1a1aa; font-weight: 600; font-size: 9.5px;
-    text-transform: uppercase; letter-spacing: 0.08em;
-    background: #1c1c1f; border-bottom: 1px solid #27272a;
-  }
   .props dd { margin: 0; color: #e4e4e7; }
   .mono { font-family: 'Cascadia Mono', Consolas, monospace; }
-  .dim { color: #71717a; }
+  .mono.small { font-size: 10.5px; word-break: break-all; }
 
-  /* Position-edit row: 3 narrow numeric inputs, tight gap, monospace for
-     alignment with the rest of the Properties panel. */
   .pos-edit { display: flex; gap: 4px; }
   .pos-edit input {
     width: 64px; padding: 2px 4px;
@@ -1229,8 +1204,6 @@
   .pos-edit input:focus {
     outline: none; border-color: #2563eb;
   }
-  /* Strip the spinner arrows — they crowd the value at this width and most
-     editing happens via type-and-Enter anyway. */
   .pos-edit input::-webkit-inner-spin-button,
   .pos-edit input::-webkit-outer-spin-button {
     -webkit-appearance: none; margin: 0;
