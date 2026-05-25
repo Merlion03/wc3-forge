@@ -357,19 +357,40 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		}
 	}
 
-	// Compute per-cell "skip terrain quad" mask, mirroring HiveWE's
-	// update_ground_exists logic. A cell is skipped (terrain quad NOT
-	// rendered) when it's a cliff cell AND not a ramp entrance. Cliff MDX
-	// covers these cells — rendering the terrain quad on top produces
-	// diagonal Z-interpolated slopes that poke through the vertical cliff
-	// face. HiveWE's cliff.vert/terrain.vert split lets the cliff cover
-	// these cells exclusively.
+	// Compute per-cell "skip terrain quad" mask. Pragmatic adaptation of
+	// HiveWE's update_ground_exists logic (terrain.ixx line 1043-1055).
 	//
-	// A "ramp entrance" cell has all 4 corners HasRamp() AND the corner
-	// layer heights aren't diagonal-symmetric (TL==BR && TR==BL); see
-	// HiveWE terrain.ixx is_corner_ramp_entrance. Ramp entrance cells DO
-	// render their terrain quad — the ramp clifftrans MDX needs the quad
-	// to blend into the surrounding ground.
+	// HiveWE skips terrain on cells that are (cliff || romp) && !ramp_entrance.
+	// In HiveWE the cliff mesh is rendered via a custom vertex shader that
+	// per-vertex displaces by the smooth ground height (cliff.vert line 35:
+	// `vec4(..., rotated_world_position.z + height, 1)`), so the cliff MDX's
+	// top surface conforms exactly to the surrounding terrain corners and
+	// fully covers the skipped cell.
+	//
+	// We render cliff MDX instances via the stock mdx-m3-viewer shader
+	// without that per-vertex displacement, so the cliff mesh's top surface
+	// is at a FIXED layer-height Z. For "pure" cliff cells (all 4 corners on
+	// a single edge — patterns like AABB/ABBA), the cliff mesh's flat top
+	// matches the cell's flat-top corners and the skip works cleanly.
+	//
+	// But for "ramp-endpoint" cells — cells with a layer-height transition
+	// AND at least one ramp-flagged corner — the adjacent ramp clifftrans MDX
+	// only covers the cells along the ramp axis (corner_romp[bl] and
+	// [tl]/[br] for vertical/horizontal ramps), not the cells at the ramp's
+	// LATERAL endpoints. The regular cliff piece for the endpoint cell has a
+	// fixed-layer top, which doesn't match the half-base-half-elevated corner
+	// heights of the endpoint cell — leaving visible triangular holes where
+	// neither the terrain quad nor any MDX covers the surface.
+	//
+	// Pragmatic fix: also keep the terrain quad when ANY of the 4 corners is
+	// ramp-flagged. This covers the lateral ramp endpoints (where one of the
+	// inner corners is ramp-flagged but allRamp is false). The "pokes through
+	// cliff face" bug that bd5f495 originally fixed remains suppressed for
+	// pure-cliff cells (no ramp involvement), which is the common case.
+	//
+	// HiveWE doesn't need this because its cliff vertex shader displaces the
+	// mesh top to match the actual ground; replicating that displacement would
+	// be a larger change (custom MDX shader) and is deferred.
 	numCells := (W - 1) * (H - 1)
 	cellSkip := make([]uint32, numCells)
 	for j := 0; j < H-1; j++ {
@@ -378,13 +399,26 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			if !cellCliff[bl] {
 				continue
 			}
-			// Ramp entrance check
 			br := bl + 1
 			tl := bl + W
 			tr := tl + 1
-			allRamp := t.Tiles[bl].HasRamp() && t.Tiles[br].HasRamp() && t.Tiles[tl].HasRamp() && t.Tiles[tr].HasRamp()
+			rBL := t.Tiles[bl].HasRamp()
+			rBR := t.Tiles[br].HasRamp()
+			rTL := t.Tiles[tl].HasRamp()
+			rTR := t.Tiles[tr].HasRamp()
+			// HiveWE's is_corner_ramp_entrance: all-4-corners-ramp AND not
+			// diagonal-symmetric. Such cells must keep their terrain — the
+			// adjacent ramp clifftrans needs the quad to blend with ground.
+			allRamp := rBL && rBR && rTL && rTR
 			isRampEntrance := allRamp && !(t.Tiles[bl].LayerHeight == t.Tiles[tr].LayerHeight && t.Tiles[tl].LayerHeight == t.Tiles[br].LayerHeight)
-			if !isRampEntrance {
+			// Any-ramp-corner check: lateral endpoint cells of a horizontal/
+			// vertical ramp have only the inner column/row ramp-flagged. Our
+			// regular cliff MDX doesn't fully cover their diagonal-top
+			// surface, so keep terrain. anyRamp covers both this case AND
+			// the allRamp-but-symmetric case (which would otherwise also be
+			// skipped here even though clifftrans usually covers it).
+			anyRamp := rBL || rBR || rTL || rTR
+			if !isRampEntrance && !anyRamp {
 				cellSkip[j*(W-1)+i] = 1
 			}
 		}
