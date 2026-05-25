@@ -8,6 +8,7 @@
   // instance is detached). Changing `reforged` rebuilds the viewer so the
   // MDX handler picks up the new mode.
 
+  import { onMount, onDestroy } from 'svelte'
   import * as MV_ns from 'mdx-m3-viewer'
   import { pathSolver } from './scene-instances'
   import { patchMdxParser } from './mdx-parser-patch'
@@ -311,16 +312,25 @@
   // the legacy `use:nonpassive` action, and standard on:wheel registers as
   // passive — preventDefault() inside would be a no-op without this manual
   // addEventListener with { passive: false }).
-  $effect(() => {
+  //
+  // Uses onMount/onDestroy (NOT $effect) because initViewer() both writes to
+  // and reads from the `viewer` $state — placing it in a $effect would cause
+  // Svelte 5 to re-trigger the effect on every viewer write, producing an
+  // infinite re-mount loop (the cleanup nulls viewer → effect re-runs →
+  // initViewer rebuilds viewer → effect re-runs again …). onMount runs
+  // exactly once per component lifecycle and never tracks reactive deps,
+  // matching the intent of "build the GL viewer when this preview appears,
+  // tear it down when it disappears."
+  onMount(() => {
     initViewer()
     canvas?.addEventListener('wheel', onWheel, { passive: false })
-    return () => {
-      disposed = true
-      canvas?.removeEventListener('wheel', onWheel)
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-      teardownViewer()
-    }
+  })
+  onDestroy(() => {
+    disposed = true
+    canvas?.removeEventListener('wheel', onWheel)
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+    teardownViewer()
   })
 
   // Reactive reload on modelPath / fallbacks change. Guard against null/empty
