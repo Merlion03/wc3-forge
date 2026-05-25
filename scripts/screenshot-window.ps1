@@ -1,4 +1,4 @@
-param([string]$out)
+param([string]$out, [int]$pid_filter = 0, [string]$path_filter = '')
 
 Add-Type -AssemblyName System.Drawing
 
@@ -25,7 +25,10 @@ public class WCapture {
 }
 "@ -ReferencedAssemblies System.Drawing
 
-$proc = Get-Process wc3-forge -ErrorAction SilentlyContinue | Where-Object MainWindowHandle -ne 0 | Select-Object -First 1
+$procs = Get-Process wc3-forge -ErrorAction SilentlyContinue | Where-Object MainWindowHandle -ne 0
+if ($pid_filter -gt 0) { $procs = $procs | Where-Object Id -eq $pid_filter }
+if ($path_filter -ne '') { $procs = $procs | Where-Object { $_.Path -like $path_filter } }
+$proc = $procs | Select-Object -First 1
 if (-not $proc) { Write-Error "no wc3-forge window"; exit 1 }
 
 $r = New-Object WCapture+RECT
