@@ -44,6 +44,7 @@ import {
   buildSlocRenderer, type SlocRenderer, type SlocMarker,
 } from './sloc-markers'
 import { buildCellHighlight, type CellHighlight } from './cell-highlight'
+import { buildPathBlockerRenderer, type PathBlockerRenderer, type PathBlockerMarker } from './path-blockers'
 
 // Apply the MDX parser patch BEFORE any viewer code touches the library — the
 // lib's MdxModel constructor parses on construction, and the patch fixes a
@@ -542,6 +543,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   } catch (e) {
     flog('[cell-highlight] init failed:', e instanceof Error ? e.message : String(e))
   }
+  // Path-blocker overlay (pink/black checker quads at "Pathing Blockers"
+  // category doodad positions). Built once per scene, lifetime matches the
+  // other overlay renderers. Non-fatal if build fails — path blockers stay
+  // invisible like they did pre-feature.
+  let pathBlockers: PathBlockerRenderer | null = null
+  try {
+    pathBlockers = buildPathBlockerRenderer((viewer as any).gl as WebGLRenderingContext)
+  } catch (e) {
+    flog('[path-blockers] init failed:', e instanceof Error ? e.message : String(e))
+  }
   // Background color (used by our own clear call now that scene.alpha=true).
   const bg = [0.07, 0.07, 0.09]
   // Real-dt tracking for viewer.update(). Mdx-m3-viewer's contract is that
@@ -636,6 +647,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // pillars per frame is cheap enough that we don't bother with any
         // visibility culling.
         if (slocRenderer) slocRenderer.draw(scene.camera.viewProjectionMatrix, selectedSet)
+        // Path-blocker checker overlays. Drawn after units/doodads/slocs so
+        // they sit visually on top (the user wants them OBVIOUS — these are
+        // navigation hints, not subtle ambience), before the pathing-debug
+        // overlay so any path-bit flags painted by pathing.ts win the eye in
+        // contested regions. Alpha-blended over the existing framebuffer;
+        // depth-test on so cliffs / large doodads can still occlude them
+        // when they're behind something tall. Picking treats the blockers
+        // as 'doodad' kind (they ARE doodads) — selectedDoodadSet is the
+        // right tint state to pass in.
+        if (pathBlockers) pathBlockers.draw(scene.camera.viewProjectionMatrix, selectedDoodadSet)
         // Pathing overlay — alpha-blended, depth-test on, depth-write off
         // (see pathing.ts). Drawn after slocs so it shades the markers' base
         // too, before water so submerged pathing flags stay readable under
@@ -850,6 +871,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // Slocs hold no GL resources of their own — they live in the renderer's
     // marker list. Replace with empty list so the next loadMap re-populates.
     slocRenderer?.setMarkers([])
+    // Same shape for path-blocker markers: clear the renderer's list so a
+    // map close + open doesn't leave the previous map's blockers visible.
+    pathBlockers?.setMarkers([])
     if (terrain) {
       terrain.dispose()
       terrain = null
@@ -989,6 +1013,46 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (wb) considerSphere(wb.cx, wb.cy, wb.cz, wb.r, { kind: 'doodad', id: cn })
     }
 
+    // Path-blocker overlays — ray vs AABB (slab method). Same picker shape
+    // as slocs, but routed as kind='doodad' because path blockers ARE
+    // doodads (creation_numbers from war3map.doo, resolved through GetDoodad
+    // on the Go side). Without this loop the checker overlays would be
+    // visible but unclickable.
+    const blockerInfos = pathBlockers?.pickInfos() ?? []
+    for (const s of blockerInfos) {
+      const cx = s.center[0], cy = s.center[1], cz = s.center[2]
+      const hx = s.half[0], hy = s.half[1], hz = s.half[2]
+      const minX = cx - hx, maxX = cx + hx
+      const minY = cy - hy, maxY = cy + hy
+      const minZ = cz - hz, maxZ = cz + hz
+      let tmin = -Infinity, tmax = Infinity
+      const axes: Array<[number, number, number, number]> = [
+        [rx, ox, minX, maxX],
+        [ry, oy, minY, maxY],
+        [rz, oz, minZ, maxZ],
+      ]
+      let skip = false
+      for (const [rd, ro, lo, hi] of axes) {
+        if (Math.abs(rd) < 1e-9) {
+          if (ro < lo || ro > hi) { skip = true; break }
+          continue
+        }
+        let t1 = (lo - ro) / rd
+        let t2 = (hi - ro) / rd
+        if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp }
+        if (t1 > tmin) tmin = t1
+        if (t2 < tmax) tmax = t2
+        if (tmin > tmax) { skip = true; break }
+      }
+      if (skip) continue
+      const t = tmin >= 0 ? tmin : tmax
+      if (t < 0) continue
+      if (t < bestT) {
+        bestT = t
+        bestHit = { kind: 'doodad', id: s.creationNumber }
+      }
+    }
+
     // Sloc markers — ray vs AABB (slab method). Slocs have no MDX so they're
     // not in unitInstances; rays still need to hit them for selection. The
     // Go-side selection routes them as kind="unit" because they're entries
@@ -1066,6 +1130,15 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     for (const s of slocInfos) {
       if (inside(worldToCanvasPx(s.center[0], s.center[1], s.center[2]))) {
         hits.push({ kind: 'unit', id: s.creationNumber })
+      }
+    }
+    // Path-blocker overlays — same projected-center inside-rect test as the
+    // other kinds. Routed as 'doodad' (matches the rayPick branch above) so
+    // selection round-trips through Go's doodad-side selection state.
+    const bInfos = pathBlockers?.pickInfos() ?? []
+    for (const b of bInfos) {
+      if (inside(worldToCanvasPx(b.center[0], b.center[1], b.center[2]))) {
+        hits.push({ kind: 'doodad', id: b.creationNumber })
       }
     }
     return hits
@@ -1612,14 +1685,71 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       //     in the right place / right size and decide if "invisible" means
       //     "broken" or just "tiny relative to map span".
       let dPlaced = 0, dSkipped = 0
+      let pathBlockerCount = 0
       let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity
       const skipReasons = new Map<string, number>()
       const sampleAudits: string[] = []
+      // Collected path-blocker markers, handed to the overlay renderer in
+      // one batch after the doodad walk completes. Sized at most by the
+      // doodad count (typical maps have a few dozen blockers; Enfo's FFB
+      // has ~230). Per-marker tag of the doodad's creation_number so the
+      // ray-pick AABB walker can route selection through the same path
+      // unit / doodad picks use.
+      const pathBlockerMarkers: PathBlockerMarker[] = []
+      // Per-instance scale for path-blocker overlay sizing. Doodad scale[0]
+      // is the X-axis scale stored in war3map.doo (parsed and /128'd by the
+      // Go side); multiplying our default 64-stud half-extent by it lets a
+      // map author scale a blocker up to cover a larger pathing footprint
+      // and have the overlay grow to match. SLK base scale (defScale) also
+      // multiplies in — same as how placeDoodad combines uniformScale.
+      const blockerHalf = (s: number, baseScale: number) => 64 * (s || 1) * (baseScale || 1)
       for (const d of doodads) {
         if (d.position[0] < xmin) xmin = d.position[0]
         if (d.position[0] > xmax) xmax = d.position[0]
         if (d.position[1] < ymin) ymin = d.position[1]
         if (d.position[1] > ymax) ymax = d.position[1]
+        // Path blockers (category "Pathing Blockers", letter "P" in
+        // Doodads.slk) almost always ship without an MDX — they exist only
+        // to occupy pathing-map cells. Without special handling these get
+        // skipped by placeDoodad (its `!info.file` guard returns null) and
+        // are completely invisible in the editor. Route them to the overlay
+        // renderer instead so the author can see where they are.
+        //
+        // We classify by the resolved category string (matches App.svelte's
+        // bucketing) — `info` comes from the same dTypes index the regular
+        // path consumes. Custom blockers from war3map.w3d carry the same
+        // category through the per-map overlay merge.
+        //
+        // Note: we ALSO register the blocker into doodadInstances? No — the
+        // overlay renderer owns its own pickInfos list and tints. Adding to
+        // doodadInstances would mean the regular doodad ray-pick walks an
+        // entity with no MDX bounds (`inst.getBounds()` would be undefined),
+        // and the doodadCategoryVisible toggle would expect a setScene-able
+        // instance to detach. Keeping them in a sibling list is the same
+        // pattern slocs use vs unitInstances.
+        const info = dTypes[d.type_id]
+        const isBlocker = !!info && info.category === 'Pathing Blockers'
+        if (isBlocker) {
+          const half = blockerHalf(d.scale?.[0] ?? 1, info.model_scale ?? 1)
+          pathBlockerMarkers.push({
+            creationNumber: d.creation_number,
+            position: [d.position[0], d.position[1], d.position[2]],
+            halfX: half,
+            halfY: half,
+          })
+          // Tag the category so the View-menu visibility toggle finds these
+          // alongside their MDX-bearing kin (when a future map ships a path
+          // blocker that DOES have an MDX, both paths cooperate). The
+          // visibility toggle filters draw via setScene on doodadInstances;
+          // for our overlay-only blockers we'd need to plumb a separate
+          // setMarkers call to honour the toggle — left as deferred work.
+          // Single-purpose feature first.
+          doodadCategoryByCn.set(d.creation_number, info.category)
+          pathBlockerCount++
+          // Skip the regular MDX placement attempt entirely — these have no
+          // file and would just go through the silent-skip path otherwise.
+          continue
+        }
         const inst = await placeDoodad(d, dTypes)
         if (inst) {
           doodadInstances.set(d.creation_number, inst)
@@ -1643,7 +1773,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
           skipReasons.set(d.type_id, (skipReasons.get(d.type_id) ?? 0) + 1)
         }
       }
-      flog(`[loadMap] units placed=${uPlaced} skipped=${uSkipped}, doodads placed=${dPlaced} skipped=${dSkipped} doodad-bbox=x[${xmin.toFixed(0)},${xmax.toFixed(0)}] y[${ymin.toFixed(0)},${ymax.toFixed(0)}] slocs=${slocMarkers.length}`)
+      // Hand the path-blocker markers to the overlay renderer in one batch.
+      // setMarkers replaces (not appends) so re-loading the same map doesn't
+      // double-stack blockers. Done BEFORE the audit log so its count is
+      // accurate in the same flog line.
+      pathBlockers?.setMarkers(pathBlockerMarkers)
+      flog(`[loadMap] units placed=${uPlaced} skipped=${uSkipped}, doodads placed=${dPlaced} skipped=${dSkipped} pathBlockers=${pathBlockerCount} doodad-bbox=x[${xmin.toFixed(0)},${xmax.toFixed(0)}] y[${ymin.toFixed(0)},${ymax.toFixed(0)}] slocs=${slocMarkers.length}`)
       if (skipReasons.size > 0) {
         // Top 8 most-skipped type IDs so we can spot patterns in missing
         // doodad assets without flooding the log.
@@ -1700,6 +1835,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (cellHighlight) {
         cellHighlight.dispose()
         cellHighlight = null
+      }
+      if (pathBlockers) {
+        pathBlockers.dispose()
+        pathBlockers = null
       }
     },
     setSelected(units: Set<number>, doodads: Set<number>) {
