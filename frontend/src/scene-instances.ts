@@ -64,18 +64,100 @@ const MV: any = (MV_ns as any).default ?? MV_ns
 // canonical patch site, double-patching isn't possible and the failure mode
 // (silent fallback to "every animation tag is unknown") can't recur.
 
-// Disable per-instance frustum culling. The lib's `ModelInstance.isVisible`
-// tests an MDX-stored bounding sphere (`bounds.r * scale`) against the camera
-// planes. Many WC3 MDX bounds are tight to the idle pose and don't account
-// for attached weapons, particle emitters, or animation-extended geometry —
-// so the moment the sphere center crosses a frustum plane the entire model
-// pops out, even though pixels would still land on-screen. The user sees this
-// as units/doodads vanishing at the canvas edges while panning.
+// Per-instance frustum culling + distance/screen-size LOD.
 //
-// For an editor view with at most a few thousand instances, always-render is
-// effectively free on a modern GPU and entirely eliminates the edge-pop. We
-// still need `instance.depth` populated so the scene's depth-sort works, so
-// we replicate just that one line and return true unconditionally.
+// The lib's stock `ModelInstance.isVisible` tests an MDX-stored bounding
+// sphere (`bounds.r * scale`) against the 6 camera planes. The sphere is
+// per-sequence (the lib's MdxModelInstance.getBounds picks
+// `model.sequences[this.sequence].bounds`, falling back to the model-global
+// bound when the sequence's r is 0) — but in practice many WC3 MDX bounds
+// are STILL tight to mesh geometry and miss attached weapons, particle
+// emitters, and ribbon trails. With straight-up stock culling, the moment
+// the sphere center crosses a frustum plane the entire model pops out even
+// though some of its pixels would still land on-screen.
+//
+// The previous fix (commit ff8e2ab) disabled culling entirely. That made
+// pop-out go away but means every instance in the scene runs the animation
+// tick + render pipeline every frame, which gets expensive at editor scale
+// (Enfo FFB has ~580 doodads + 200 units; large custom maps push 3000+).
+//
+// What we do instead:
+//   1. Re-enable lib-style frustum culling, but with an INFLATED radius
+//      (`r * CULL_RADIUS_SCALE + CULL_RADIUS_PAD`). The scale handles
+//      proportional growth (a chunky idle pose extended by a weapon),
+//      the pad handles particle emitters whose extent isn't in the bound
+//      at all. Verified at Enfo FFB: 1024-stud pad covers every observed
+//      pop-out edge case while still excluding fully-off-screen instances.
+//   2. Add a SCREEN-SIZE LOD: when an instance's projected screen radius
+//      is smaller than `LOD_MIN_PX`, skip rendering AND its animation
+//      tick (the lib couples both inside the `update()` -> `isVisible()`
+//      branch — see modelinstance.js line 103). This is the big win at
+//      "frame the whole map" zoom on large maps: hundreds of distant
+//      doodads project to sub-pixel disks and were eating GPU + CPU for
+//      pixels nobody can see.
+//
+// Both behaviours are gated by `window.__wc3ForgeCulling` so a developer
+// can disable them at runtime from DevTools to diagnose a regression
+// (`window.__wc3ForgeCulling.frustum = false`,
+//  `window.__wc3ForgeCulling.lod = false`).
+//
+// HiveWE reference: HiveWE does proper AABB-based culling per sequence
+// (src/base/render_manager.ixx line 105-108 — uses
+// `camera.inside_frustrum_transform(extent.min, extent.max, matrix)`).
+// That's strictly more accurate than our sphere with inflation but needs
+// per-sequence AABB plumbing through the lib's bound API, which is
+// sphere-only. Deferred as a follow-up; sphere + slack covers the visible
+// edge cases for now. (HiveWE does NOT do distance LOD on entity render —
+// the geoset-level `lod != 0` skip in skinned_mesh.ixx is about MDX-author
+// LOD geosets, not camera-distance culling.)
+//
+// `depth` is always written (even on the cull-fail and LOD-fail paths)
+// because the scene's transparent-pass sorter reads it (scene.js line
+// 189). For culled instances, the depth value won't matter for sort —
+// they're not added to the render list — but the lib walks every cell's
+// instance list and may briefly touch `depth` before the cull decision
+// completes.
+const CULL_RADIUS_SCALE = 2.0
+const CULL_RADIUS_PAD = 1024 // studs — wide enough for particle emitters
+
+// LOD: instances whose screen-projected radius is below this are skipped.
+// At 0.6 px, a sub-pixel disk that wouldn't be visible to the user gets
+// dropped. Set to ~2-4 px to be aggressive (visible perf gain but doodads
+// "twinkle" at the LOD boundary); 0.6 px is conservative — only drops
+// instances the user genuinely can't see. Camera focal estimation needs
+// the canvas height to be plumbed in via the patched scene viewport (set
+// by the RAF loop's `vp[3] = canvas.height`).
+const LOD_MIN_PX = 0.6
+
+interface CullingDebug {
+  frustum: boolean
+  lod: boolean
+  // Per-frame counters reset by the RAF loop via `resetCulling()`. Read
+  // from DevTools or surface in a perf overlay.
+  testedCount: number
+  visibleCount: number
+  frustumCulledCount: number
+  lodCulledCount: number
+}
+const culling: CullingDebug = {
+  frustum: true,
+  lod: true,
+  testedCount: 0,
+  visibleCount: 0,
+  frustumCulledCount: 0,
+  lodCulledCount: 0,
+}
+;(window as any).__wc3ForgeCulling = culling
+export function resetCullingCounters() {
+  culling.testedCount = 0
+  culling.visibleCount = 0
+  culling.frustumCulledCount = 0
+  culling.lodCulledCount = 0
+}
+export function cullingSnapshot() {
+  return { ...culling }
+}
+
 ;(() => {
   const ModelInstance = MV?.viewer?.ModelInstance
   if (!ModelInstance?.prototype) {
@@ -83,8 +165,84 @@ const MV: any = (MV_ns as any).default ?? MV_ns
   }
   ModelInstance.prototype.isVisible = function (camera: any) {
     const [x, y, z] = this.worldLocation
-    const near = camera.planes[4]
-    this.depth = near[0] * x + near[1] * y + near[2] * z + near[3]
+    const planes = camera.planes
+    const near = planes[4]
+    // Write depth unconditionally so the lib's transparent-pass sorter
+    // never sees a stale value if something else briefly inspects it.
+    const d = near[0] * x + near[1] * y + near[2] * z + near[3]
+    this.depth = d
+    culling.testedCount++
+    if (!culling.frustum) {
+      culling.visibleCount++
+      return true
+    }
+
+    // Inflate the bounds sphere. Same per-instance math the stock impl
+    // uses (lib's modelinstance.js line 118-131), but with our scale +
+    // pad applied to the radius.
+    const [sx, sy, sz] = this.worldScale
+    let biggest = sx
+    if (sy > biggest) biggest = sy
+    if (sz > biggest) biggest = sz
+    const bounds = this.getBounds()
+    const inflatedR = bounds.r * biggest * CULL_RADIUS_SCALE + CULL_RADIUS_PAD
+    const cx = x + bounds.x
+    const cy = y + bounds.y
+    const cz = z + bounds.z
+
+    // Frustum-cull: walk all 6 planes; if the sphere is fully on the
+    // negative side of any one, it's out. We keep `this.plane` cached
+    // for the common "still outside the same plane" case (matches
+    // testSphere's `first` argument logic in gl-matrix-addon.js).
+    const startPlane = this.plane === -1 ? 0 : this.plane
+    let outsidePlane = -1
+    for (let i = 0; i < 6; i++) {
+      const idx = (startPlane + i) % 6
+      const p = planes[idx]
+      const dist = p[0] * cx + p[1] * cy + p[2] * cz + p[3]
+      if (dist <= -inflatedR) {
+        outsidePlane = idx
+        break
+      }
+    }
+    this.plane = outsidePlane
+    if (outsidePlane !== -1) {
+      culling.frustumCulledCount++
+      return false
+    }
+
+    // Distance / screen-size LOD. The projected screen radius of a sphere
+    // at perpendicular distance D in front of the camera is roughly
+    // `r * projM5 * canvasH/2 / D` where projM5 = 1/tan(fovy/2) (gl-matrix
+    // perspective puts that at projectionMatrix[5]). We approximate D as
+    // the distance to the near plane (`d` computed above) — for our RTS
+    // view with shallow FOV (~60°) this is within a few percent of the
+    // true eye-to-center distance and avoids reading `camera.location` /
+    // recomputing a vec3 length per instance.
+    //
+    // canvasH is stashed on the camera by the RAF loop each frame
+    // (camera.__wc3ForgeCanvasH) so we don't have to walk scene.viewport
+    // for every instance. d<=0 means instance is at or behind the near
+    // plane — never LOD it; those are extreme close-ups where the radius
+    // calc would explode anyway.
+    if (!culling.lod || d <= 0) {
+      culling.visibleCount++
+      return true
+    }
+    const projM5 = camera.projectionMatrix?.[5]
+    const canvasH = camera.__wc3ForgeCanvasH || 0
+    if (projM5 && canvasH > 0) {
+      // Use the un-inflated worldR (geometry radius) for the LOD test so
+      // heavy padding doesn't keep tiny doodads alive just because their
+      // slack bound bumps the projected size.
+      const geomR = bounds.r * biggest
+      const rPx = (geomR * projM5 * canvasH * 0.5) / d
+      if (rPx < LOD_MIN_PX) {
+        culling.lodCulledCount++
+        return false
+      }
+    }
+    culling.visibleCount++
     return true
   }
 })()
@@ -602,6 +760,13 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // `std::clamp(delta, 0.0, 0.5)` on the seconds path.
   let lastFrameTs = performance.now()
   const MAX_DT_MS = 250
+  // Throttled culling-counters log. Emits a snapshot of the per-frame
+  // tested/visible/frustum-culled/lod-culled counts every 5 seconds so we
+  // can observe the cull/LOD pipeline working without spamming the log.
+  // Drop the interval to 0 (set window.__wc3ForgeCullLogMs = 0) at runtime
+  // to disable; bump it to 250 for finer-grained debugging.
+  let lastCullLogTs = performance.now()
+  ;(window as any).__wc3ForgeCullLogMs = 5000
   const loop = () => {
     if (!crashed) {
       try {
@@ -625,6 +790,20 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         const nowTs = performance.now()
         const dtMs = Math.min(MAX_DT_MS, Math.max(0, nowTs - lastFrameTs))
         lastFrameTs = nowTs
+        // Stash canvas height on the camera for the per-instance LOD path
+        // (the patched ModelInstance.isVisible reads this to compute pixel-
+        // radius without walking scene.viewport for every instance) and
+        // reset per-frame culling counters so DevTools snapshots reflect
+        // the most recent frame.
+        ;(scene.camera as any).__wc3ForgeCanvasH = canvas.height
+        // Log the previous frame's culling tally (before resetting) so the
+        // snapshot reflects what was just rendered, not zero.
+        const cullLogIntervalMs = (window as any).__wc3ForgeCullLogMs || 0
+        if (cullLogIntervalMs > 0 && (nowTs - lastCullLogTs) >= cullLogIntervalMs) {
+          lastCullLogTs = nowTs
+          flog(`[culling] ${JSON.stringify(cullingSnapshot())}`)
+        }
+        resetCullingCounters()
         viewer.update(dtMs)
         // Re-roll stand variation when a non-looping idle finishes. Mirrors
         // mdx-m3-viewer's Widget.update (handlers/w3x/widget.ts): MDX models
