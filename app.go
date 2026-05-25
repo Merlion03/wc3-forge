@@ -634,6 +634,31 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			if !anyRamp && !(anyCliff && !t.Tiles[idx].HasRamp()) {
 				continue
 			}
+			// Ramp continuity fix: when THIS corner is itself a ramp corner,
+			// leave its stored ground_texture intact instead of remapping to
+			// the cliff palette's groundtile. This makes the ramp's top
+			// surface inherit the surrounding floor's tile pattern.
+			//
+			// HiveWE's `real_tile_texture` (terrain.ixx line 770) does remap
+			// every ramp-affected corner to `cliff_to_ground_texture[texture]`
+			// — but in stock Blizzard maps the cliff palette's groundtile
+			// happens to match the adjacent base floor (e.g. CIrb→Irbk, which
+			// IS the typical Icecrown base tile), so the discontinuity is
+			// invisible. Custom-tileset maps (like Enfo's FFB which mixes
+			// Icecrown cliffs over a Cityscape brick floor) make the gap
+			// obvious — the ramp top renders as a uniform tile of the cliff
+			// palette's stand-in instead of continuing the surrounding
+			// patterned brick.
+			//
+			// We preserve HiveWE's behavior for PURE-CLIFF corners (the
+			// `anyCliff && !corner_ramp` branch entered this block — the
+			// next-line `continue` keeps that path firing). We only skip the
+			// remap when the corner is itself a ramp-flagged vertex, which
+			// means the rendered cell here IS the ramp's top surface and
+			// the user's expectation is that floor tiles continue across.
+			if t.Tiles[idx].HasRamp() {
+				continue
+			}
 			// Resolve the cliff palette index for this corner.
 			// HiveWE comment: "Number 15 seems to be something" — when the
 			// stored cliff_texture is 15, remap to (15-14) = 1. Mirrors the
