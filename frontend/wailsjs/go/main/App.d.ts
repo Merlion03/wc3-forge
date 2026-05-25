@@ -55,7 +55,15 @@ export function OpenMap(arg1:string):Promise<main.MapStatus>;
 
 export function OpenMapDialog():Promise<string>;
 
+export function RotateDoodad(arg1:number,arg2:number):Promise<void>;
+
+export function RotateUnit(arg1:number,arg2:number):Promise<void>;
+
 export function SaveMap():Promise<void>;
+
+export function ScaleDoodad(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
+
+export function ScaleUnit(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
 export function SelectUnit(arg1:number):Promise<main.SelectionDTO>;
 

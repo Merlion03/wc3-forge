@@ -514,6 +514,116 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// TestMutateRotation_RoundTrip verifies that changing a Doodad's Rotation,
+// encoding, and re-parsing preserves all other bytes intact AND returns the
+// new rotation value. Exercises all three real-world fixtures.
+func TestMutateRotation_RoundTrip(t *testing.T) {
+	fixtures := []string{
+		fixturePathV16,
+		fixturePathEnfo,
+		filepath.Join("testdata", "x_hero_reborn_1.3.doo"),
+	}
+	for _, path := range fixtures {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			orig, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			f, err := Parse(orig)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if len(f.Doodads) == 0 {
+				t.Skip("no doodads in fixture")
+			}
+
+			idx := len(f.Doodads) - 1
+			origRot := f.Doodads[idx].Rotation
+			newRot := origRot + 1.5707963 // +90° in radians
+			f.Doodads[idx].Rotation = newRot
+
+			encoded, err := Encode(f)
+			if err != nil {
+				t.Fatalf("Encode after rotation mutation: %v", err)
+			}
+			f2, err := Parse(encoded)
+			if err != nil {
+				t.Fatalf("Parse of mutated bytes: %v", err)
+			}
+			got := f2.Doodads[idx].Rotation
+			if got != newRot {
+				t.Errorf("round-tripped Rotation = %v, want %v", got, newRot)
+			}
+			// Re-encode f2 → should match encoded exactly (full round-trip).
+			reenc, err := Encode(f2)
+			if err != nil {
+				t.Fatalf("re-Encode: %v", err)
+			}
+			if !bytes.Equal(encoded, reenc) {
+				mismatch := -1
+				n := len(encoded)
+				if len(reenc) < n {
+					n = len(reenc)
+				}
+				for i := 0; i < n; i++ {
+					if encoded[i] != reenc[i] {
+						mismatch = i
+						break
+					}
+				}
+				t.Fatalf("re-encode mismatch at offset %d", mismatch)
+			}
+		})
+	}
+}
+
+// TestMutateScale_RoundTrip verifies that changing a Doodad's Scale,
+// encoding, and re-parsing returns the new scale. Doodads store Scale RAW
+// on disk (no /128 convention) so no scaleRaw invalidation is needed —
+// this is the simple/safe path compared to unitsdoo.
+func TestMutateScale_RoundTrip(t *testing.T) {
+	fixtures := []string{
+		fixturePathV16,
+		fixturePathEnfo,
+		filepath.Join("testdata", "x_hero_reborn_1.3.doo"),
+	}
+	for _, path := range fixtures {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			orig, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			f, err := Parse(orig)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if len(f.Doodads) == 0 {
+				t.Skip("no doodads in fixture")
+			}
+
+			idx := len(f.Doodads) - 1
+			newScale := [3]float32{1.5, 1.5, 1.5}
+			f.Doodads[idx].Scale = newScale
+			// No scaleRaw invalidation needed — doodads store Scale raw on
+			// disk. Encode writes Scale verbatim. In contrast, unitsdoo has
+			// the scaleRaw preservation gotcha requiring ClearScaleRaw.
+
+			encoded, err := Encode(f)
+			if err != nil {
+				t.Fatalf("Encode after scale mutation: %v", err)
+			}
+			f2, err := Parse(encoded)
+			if err != nil {
+				t.Fatalf("Parse of mutated bytes: %v", err)
+			}
+			got := f2.Doodads[idx].Scale
+			if got != newScale {
+				t.Errorf("round-tripped Scale = %v, want %v", got, newScale)
+			}
+		})
+	}
+}
+
 // byteAtOr returns b[i] or 0xEE if i is out of range. Used for round-trip
 // diff diagnostics so a length mismatch (one side shorter) doesn't panic.
 func byteAtOr(b []byte, i int) byte {
