@@ -190,6 +190,36 @@
     EventsOn(DEV_ANIM_EVENT, (payload: { creation_number: number; anim_name: string }) => {
       scene?.setUnitAnimation(payload.creation_number, payload.anim_name)
     })
+    // Startup --camera spec from main.go. Applied (potentially repeatedly)
+    // after every loadMap so a fresh map-open lands on the spec'd position
+    // rather than the auto-frame. Lets verification automation pin the
+    // camera to a known feature on startup without synthetic mouse input
+    // (which WebView2 drops). Payload: { spec: "x,y[,z[,distance]]" }.
+    let startupSpec: { x: number; y: number; z: number; distance: number } | null = null
+    EventsOn('wc3-forge:startup-camera', (payload: { spec: string }) => {
+      const m = (payload?.spec || '').match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:,(-?\d+(?:\.\d+)?))?(?:,(\d+(?:\.\d+)?))?$/)
+      if (!m) return
+      startupSpec = {
+        x: parseFloat(m[1]),
+        y: parseFloat(m[2]),
+        z: m[3] ? parseFloat(m[3]) : 0,
+        distance: m[4] ? parseFloat(m[4]) : 0,
+      }
+      // Apply immediately if a map's already loaded by the time we receive.
+      applyStartupCamera()
+    })
+    // Hooked into reloadMap below — re-apply if a fresh map opened.
+    ;(window as any).__applyStartupCamera = applyStartupCamera
+    function applyStartupCamera() {
+      if (!startupSpec || !scene) return
+      scene.panTo(startupSpec.x, startupSpec.y, startupSpec.z)
+      if (startupSpec.distance > 0) {
+        const camCtrl = (window as any).__camera
+        if (camCtrl && typeof camCtrl.setDistance === 'function') {
+          camCtrl.setDistance(startupSpec.distance)
+        }
+      }
+    }
     // Dirty-state changes (MoveUnit edits, Save flushes). Keeps the header
     // Save pill's modified-dot indicator reactive without polling. The OS
     // window title's "* " prefix is updated Go-side via runtime.WindowSetTitle
@@ -405,6 +435,12 @@
     // The viewport pulls its own data via App.* methods now; no need to
     // marshal the raw .w3x bytes across the boundary.
     await scene?.loadMap(opts)
+    // After every load, re-apply the --camera spec (if one was passed at
+    // startup). Without this, the auto-frame in scene.loadMap() would put
+    // us at the default overview pose, blowing away the verification
+    // automation's intended viewpoint.
+    const apply = (window as any).__applyStartupCamera
+    if (typeof apply === 'function') apply()
   }
 
   function togglePathing() {

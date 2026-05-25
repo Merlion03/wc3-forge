@@ -52,6 +52,22 @@ func (a *App) LogJS(message string) {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	// Forward the startup --camera spec (if any) to the frontend. App.svelte
+	// listens for this event and applies the spec on the first map-load.
+	if startupCameraSpec != "" {
+		// Defer one tick so the frontend's EventsOn listener is registered by
+		// the time we emit. runtime.EventsEmit doesn't queue for listeners
+		// that haven't subscribed yet.
+		go func() {
+			// Wait until reasonable assumption that App.svelte's onMount has
+			// registered EventsOn. Empirical: 500ms is comfortably enough
+			// after Wails finishes JS bootstrapping.
+			time.Sleep(500 * time.Millisecond)
+			runtime.EventsEmit(a.ctx, "wc3-forge:startup-camera", map[string]any{
+				"spec": startupCameraSpec,
+			})
+		}()
+	}
 	// Forward Go-side selection changes to the frontend.
 	forge.Current.OnSelectionChanged(func(s forge.SelectionState) {
 		runtime.EventsEmit(a.ctx, eventSelectionChanged, s)
@@ -531,6 +547,7 @@ func (a *App) SetUnitAnimation(creationNumber uint32, animName string) {
 		"anim_name":       animName,
 	})
 }
+
 
 // PathingMapDTO is the JS-facing pathing-map shape. Cells carry one byte
 // per quarter-cell (4× terrain tile resolution); each byte's bits flag

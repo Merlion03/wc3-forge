@@ -75,8 +75,22 @@
 // MTLS chunk and into GEOS.
 
 import * as MV_ns from 'mdx-m3-viewer'
+// AnimationMap is NOT re-exported from the lib's public `parsers.mdlx`
+// surface (only Model / Sequence / Material / Layer / Texture / etc. live
+// there). Import directly from the lib's internal deep path. Without this,
+// the safety-belt readAnimations override below would treat EVERY animation
+// tag as "unknown" and skip the rest of every animation chunk — bones end
+// up with animations=[], so the runtime AnimatedObject's variants Map is
+// empty, updateNodes skips per-frame transform lookup, and every skeletal
+// model renders frozen (particles still work, since they tick independently).
+// Was the root cause of the "doodads render but never animate" bug fixed
+// in commit dc0aaa0 — that fix lived in scene-instances.ts as a re-patch;
+// we now consolidate it here at the source.
+import animationMapModule from 'mdx-m3-viewer/dist/cjs/parsers/mdlx/animationmap.js'
 
 const MV: any = (MV_ns as any).default ?? MV_ns
+const animationMap: Record<string, [string, any]> | null =
+  (animationMapModule as any)?.default ?? (animationMapModule as any) ?? null
 
 const PATCHED_FLAG = '__wc3ForgeMdxParserPatched'
 
@@ -202,16 +216,30 @@ export function patchMdxParser(): void {
     }
   }
 
-  // Safety-belt readAnimations. The lib's original throws when it encounters
-  // an animation tag that isn't in the hardcoded animationmap; we treat
-  // unknown tags as "skip to chunk end" instead, so a single unknown tag
-  // doesn't crash the whole model parse. This is defense-in-depth for any
-  // model variant that adds new animation tags the lib doesn't recognize.
-  // Without it, MDX files with KFGA or other future tags would silently
-  // miss the rest of their chunks (model.js's outer catch).
-  const animationMap = MV?.parsers?.mdlx?.AnimationMap
-    ?? MV?.parsers?.mdlx?.animationMap
-    ?? null
+  // Safety-belt readAnimations. The lib's original implementation crashes
+  // when it encounters an animation tag missing from the hardcoded
+  // AnimationMap (`new animationmap[name][1]()` → TypeError on missing key).
+  // Our override does two things:
+  //   1. Tolerates unknown K-prefixed tags by skipping to chunk end rather
+  //      than throwing — defense-in-depth for any future MDX revision.
+  //   2. Tolerates non-K leading bytes the same way — a misaligned read
+  //      (e.g. from a downstream parser bug) skips clean to the chunk end
+  //      instead of taking down the whole model parse.
+  // Pushed parsed animations onto `this.animations`, same shape the lib's
+  // downstream handler code expects (handlers/mdx/animatedobject.js
+  // constructor walks `object.animations` to build the runtime Map of
+  // sequences by tag).
+  //
+  // **CRITICAL**: AnimationMap MUST be sourced from the lib's internal
+  // module path (see the import comment at the top of this file). The lib
+  // does NOT re-export it through `parsers.mdlx`, so a previous version
+  // of this patch that read `MV.parsers.mdlx.AnimationMap` silently got
+  // `undefined` → every tag matched the "no entry" branch → animations
+  // were always dropped → bones froze. That was commit dc0aaa0's
+  // diagnosis; consolidated here.
+  if (!animationMap || typeof animationMap !== 'object' || !animationMap['KGTR']) {
+    throw new Error('mdx-parser-patch: failed to import animation map (KGTR not found) — skeletal animation would be broken')
+  }
   const AnimatedObjectProto = Object.getPrototypeOf(Layer.prototype)
   if (AnimatedObjectProto && typeof AnimatedObjectProto.readAnimations === 'function') {
     AnimatedObjectProto.readAnimations = function patchedReadAnimations(stream: any, size: number): void {
@@ -227,9 +255,10 @@ export function patchMdxParser(): void {
           stream.index = end
           return
         }
-        const entry = animationMap ? animationMap[name] : undefined
+        const entry = animationMap[name]
         if (entry) {
-          const animation = new entry[1]()
+          const Ctor = entry[1]
+          const animation = new Ctor()
           animation.readMdx(stream, name)
           this.animations.push(animation)
         } else {
