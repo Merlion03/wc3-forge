@@ -52,7 +52,13 @@ interface TerrainCliffData {
   width: number   // vertex count along X
   height: number  // vertex count along Y
   center_offset: [number, number]
-  heights: number[]            // final heights in studs (FinalZ + ramp +64 bump)
+  // Per-corner SMOOTH height in studs (Tilepoint.Z() only — the wobble,
+  // WITHOUT the layer-step offset). This is what the cliff vertex shader
+  // displaces by. Mirrors HiveWE's `corner_height` array, which is what
+  // HiveWE binds to the cliff shader's SSBO 0 (terrain.ixx:652) — NOT the
+  // full FinalGroundHeights. The cliff MDX geometry already encodes the
+  // layer-step rise in vertex Z; adding it again here would double it.
+  cliff_displacement: number[]
   layer_height: number[]
   cliff_tex: number[]
   cliff_var: number[]
@@ -255,9 +261,15 @@ export async function renderCliffs(
   placements: CliffPlacement[],
   t: TerrainCliffData,
 ): Promise<CliffRendering | null> {
-  // 1. Upload the final-heights array as a float texture for the cliff
-  //    vertex shader's per-vertex displacement lookup.
-  const heights = new Float32Array(t.heights)
+  // 1. Upload the per-corner SMOOTH-height array as a float texture for the
+  //    cliff vertex shader's per-vertex displacement lookup. CRITICAL: this
+  //    must be Tilepoint.Z() only (the per-corner wobble), NOT FinalZ
+  //    (Z + (layer-2)*128). The cliff MDX vertex Z already encodes the full
+  //    layer-step rise (a 1-step cliff MDX spans vPos.z = 0..128 studs);
+  //    if we also displaced by (layer-2)*128 we'd double the cliff height.
+  //    This matches HiveWE's `ground_height_buffer` binding on the cliff
+  //    shader (terrain.ixx:652) which carries `corner_height` (the wobble).
+  const heights = new Float32Array(t.cliff_displacement)
   const finalHeights = uploadFinalHeights(gl, heights, t.width, t.height)
   if (!finalHeights) {
     flog('[cliffs] finalHeights upload failed; cliffs disabled')
