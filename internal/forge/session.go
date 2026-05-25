@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/mpq"
@@ -150,6 +151,22 @@ type Session struct {
 	// every mutation needs to repaint UI even when the session was already
 	// dirty.
 	entityListeners []func(EntityChange)
+
+	// Bridge-call observability bus — every MCP handler dispatch fires a
+	// BridgeCallEvent through here, so subscribers (the Wails app forwards
+	// to the in-page Agent Console) can stream a live log of agent activity.
+	// Passive: listeners must not call back into bridge handlers from this
+	// callback or they'll recurse. Held under the same lock+copy pattern as
+	// the other listener slices.
+	bridgeCallListeners []func(BridgeCallEvent)
+
+	// UI-command bus — used by MCP handlers that need to drive JS-side state
+	// (View menu visibility, terrain/doodad mode toggle, camera positioning).
+	// The App layer subscribes and forwards each command string to the same
+	// `wc3-forge:test-command` Wails event the existing test-driver hook
+	// already handles. Keeps the bridge layer App-free (no Wails imports in
+	// forge.*) while still letting bridge handlers reach UI state.
+	uiCommandListeners []func(string)
 }
 
 // EntityChange is the payload for OnEntityChanged. Kind/ID identify which
@@ -901,5 +918,77 @@ func (s *Session) notifyEntityChanged(c EntityChange) {
 	s.mu.RUnlock()
 	for _, fn := range listeners {
 		fn(c)
+	}
+}
+
+// BridgeCallEvent is the payload for OnBridgeCall — one event per dispatched
+// MCP bridge handler. Powers the in-page Agent Console (BridgeConsole.svelte)
+// so the user can see, live, what every connected agent is doing.
+//
+// Field shape kept intentionally flat + JSON-friendly so it rides cleanly
+// across the Wails event bus.
+//
+// ParamsSummary / Result are pre-truncated (~120 chars) — the console is a
+// streaming live view, not a full audit log. Heavy payloads (terrain DTOs,
+// full unit lists) shouldn't dominate the row width.
+type BridgeCallEvent struct {
+	Timestamp      time.Time `json:"timestamp"`
+	Method         string    `json:"method"`
+	ParamsSummary  string    `json:"params_summary"` // "" when the handler took no params
+	Result         string    `json:"result"`         // "ok" when the handler returned a void-ish payload
+	Error          string    `json:"error"`          // "" on success
+	DurationMicros int64     `json:"duration_micros"`
+}
+
+// OnBridgeCall subscribes a listener to MCP-handler-dispatch events. Fires
+// AFTER the handler completes (success or error), so the listener sees the
+// final outcome. Lock+copy pattern matches the other listener buses; listeners
+// must not call back into bridge handlers from this callback.
+func (s *Session) OnBridgeCall(fn func(BridgeCallEvent)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bridgeCallListeners = append(s.bridgeCallListeners, fn)
+}
+
+// notifyBridgeCall fires every BridgeCall listener with the given event.
+// Exported (capitalized) so the bridge dispatch wrapper in handlers.go can
+// invoke it from the bridge.Handler shim. Lock+copy then invoke outside the
+// lock — same shape as notifySelection/notifyDirty/notifyEntityChanged.
+func (s *Session) notifyBridgeCall(c BridgeCallEvent) {
+	s.mu.RLock()
+	listeners := make([]func(BridgeCallEvent), len(s.bridgeCallListeners))
+	copy(listeners, s.bridgeCallListeners)
+	s.mu.RUnlock()
+	for _, fn := range listeners {
+		fn(c)
+	}
+}
+
+// NotifyBridgeCall is the exported wrapper used by the bridge-dispatch shim in
+// handlers.go (which lives in the same package but uses this name for
+// readability + grep-ability when scanning for "what fires the agent console").
+func (s *Session) NotifyBridgeCall(c BridgeCallEvent) {
+	s.notifyBridgeCall(c)
+}
+
+// OnUICommand subscribes to UI-command events from MCP handlers. Used by App
+// to forward `view.*` / `camera.*` MCP calls into the JS-side test-command
+// bus. Lock+copy pattern matches the other listener buses.
+func (s *Session) OnUICommand(fn func(string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.uiCommandListeners = append(s.uiCommandListeners, fn)
+}
+
+// EmitUICommand fires a UI-command string at every subscriber. MCP handlers
+// invoke this for surfaces (View menu visibility, terrain/doodad mode, camera
+// positioning) whose authoritative state lives in JS.
+func (s *Session) EmitUICommand(cmd string) {
+	s.mu.RLock()
+	listeners := make([]func(string), len(s.uiCommandListeners))
+	copy(listeners, s.uiCommandListeners)
+	s.mu.RUnlock()
+	for _, fn := range listeners {
+		fn(cmd)
 	}
 }

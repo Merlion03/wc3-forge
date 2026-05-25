@@ -11,11 +11,15 @@ export function CloseMap():Promise<main.MapStatus>;
 
 export function EmitTestCommand(arg1:string):Promise<void>;
 
+export function GetBridgeInfo():Promise<main.BridgeInfo>;
+
 export function GetDoodad(arg1:number):Promise<doodadsdoo.Doodad>;
 
 export function GetDoodadTypeIndex():Promise<Record<string, main.DoodadTypeInfo>>;
 
 export function GetMapBytes():Promise<string>;
+
+export function GetMinimapBytes():Promise<main.MinimapDTO>;
 
 export function GetPathingMap():Promise<main.PathingMapDTO>;
 

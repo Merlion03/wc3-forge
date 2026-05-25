@@ -51,6 +51,17 @@ func (b *Bridge) Register(method string, h Handler) {
 func (b *Bridge) Port() int     { return b.port }
 func (b *Bridge) Token() string { return b.token }
 
+// TokenShort returns the first 8 hex chars of the bridge auth token. The
+// Agent Console surfaces this in its header so the user can confirm which
+// bridge a connected client is talking to without leaking the full secret to
+// any UI that ends up screenshotted/streamed.
+func (b *Bridge) TokenShort() string {
+	if len(b.token) <= 8 {
+		return b.token
+	}
+	return b.token[:8]
+}
+
 func (b *Bridge) Start() error {
 	tok, err := makeToken()
 	if err != nil {

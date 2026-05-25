@@ -1,17 +1,19 @@
 <script lang="ts">
   // View menu — dropdown sibling to File menu in the header. Hosts visibility
-  // toggles for doodad categories (and any future "show / hide" affordances).
+  // toggles and editor-wide view options.
   //
-  // Currently shows:
-  //   - Doodads → All        (tri-state checkbox; toggle every doodad instance)
-  //   - Doodads → <Category> (checkbox per category present in the loaded map)
+  // Layout (top → bottom):
+  //   - Extras            (flat top-level checkboxes — e.g. Reforged Graphics,
+  //                       Agent Console)
+  //   - Doodads sub-menu  (tri-state "All" + one checkbox per category present)
+  //   - Overlays sub-menu (curated OVERLAYS list — Pathing today, more later)
+  //   - Theme sub-menu    (Light / Dark / System radio group)
   //
-  // Visibility state is OWNED by the parent (App.svelte). This component
-  // calls `onToggle` with the affected category (or "*" for all) + desired
-  // visibility. The parent flips its `doodadVisibility` Record and forwards
-  // to scene.setDoodadCategoryVisible.
+  // Visibility / theme state is OWNED by the parent (App.svelte). This
+  // component fires the matching callback so the parent can flip its store and
+  // forward to the scene / dom.
   //
-  // The "All" checkbox is tri-state:
+  // The Doodads "All" checkbox is tri-state:
   //   - checked         all categories visible
   //   - unchecked       all categories hidden
   //   - indeterminate   mixed
@@ -23,18 +25,54 @@
   import { Button } from '$lib/components/ui/button'
   import { Checkbox } from '$lib/components/ui/checkbox'
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
+  import SunIcon from '@lucide/svelte/icons/sun'
+  import MoonIcon from '@lucide/svelte/icons/moon'
+  import MonitorIcon from '@lucide/svelte/icons/monitor'
+
+  type Theme = 'light' | 'dark' | 'system'
+
+  interface Extra {
+    id: string
+    label: string
+    checked: boolean
+    title?: string
+    disabled?: boolean
+  }
 
   interface Props {
     categories?: string[]
     visibility?: Record<string, boolean>
+    overlays?: Record<string, boolean>
+    extras?: Extra[]
+    theme?: Theme
     onToggle?: (detail: { category: string; visible: boolean }) => void
+    onOverlayToggle?: (detail: { overlay: string; visible: boolean }) => void
+    onExtraToggle?: (detail: { id: string; checked: boolean }) => void
+    onThemeChange?: (theme: Theme) => void
   }
 
-  let { categories = [], visibility = {}, onToggle }: Props = $props()
+  let {
+    categories = [],
+    visibility = {},
+    overlays = {},
+    extras = [],
+    theme = 'system',
+    onToggle,
+    onOverlayToggle,
+    onExtraToggle,
+    onThemeChange,
+  }: Props = $props()
+
+  // Curated list of overlays surfaced in the menu. id is the wire key; label
+  // is the human-readable name. Extend as new overlays are added.
+  const OVERLAYS: { id: string; label: string; title: string }[] = [
+    { id: 'pathing', label: 'Pathing', title: 'Toggle the static pathing-map overlay (red=unwalkable, blue=unflyable, yellow=unbuildable).' },
+  ]
 
   let allVisibleCount = $derived(categories.filter(c => visibility[c] !== false).length)
   let allChecked = $derived(categories.length > 0 && allVisibleCount === categories.length)
   let allIndeterminate = $derived(allVisibleCount > 0 && allVisibleCount < categories.length)
+  let overlaysOnCount = $derived(OVERLAYS.filter(o => overlays[o.id] === true).length)
 
   function setAll(visible: boolean) {
     onToggle?.({ category: '*', visible })
@@ -46,6 +84,11 @@
     // Clicked while fully-checked OR indeterminate → hide everything.
     // Clicked while fully-unchecked → show everything.
     setAll(!(allChecked || allIndeterminate))
+  }
+  function onThemeValueChange(v: string) {
+    if (v === 'light' || v === 'dark' || v === 'system') {
+      onThemeChange?.(v)
+    }
   }
 </script>
 
@@ -64,6 +107,21 @@
     {/snippet}
   </DropdownMenu.Trigger>
   <DropdownMenu.Content class="min-w-[220px]" align="start">
+    {#if extras.length > 0}
+      {#each extras as e (e.id)}
+        <DropdownMenu.CheckboxItem
+          checked={e.checked}
+          onCheckedChange={(v) => onExtraToggle?.({ id: e.id, checked: v })}
+          closeOnSelect={false}
+          disabled={e.disabled === true}
+          title={e.title}
+        >
+          {e.label}
+        </DropdownMenu.CheckboxItem>
+      {/each}
+      <DropdownMenu.Separator />
+    {/if}
+
     <DropdownMenu.Sub>
       <DropdownMenu.SubTrigger>
         <span class="flex-1">Doodads</span>
@@ -101,6 +159,51 @@
             </DropdownMenu.CheckboxItem>
           {/each}
         {/if}
+      </DropdownMenu.SubContent>
+    </DropdownMenu.Sub>
+
+    <DropdownMenu.Sub>
+      <DropdownMenu.SubTrigger>
+        <span class="flex-1">Overlays</span>
+        <span class="text-muted-foreground ml-2 font-mono text-xs">
+          {overlaysOnCount}/{OVERLAYS.length}
+        </span>
+      </DropdownMenu.SubTrigger>
+      <DropdownMenu.SubContent class="min-w-[200px]">
+        {#each OVERLAYS as o (o.id)}
+          <DropdownMenu.CheckboxItem
+            checked={overlays[o.id] === true}
+            onCheckedChange={(v) => onOverlayToggle?.({ overlay: o.id, visible: v })}
+            closeOnSelect={false}
+            title={o.title}
+          >
+            {o.label}
+          </DropdownMenu.CheckboxItem>
+        {/each}
+      </DropdownMenu.SubContent>
+    </DropdownMenu.Sub>
+
+    <DropdownMenu.Separator />
+
+    <DropdownMenu.Sub>
+      <DropdownMenu.SubTrigger>
+        <span class="flex-1">Theme</span>
+      </DropdownMenu.SubTrigger>
+      <DropdownMenu.SubContent class="min-w-[160px]">
+        <DropdownMenu.RadioGroup value={theme} onValueChange={onThemeValueChange}>
+          <DropdownMenu.RadioItem value="light">
+            <SunIcon />
+            <span>Light</span>
+          </DropdownMenu.RadioItem>
+          <DropdownMenu.RadioItem value="dark">
+            <MoonIcon />
+            <span>Dark</span>
+          </DropdownMenu.RadioItem>
+          <DropdownMenu.RadioItem value="system">
+            <MonitorIcon />
+            <span>System</span>
+          </DropdownMenu.RadioItem>
+        </DropdownMenu.RadioGroup>
       </DropdownMenu.SubContent>
     </DropdownMenu.Sub>
   </DropdownMenu.Content>

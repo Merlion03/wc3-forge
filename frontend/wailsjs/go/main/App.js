@@ -14,6 +14,10 @@ export function EmitTestCommand(arg1) {
   return window['go']['main']['App']['EmitTestCommand'](arg1);
 }
 
+export function GetBridgeInfo() {
+  return window['go']['main']['App']['GetBridgeInfo']();
+}
+
 export function GetDoodad(arg1) {
   return window['go']['main']['App']['GetDoodad'](arg1);
 }
@@ -24,6 +28,10 @@ export function GetDoodadTypeIndex() {
 
 export function GetMapBytes() {
   return window['go']['main']['App']['GetMapBytes']();
+}
+
+export function GetMinimapBytes() {
+  return window['go']['main']['App']['GetMinimapBytes']();
 }
 
 export function GetPathingMap() {

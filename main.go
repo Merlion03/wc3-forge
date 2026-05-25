@@ -114,7 +114,7 @@ func main() {
 	// GUI mode. wails.Run blocks until the window closes.
 	app := NewApp()
 	err := wails.Run(&options.App{
-		Title:  "wc3-forge",
+		Title:  fmt.Sprintf("wc3-forge [PID %d]", os.Getpid()),
 		Width:  1280,
 		Height: 800,
 		AssetServer: &assetserver.Options{

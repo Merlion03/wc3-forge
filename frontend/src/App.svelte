@@ -21,6 +21,8 @@
   import ViewMenu from './ViewMenu.svelte'
   import AssetPreview from './AssetPreview.svelte'
   import MapInfoEditor from './MapInfoEditor.svelte'
+  import BridgeConsole from './BridgeConsole.svelte'
+  import Minimap from './Minimap.svelte'
   import { showToast } from './toast'
   import { loadIconURL } from './icon-loader'
   import { TEAM_COLORS_RGB } from './sloc-markers'
@@ -111,6 +113,20 @@
     }
   }
 
+  // ----- Agent Console panel (bottom dock) -----
+  //
+  // Streams every MCP bridge-call dispatched against this wc3-forge instance
+  // so the user can see, live, what every connected agent is doing. State is
+  // owned here so the header toggle button + Ctrl+` hotkey can drive it.
+  // Persisted to localStorage so reload preserves open/closed state.
+  const LS_BRIDGE_CONSOLE_OPEN = 'wc3forge.bridge-console.open'
+  let bridgeConsoleOpen: boolean = (() => {
+    try { return localStorage.getItem(LS_BRIDGE_CONSOLE_OPEN) === '1' } catch { return false }
+  })()
+  function toggleBridgeConsole() {
+    bridgeConsoleOpen = !bridgeConsoleOpen
+  }
+
   // ----- Map Info Editor modal -----
   // Conditional mount in the template (`{#if showMapInfoEditor}`) so the
   // dialog component fully unmounts on close — keeps the focus-trap +
@@ -122,6 +138,99 @@
   }
   function closeMapInfoEditor() {
     showMapInfoEditor = false
+  }
+
+  // ----- Minimap overlay (bottom-right of viewport) -----
+  //
+  // Shows the map's BAKED minimap image (war3mapMap.blp / .dds / TGA fallback)
+  // — author-drawn, NOT a render of terrain. Matches HiveWE's minimap panel
+  // behavior. The component owns its own image-fetch + decode + click-to-pan
+  // math; this page-level state controls only visibility + map-load gen.
+  //
+  // Visibility persists in localStorage so the user's preference survives
+  // app restarts. Hotkey 'M' toggles. Click on the image pans the 3D camera.
+  const MINIMAP_LS_KEY = 'wc3-forge:showMinimap'
+  let showMinimap: boolean = (() => {
+    try {
+      const raw = localStorage.getItem(MINIMAP_LS_KEY)
+      // Default to ON for new users — the panel is small and not in the way,
+      // and being visible by default mirrors HiveWE's default.
+      return raw === null ? true : raw === '1'
+    } catch { return true }
+  })()
+  // Generation counter bumped whenever the loaded map changes (Open / Close /
+  // map-changed event). The Minimap component watches this prop and reloads
+  // its image + cached terrain coords on every bump. Avoids the component
+  // having to subscribe to its own MAP_EVENT — single source of truth here.
+  let mapLoadGen: number = 0
+  function toggleMinimap() {
+    showMinimap = !showMinimap
+    try { localStorage.setItem(MINIMAP_LS_KEY, showMinimap ? '1' : '0') } catch {}
+  }
+
+  // ----- Theme (light / dark / system) -----
+  //
+  // Default is `'dark'` so the shadcn dark palette is active out of the box.
+  // The actual `dark` class is toggled on <html> (document.documentElement) so
+  // every shadcn component that switches on the `.dark` selector flips at
+  // once. ViewMenu owns the user-facing toggle; we pass `theme` + `setTheme`
+  // as props (see Agent C's ViewMenu API).
+  //
+  // System-mode listens to prefers-color-scheme so a midday OS toggle flips
+  // the app instantly; the listener is registered only while `theme === 'system'`.
+  const THEME_LS_KEY = 'wc3-forge:theme'
+  type Theme = 'light' | 'dark' | 'system'
+  function readStoredTheme(): Theme {
+    try {
+      const raw = localStorage.getItem(THEME_LS_KEY)
+      if (raw === 'light' || raw === 'dark' || raw === 'system') return raw
+    } catch {}
+    return 'dark'
+  }
+  function resolveTheme(t: Theme): 'light' | 'dark' {
+    if (t === 'system') {
+      try { return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light' }
+      catch { return 'dark' }
+    }
+    return t
+  }
+  function applyTheme(t: Theme) {
+    const resolved = resolveTheme(t)
+    const cls = document.documentElement.classList
+    if (resolved === 'dark') cls.add('dark')
+    else cls.remove('dark')
+  }
+  let theme: Theme = $state(readStoredTheme())
+  // Apply immediately at module load so the very first paint is dark — this
+  // runs in the <script> body, before <main> mounts.
+  applyTheme(theme)
+  let systemMQ: MediaQueryList | null = null
+  function onSystemThemeChange() { applyTheme(theme) }
+  function setTheme(next: Theme) {
+    theme = next
+    try { localStorage.setItem(THEME_LS_KEY, next) } catch {}
+    applyTheme(next)
+    // Listener bookkeeping: only attach the prefers-color-scheme handler
+    // while we're in 'system' mode; detach otherwise to avoid wasted work.
+    try {
+      if (next === 'system') {
+        if (!systemMQ) {
+          systemMQ = window.matchMedia('(prefers-color-scheme: dark)')
+          systemMQ.addEventListener('change', onSystemThemeChange)
+        }
+      } else if (systemMQ) {
+        systemMQ.removeEventListener('change', onSystemThemeChange)
+        systemMQ = null
+      }
+    } catch {}
+  }
+  // Kick the listener bookkeeping once on initial load so a stored 'system'
+  // preference re-attaches its MQ listener on every app start.
+  if (theme === 'system') {
+    try {
+      systemMQ = window.matchMedia('(prefers-color-scheme: dark)')
+      systemMQ.addEventListener('change', onSystemThemeChange)
+    } catch {}
   }
 
   // ----- File menu (header dropdown) -----
@@ -194,6 +303,11 @@
     }
     EventsOn(MAP_EVENT, async () => {
       status = await Status()
+      // Bump the minimap-reload generation on every map-changed event so the
+      // Minimap component refetches its image + terrain coords. Covers both
+      // load (status.loaded=true → new minimap) and close (loaded=false →
+      // component renders "no minimap" placeholder).
+      mapLoadGen += 1
       if (status.loaded) {
         await reloadMap()
       } else {
@@ -286,7 +400,14 @@
 
     const s = await Status()
     status = s
-    if (s.loaded) await reloadMap()
+    if (s.loaded) {
+      // Initial map-already-loaded path (e.g. --open=<path> startup flag).
+      // Bump the minimap-reload generation so the Minimap component (which
+      // mounts after this onMount but listens on the prop reactively) picks
+      // up the image without waiting for the next MAP_EVENT.
+      mapLoadGen += 1
+      await reloadMap()
+    }
     const sel = await GetSelection()
     ingestSelection(sel)
     try { dirty = await IsDirty() } catch { dirty = false }
@@ -342,6 +463,31 @@
         case 'mapinfo.close':
           closeMapInfoEditor()
           break
+        case 'bridge_console.toggle':
+          toggleBridgeConsole()
+          break
+        case 'bridge_console.open':
+          bridgeConsoleOpen = true
+          break
+        case 'bridge_console.close':
+          bridgeConsoleOpen = false
+          break
+        case 'minimap.toggle':
+          toggleMinimap()
+          break
+        case 'minimap.click': {
+          // Args: u v (normalized image-pixel coords, 0..1 each).
+          // Synthesizes the click handler since WebView2 drops real synthetic
+          // mouse input — this exposes the same panTo computation for
+          // verification automation.
+          const u = parseFloat(args[0])
+          const v = parseFloat(args[1])
+          if (isFinite(u) && isFinite(v)) {
+            const fn = (window as any).__minimapClick
+            if (typeof fn === 'function') fn(u, v)
+          }
+          break
+        }
       }
     })
     // Test-driver hook (also exposed on window for in-page console use):
@@ -381,6 +527,25 @@
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.key === 'I' || e.key === 'i')) {
       e.preventDefault()
       openMapInfoEditor()
+    }
+    // Agent Console toggle: Ctrl+` (backtick). Doesn't collide with browser
+    // shortcuts inside WebView2; not used by anything else in wc3-forge.
+    // `e.key` for a literal backtick is `'`'` regardless of layout (US/UK);
+    // `e.code === 'Backquote'` is the physical-key fallback for safety.
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === '`' || e.code === 'Backquote')) {
+      e.preventDefault()
+      toggleBridgeConsole()
+    }
+    // Minimap toggle hotkey: bare 'M'. No modifiers — matches the WC3 in-game
+    // convention. Ignore when an input/textarea has focus so position-edit
+    // typing doesn't accidentally hide the minimap, and ignore when modifiers
+    // are held (so Ctrl+M / Alt+M stay free for future shortcuts).
+    if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+      const tgt = e.target as HTMLElement | null
+      const tagName = tgt?.tagName?.toLowerCase()
+      if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
+      e.preventDefault()
+      toggleMinimap()
     }
   }
 
@@ -478,6 +643,10 @@
     EventsOff(ENTITY_EVENT)
     EventsOff(DEV_ANIM_EVENT)
     window.removeEventListener('keydown', onGlobalKeyDown)
+    if (systemMQ) {
+      try { systemMQ.removeEventListener('change', onSystemThemeChange) } catch {}
+      systemMQ = null
+    }
     scene?.dispose()
   })
 
@@ -517,6 +686,31 @@
   function togglePathing() {
     pathingVisible = !pathingVisible
     scene?.setPathingVisible(pathingVisible)
+  }
+  // View → Overlays sub-menu dispatches `overlay-toggle` events. Route per id
+  // to the relevant scene toggle. Add new overlay ids here as the menu's
+  // OVERLAYS list in ViewMenu.svelte grows.
+  function onOverlayToggle(detail: { overlay: string; visible: boolean }) {
+    const { overlay, visible } = detail
+    if (overlay === 'pathing') {
+      pathingVisible = visible
+      scene?.setPathingVisible(pathingVisible)
+    }
+  }
+  // View → top-level "extras" dispatches `extra-toggle` events. Route per id
+  // to the existing toggle handler (reforged, agent-console, etc.) so the
+  // menu and any header / hotkey path end up at the same code.
+  function onExtraToggle(detail: { id: string; checked: boolean }) {
+    const { id, checked } = detail
+    if (id === 'reforged') {
+      // toggleReforged flips internally; only call when the desired state
+      // differs from current so the menu can't get out of sync with `busy`.
+      if (checked !== reforged) toggleReforged()
+    } else if (id === 'minimap') {
+      if (checked !== showMinimap) toggleMinimap()
+    } else if (id === 'agent-console') {
+      if (checked !== bridgeConsoleOpen) toggleBridgeConsole()
+    }
   }
 
   function toggleTerrainPickMode() {
@@ -953,7 +1147,20 @@
 
     <ViewMenu categories={doodadCategoriesPresent}
               visibility={doodadVisibility}
-              onToggle={onViewToggle} />
+              overlays={{ pathing: pathingVisible }}
+              extras={[
+                { id: 'reforged', label: 'Reforged Graphics', checked: reforged, disabled: busy,
+                  title: 'Toggle Reforged graphics. Reloads the current map without resetting the camera.' },
+                { id: 'minimap', label: 'Minimap', checked: showMinimap,
+                  title: 'Toggle the minimap overlay (bottom-right of viewport). Shortcut: M' },
+                { id: 'agent-console', label: 'Agent Console', checked: bridgeConsoleOpen,
+                  title: 'Toggle the Agent Console (Ctrl+`) — live stream of every MCP bridge call.' },
+              ]}
+              theme={theme}
+              onToggle={onViewToggle}
+              onOverlayToggle={onOverlayToggle}
+              onExtraToggle={onExtraToggle}
+              onThemeChange={setTheme} />
 
     <div class="flex-1 truncate text-xs text-muted-foreground">
       {#if status.loaded}
@@ -977,25 +1184,6 @@
       >
         {terrainPickModeOn ? 'Terrain Mode' : 'Doodad Mode'}
       </Button>
-      <Button
-        size="sm"
-        variant={pathingVisible ? 'default' : 'secondary'}
-        class={pathingVisible ? 'bg-emerald-700 text-white hover:bg-emerald-800' : ''}
-        onclick={togglePathing}
-        title="Toggle the static pathing-map overlay (red=unwalkable, blue=unflyable, yellow=unbuildable)."
-      >
-        Pathing{pathingVisible ? ' ✓' : ''}
-      </Button>
-      <Button
-        size="sm"
-        variant={reforged ? 'default' : 'secondary'}
-        class={reforged ? 'bg-emerald-700 text-white hover:bg-emerald-800' : ''}
-        onclick={toggleReforged}
-        disabled={busy}
-        title="Toggle Reforged graphics. Reloads the current map without resetting the camera."
-      >
-        Reforged Graphics{reforged ? ' ✓' : ''}
-      </Button>
       <span class="mx-1 inline-block h-5 w-px bg-border" aria-hidden="true"></span>
       <Button
         size="sm"
@@ -1017,6 +1205,9 @@
   <div class="grid min-h-0 flex-1" style="grid-template-columns: 1fr 340px;">
     <section class="viewport">
       <canvas bind:this={canvas}></canvas>
+      {#if showMinimap}
+        <Minimap {scene} {mapLoadGen} />
+      {/if}
     </section>
 
     <div class="flex min-h-0 flex-col bg-card" bind:this={rightColEl}>
@@ -1338,6 +1529,8 @@
       </aside>
     </div>
   </div>
+
+  <BridgeConsole bind:open={bridgeConsoleOpen} />
 
   {#if showMapInfoEditor}
     <MapInfoEditor bind:open={showMapInfoEditor} onClose={closeMapInfoEditor} />

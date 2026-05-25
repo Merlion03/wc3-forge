@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
@@ -23,6 +24,22 @@ const (
 	eventDirtyChanged     = "wc3-forge:dirty-changed"
 	eventEntityChanged    = "wc3-forge:entity-changed"
 	eventDevSetAnim       = "wc3-forge:dev-set-anim"
+	// eventBridgeCall streams every MCP-handler dispatch to the in-page Agent
+	// Console (frontend/src/BridgeConsole.svelte). Fired AFTER the handler
+	// completes — payload carries timestamp, method, params summary, result
+	// summary, error, and duration_micros (see forge.BridgeCallEvent).
+	eventBridgeCall       = "wc3-forge:bridge-call"
+	// eventTestCommand is reused by the bridge UI-command bus: MCP handlers
+	// like view.set_mode emit a UI-command string through Session.EmitUICommand,
+	// App forwards it on this event, and the existing App.svelte test-driver
+	// hook applies the change. Same channel used by the verification automation,
+	// so the contract is mature.
+	eventTestCommand      = "wc3-forge:test-command"
+	// eventStartupCamera carries a camera spec ("x,y,z,distance"). Used by the
+	// --camera CLI flag at startup AND by the camera.set_view MCP handler at
+	// runtime. The JS receiver pans + sets distance via the existing
+	// startup-camera handler in App.svelte.
+	eventStartupCamera    = "wc3-forge:startup-camera"
 )
 
 // App is the Wails-bindable surface exposed to the frontend. Every method
@@ -97,11 +114,16 @@ func (a *App) startup(ctx context.Context) {
 	// side's document.title only updates the inner WebView2 child window,
 	// which the user never sees; runtime.WindowSetTitle hits the outer Wails
 	// window so the taskbar + window-list entry pick up the `* ` prefix too.
+	// Title format includes the process PID so users running multiple
+	// wc3-forge windows (e.g. coordinating with parallel AI agents) can tell
+	// them apart at a glance in the taskbar + window list. The PID never
+	// changes for this process so we capture it once.
+	pidTag := fmt.Sprintf(" [PID %d]", os.Getpid())
 	forge.Current.OnDirtyChanged(func(dirty bool) {
 		runtime.EventsEmit(a.ctx, eventDirtyChanged, map[string]any{"dirty": dirty})
-		title := "wc3-forge"
+		title := "wc3-forge" + pidTag
 		if dirty {
-			title = "* wc3-forge"
+			title = "* wc3-forge" + pidTag
 		}
 		runtime.WindowSetTitle(a.ctx, title)
 	})
@@ -115,6 +137,29 @@ func (a *App) startup(ctx context.Context) {
 	// camel-case-not (the tags are lowercase: kind/id/field/position).
 	forge.Current.OnEntityChanged(func(c forge.EntityChange) {
 		runtime.EventsEmit(a.ctx, eventEntityChanged, c)
+	})
+	// Bridge-call observability — every MCP handler dispatch fires through
+	// here. Forwarded to the in-page Agent Console (BridgeConsole.svelte) so
+	// the user can see, live, what every connected agent is doing.
+	forge.Current.OnBridgeCall(func(c forge.BridgeCallEvent) {
+		runtime.EventsEmit(a.ctx, eventBridgeCall, c)
+	})
+	// UI-command bus — bridge handlers (view.set_mode, view.set_doodad_…,
+	// camera.set_view) emit a free-form command string through here. The App
+	// layer routes camera commands to the startup-camera event (the JS-side
+	// camera-spec handler) and other commands to the test-command event (the
+	// existing test-driver dispatch). Single layer of forwarding keeps the
+	// forge package Wails-free while still letting bridge handlers reach
+	// JS-owned state.
+	forge.Current.OnUICommand(func(cmd string) {
+		if a.ctx == nil {
+			return
+		}
+		if rest, ok := strings.CutPrefix(cmd, "camera.set "); ok {
+			runtime.EventsEmit(a.ctx, eventStartupCamera, map[string]any{"spec": rest})
+			return
+		}
+		runtime.EventsEmit(a.ctx, eventTestCommand, map[string]any{"cmd": cmd})
 	})
 }
 
@@ -622,17 +667,37 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			} else if i > 0 && j > 0 && cellCliff[idx-W-1] {
 				anyCliff = true
 			}
-			anyRamp := t.Tiles[idx].HasRamp()
-			if i > 0 && t.Tiles[idx-1].HasRamp() {
-				anyRamp = true
+			// HiveWE's `a_romp` ORs `corner_romp[]`, NOT the raw per-corner
+			// `corner_ramp` flag from war3map.w3e. `corner_romp` is set TRUE
+			// only when a corner is part of an ACTUALLY-RENDERED ramp
+			// clifftrans piece — much narrower than "any corner with the
+			// ramp flag set."
+			//
+			// We previously used `t.Tiles[idx-N].HasRamp()` here (corner_ramp),
+			// which over-fired the remap on plateau-interior corners adjacent
+			// to ramp-flagged corners that are NOT part of a renderable ramp
+			// span (e.g. the spear-tip plateau on Enfo's FFB at cells
+			// (11..13, 67) — all flagged ramp=true but never matched by
+			// HiveWE's vertical/horizontal ramp pre-pass because of the
+			// `rBL != rBR` asymmetry requirement). The result: every plateau
+			// corner touching one of those false-positive ramp corners got
+			// remapped to Irbk, hiding the Itbk overlay that's supposed to
+			// frame the cliff border with rune-brick. Symptom: cells (11,68)
+			// and (12,68) rendered as flat Irbk in wc3-forge but as
+			// Irbk-frame-with-Itbk-interior in HiveWE.
+			//
+			// Mirrors terrain.ixx::real_tile_texture line 755-768.
+			anyRomp := cornerRomp[idx]
+			if i > 0 && cornerRomp[idx-1] {
+				anyRomp = true
 			}
-			if j > 0 && t.Tiles[idx-W].HasRamp() {
-				anyRamp = true
+			if j > 0 && cornerRomp[idx-W] {
+				anyRomp = true
 			}
-			if i > 0 && j > 0 && t.Tiles[idx-W-1].HasRamp() {
-				anyRamp = true
+			if i > 0 && j > 0 && cornerRomp[idx-W-1] {
+				anyRomp = true
 			}
-			if !anyRamp && !(anyCliff && !t.Tiles[idx].HasRamp()) {
+			if !anyRomp && !(anyCliff && !t.Tiles[idx].HasRamp()) {
 				continue
 			}
 			// Ramp continuity fix: when THIS corner is itself a ramp corner,
@@ -825,6 +890,63 @@ func (a *App) GetMapBytes() string {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
+// MinimapDTO carries the bytes of the loaded map's baked minimap image plus
+// a format hint so the JS-side decoder can dispatch correctly.
+//
+//   - Bytes    — base64-encoded raw image bytes (BLP1/BLP2/DDS/TGA)
+//   - Ext      — "blp" | "dds" | "tga" — matches the on-disk extension of the
+//                source file that was found. JS uses magic-byte sniffing for
+//                BLP/DDS dispatch (mirroring icon-loader.ts), so this is
+//                primarily a TGA-vs-image-formats discriminator.
+//   - Found    — true when a baked minimap image was located in the map. False
+//                + empty Bytes means the map ships no preview; UI should show
+//                a graceful "no minimap" placeholder.
+//
+// (Wails serializes []byte as base64; JS does atob+Uint8Array to recover.)
+type MinimapDTO struct {
+	Bytes string `json:"bytes"` // base64
+	Ext   string `json:"ext"`
+	Found bool   `json:"found"`
+}
+
+// GetMinimapBytes returns the baked minimap image embedded in the loaded map.
+// WC3 maps ship an author-drawn preview rather than a render of terrain —
+// HiveWE displays it verbatim and so do we (see project_wc3_forge memory).
+//
+// Source-file precedence — pick the first present:
+//  1. war3mapMap.blp     — Reforged-era; most common. BLP1 or BLP2.
+//  2. war3mapMap.dds     — HD Reforged variant; optional, larger.
+//  3. war3mapPreview.tga — legacy maps. TGA format; decoded JS-side.
+//
+// Returns (Found=false, "", "", nil) when no map is loaded OR the loaded map
+// has none of the three files (e.g. some test fixtures). Read errors propagate
+// — they're recoverable on the UI side (show placeholder + log).
+func (a *App) GetMinimapBytes() (MinimapDTO, error) {
+	candidates := []struct {
+		name string
+		ext  string
+	}{
+		{"war3mapMap.blp", "blp"},
+		{"war3mapMap.dds", "dds"},
+		{"war3mapPreview.tga", "tga"},
+	}
+	for _, c := range candidates {
+		b, ok, err := forge.Current.ReadFile(c.name)
+		if err != nil {
+			return MinimapDTO{}, fmt.Errorf("read %s: %w", c.name, err)
+		}
+		if !ok || len(b) == 0 {
+			continue
+		}
+		return MinimapDTO{
+			Bytes: base64.StdEncoding.EncodeToString(b),
+			Ext:   c.ext,
+			Found: true,
+		}, nil
+	}
+	return MinimapDTO{Found: false}, nil
+}
+
 // SetUnitAnimation is a dev-only hook for poking unit animations from the JS
 // devtools console (or any MCP client). Forwards (creationNumber, animName)
 // to the frontend via Wails event; the scene-instances renderer matches the
@@ -985,6 +1107,41 @@ func (a *App) MapInfoGet() (*w3i.Info, error) {
 		return nil, fmt.Errorf("no map loaded")
 	}
 	return info, nil
+}
+
+// BridgeInfo is the JS-facing identity card for the running MCP bridge. The
+// Agent Console panel (BridgeConsole.svelte) renders this in its top bar so
+// the user can see at a glance WHICH wc3-forge window they're looking at
+// when multiple instances are running side-by-side.
+//
+// Token is the SHORTENED token (first 8 hex chars) — we intentionally never
+// surface the full secret in UI that might be screenshotted or screen-shared.
+type BridgeInfo struct {
+	PID        int    `json:"pid"`
+	Port       int    `json:"port"`
+	TokenShort string `json:"token_short"`
+	MapName    string `json:"map_name"`
+	MapPath    string `json:"map_path"`
+}
+
+// GetBridgeInfo returns the running bridge's identity card (pid, port,
+// shortened auth token, currently-loaded map). Reads live from
+// forge.BridgeIdentity (captured in RegisterAll) so port/token reflect the
+// post-Start values, not zeros from before listen.
+func (a *App) GetBridgeInfo() BridgeInfo {
+	pid, port, tokenShort := forge.BridgeIdentity()
+	out := BridgeInfo{
+		PID:        pid,
+		Port:       port,
+		TokenShort: tokenShort,
+	}
+	if forge.Current.IsLoaded() {
+		out.MapPath = forge.Current.Path()
+		if info := forge.Current.Info(); info != nil {
+			out.MapName = info.Name
+		}
+	}
+	return out
 }
 
 // MapInfoApply applies a partial update DTO to the in-memory war3map.w3i.
