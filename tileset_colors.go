@@ -178,6 +178,92 @@ var (
 	waterSLKOnce sync.Once
 )
 
+var (
+	cliffTypesSLK     *slk.Mapped
+	cliffTypesSLKErr  error
+	cliffTypesSLKOnce sync.Once
+)
+
+// loadCliffTypesSLK lazily loads TerrainArt/CliffTypes.slk. The SLK maps cliff
+// FourCC (e.g. "CIrb") → {groundtile, texdir, texfile, ...}. Used by the
+// cliff-ground-remap path in GetTerrain: HiveWE's real_tile_texture replaces
+// the per-corner ground_texture with cliff_to_ground_texture[cliff_index] when
+// the corner is on a cliff/ramp, and CliffTypes.slk's "groundtile" column is
+// where that mapping comes from.
+func loadCliffTypesSLK() (*slk.Mapped, error) {
+	cliffTypesSLKOnce.Do(func() {
+		data, ok, err := readBaseAsset("TerrainArt/CliffTypes.slk")
+		if err != nil || !ok {
+			cliffTypesSLKErr = err
+			log.Printf("tileset: CliffTypes.slk read failed (ok=%v err=%v)", ok, err)
+			return
+		}
+		m := slk.New()
+		if err := m.Load(data); err != nil {
+			cliffTypesSLKErr = err
+			log.Printf("tileset: CliffTypes.slk parse: %v", err)
+			return
+		}
+		cliffTypesSLK = m
+		log.Printf("tileset: CliffTypes.slk loaded, %d rows", len(m.Rows))
+	})
+	return cliffTypesSLK, cliffTypesSLKErr
+}
+
+// CliffToGroundTexture returns, for each cliff FourCC in cliffPalette, the
+// matching ground-palette index inside groundPalette. The mapping is sourced
+// from TerrainArt/CliffTypes.slk's "groundtile" column.
+//
+// HiveWE replaces the per-corner ground_texture with this value for corners
+// that participate in a cliff or ramp (see real_tile_texture in
+// src/base/terrain.ixx). Maps with mixed tilesets — like Enfo's FFB (Icecrown
+// cliffs over Cityscape brick floors) — render obviously wrong without this
+// remap: the cliff borders show the floor's Cityscape tan brick texture instead
+// of Icecrown's blue-gray cliff-stone.
+//
+// Returns one int per cliff palette entry, equal to the ground palette index
+// the cliff maps onto. -1 if the lookup failed (CliffTypes.slk missing or row
+// missing or groundtile FourCC not in the ground palette).
+func CliffToGroundTexture(cliffPalette, groundPalette []string) []int {
+	out := make([]int, len(cliffPalette))
+	groundIdx := map[string]int{}
+	for i, fc := range groundPalette {
+		groundIdx[fc] = i
+	}
+	m, err := loadCliffTypesSLK()
+	if err != nil || m == nil {
+		for i := range out {
+			out[i] = -1
+		}
+		return out
+	}
+	for i, cliffFC := range cliffPalette {
+		row := m.Row(cliffFC)
+		if row == nil {
+			log.Printf("cliff: %s not in CliffTypes.slk", cliffFC)
+			out[i] = -1
+			continue
+		}
+		gt := row.String("groundtile")
+		if gt == "" {
+			log.Printf("cliff: %s has no groundtile column", cliffFC)
+			out[i] = -1
+			continue
+		}
+		if idx, ok := groundIdx[gt]; ok {
+			out[i] = idx
+		} else {
+			// The cliff's groundtile FourCC is not in this map's ground
+			// palette. Rare but possible (custom maps with mismatched
+			// palettes). Fall back to -1 so callers leave the corner's
+			// stored ground_texture unchanged.
+			log.Printf("cliff: %s groundtile %q not in map's ground palette %v", cliffFC, gt, groundPalette)
+			out[i] = -1
+		}
+	}
+	return out
+}
+
 func loadWaterSLK() (*slk.Mapped, error) {
 	waterSLKOnce.Do(func() {
 		data, ok, err := readBaseAsset("TerrainArt/Water.slk")

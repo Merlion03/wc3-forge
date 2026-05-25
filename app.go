@@ -255,7 +255,9 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 	if t == nil {
 		return TerrainDTO{}, fmt.Errorf("no terrain loaded")
 	}
-	n := int(t.Width * t.Height)
+	W := int(t.Width)
+	H := int(t.Height)
+	n := W * H
 	heights := make([]float32, n)
 	ground := make([]uint32, n)
 	layer := make([]uint32, n)
@@ -286,6 +288,91 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		waterZ[i] = t.Tiles[i].WaterZ()
 		if t.Tiles[i].HasWater() {
 			hasWater[i] = 1
+		}
+	}
+
+	// HiveWE-compat: replace per-corner ground texture for cliff/ramp corners.
+	//
+	// .w3e stores `ground_texture` per corner verbatim — usually a sensible
+	// "what's underneath the cliff" value, but on mixed-tileset maps (where
+	// cliffs and floors come from different tilesets) it's often a stale or
+	// editor-default value. HiveWE's `real_tile_texture` therefore overrides
+	// the stored value with `cliff_to_ground_texture[cliff_index]` whenever
+	// the corner sits on a cliff or ramp. The mapping comes from
+	// TerrainArt/CliffTypes.slk's `groundtile` column (e.g. CIrb → Irbk).
+	//
+	// Symptom this fixes (verified vs HiveWE on Enfo's FFB v2.64f): shield
+	// borders and tower edges stored as Cityscape `Ybtl` (tan brick) but
+	// adjacent to Icecrown cliffs render with `Irbk` (Ice_RuneBricks blue-gray
+	// stone) in HiveWE. Without the override wc3-forge showed the tan, which
+	// looked wildly out of place vs the Icecrown floor.
+	//
+	// Single-tileset maps (the Lordaeron-Summer-only survival test fixture)
+	// were unaffected because the cliff's groundtile FourCC is already the
+	// floor's FourCC there — the override is a no-op.
+	//
+	// We compute corner_cliff per HiveWE: a cell's BL corner is "cliff" when
+	// any of its 4 corners has a different layer_height than BL. Then a corner
+	// is "on a cliff" when ANY of the cells it touches (at most 4 — itself
+	// plus left, bottom, and bottom-left neighbors) is a cliff cell. Same
+	// 4-cell window HiveWE walks in real_tile_texture.
+	c2g := CliffToGroundTexture(t.CliffTilesets, t.GroundTilesets)
+	cellCliff := make([]bool, n) // per-cell flag indexed by BL corner; valid for i<W-1 && j<H-1
+	for j := 0; j < H-1; j++ {
+		for i := 0; i < W-1; i++ {
+			bl := j*W + i
+			lhBL := t.Tiles[bl].LayerHeight
+			if t.Tiles[bl+1].LayerHeight != lhBL ||
+				t.Tiles[bl+W].LayerHeight != lhBL ||
+				t.Tiles[bl+W+1].LayerHeight != lhBL {
+				cellCliff[bl] = true
+			}
+		}
+	}
+	for j := 0; j < H; j++ {
+		for i := 0; i < W; i++ {
+			idx := j*W + i
+			// Corner-touched cells: (i, j), (i-1, j), (i, j-1), (i-1, j-1).
+			// Each is keyed by its BL corner index.
+			anyCliff := false
+			if i < W-1 && j < H-1 && cellCliff[idx] {
+				anyCliff = true
+			} else if i > 0 && j < H-1 && cellCliff[idx-1] {
+				anyCliff = true
+			} else if i < W-1 && j > 0 && cellCliff[idx-W] {
+				anyCliff = true
+			} else if i > 0 && j > 0 && cellCliff[idx-W-1] {
+				anyCliff = true
+			}
+			anyRamp := t.Tiles[idx].HasRamp()
+			if i > 0 && t.Tiles[idx-1].HasRamp() {
+				anyRamp = true
+			}
+			if j > 0 && t.Tiles[idx-W].HasRamp() {
+				anyRamp = true
+			}
+			if i > 0 && j > 0 && t.Tiles[idx-W-1].HasRamp() {
+				anyRamp = true
+			}
+			if !anyRamp && !(anyCliff && !t.Tiles[idx].HasRamp()) {
+				continue
+			}
+			// Resolve the cliff palette index for this corner.
+			// HiveWE comment: "Number 15 seems to be something" — when the
+			// stored cliff_texture is 15, remap to (15-14) = 1. Mirrors the
+			// `if (texture == 15) texture -= 14` in src/base/terrain.ixx.
+			cti := t.Tiles[idx].CliffTexIdx()
+			if cti == 15 {
+				cti = 1
+			}
+			if int(cti) >= len(c2g) {
+				continue
+			}
+			mapped := c2g[cti]
+			if mapped < 0 {
+				continue
+			}
+			ground[idx] = uint32(mapped)
 		}
 	}
 
