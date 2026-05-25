@@ -133,10 +133,11 @@ type Session struct {
 	// The PUBLIC dirty-changed event is a single boolean ("any file dirty");
 	// per-file flags are the internal granularity that lets Save write only
 	// the files that actually changed. Mutator fires dirty=true on the
-	// 0→1 transition of (dirtyUnits || dirtyDoodads), Save fires dirty=false
-	// on the 1→0 transition.
+	// 0→1 transition of (dirtyUnits || dirtyDoodads || dirtyInfo), Save
+	// fires dirty=false on the 1→0 transition.
 	dirtyUnits     bool
 	dirtyDoodads   bool
+	dirtyInfo      bool
 	dirtyListeners []func(bool)
 
 	// Entity-change bus — fired from any mutator (MoveUnit today; SetRotation,
@@ -336,9 +337,10 @@ func (s *Session) Open(path string) error {
 	s.pathingMap = pathingMap
 	s.strings = wtsStrings
 	s.selection = SelectionState{Items: nil, Primary: -1}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
+	s.dirtyInfo = false
 	s.mu.Unlock()
 	if prevSource != nil {
 		_ = prevSource.close()
@@ -390,9 +392,10 @@ func (s *Session) Close() {
 	s.pathingMap = nil
 	s.strings = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
+	s.dirtyInfo = false
 	s.mu.Unlock()
 	if prevSource != nil {
 		_ = prevSource.close()
@@ -695,7 +698,7 @@ func (s *Session) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 	// 0→1 transition of the combined dirty flag (any per-file flag). If the
 	// session was already dirty for another reason (e.g. dirtyUnits), this
 	// edit doesn't re-fire the public dirty event.
-	wasDirty := s.dirtyUnits || s.dirtyDoodads
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
 	s.dirtyDoodads = true
 	s.mu.Unlock()
 	if !wasDirty {
@@ -710,6 +713,56 @@ func (s *Session) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 	return nil
 }
 
+// MutateInfo applies fn to the in-memory war3map.w3i Info under the session
+// write lock, flips dirtyInfo, and fires the standard entity-changed event
+// so subscribers (Properties panel, header pill, the new Map Info Editor
+// dialog) refresh. Mirrors the MoveUnit/MoveDoodad pattern but at the file
+// level — the Info struct is a single document, so there's no creation_number
+// to disambiguate; the EntityChange payload carries Kind="info", ID=0,
+// Field="info".
+//
+// Returns an error if no map is loaded. The fn callback should be small and
+// non-blocking — it runs under the write lock, which serializes every other
+// reader/writer in the session.
+//
+// MUST be the only path that mutates Info — bypassing MutateInfo leaves the
+// session in a state where IsDirty() is wrong, the Save button stays
+// disabled, and the changes are silently dropped on next Open. Wails app
+// methods + bridge handlers + future undo/redo all funnel through here.
+//
+// No no-op short-circuit: unlike MoveUnit, MutateInfo can't cheaply compare
+// "before" and "after" because Info is a deep struct with slices of slices.
+// Callers that want no-op detection should diff their inputs themselves
+// before calling MutateInfo.
+func (s *Session) MutateInfo(fn func(*w3i.Info)) error {
+	if fn == nil {
+		return fmt.Errorf("MutateInfo: nil fn")
+	}
+	s.mu.Lock()
+	if s.info == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	fn(s.info)
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
+	s.dirtyInfo = true
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	// Map Info changes don't fit the position-only EntityChange shape today,
+	// but firing the event lets the same UI subscribers (Properties panel,
+	// future Map Info Editor) repaint without inventing a new event channel.
+	// Kind="info" / Field="info" keeps the discriminator unambiguous; consumers
+	// branch on Kind before reading Position.
+	s.notifyEntityChanged(EntityChange{
+		Kind:  "info",
+		ID:    0,
+		Field: "info",
+	})
+	return nil
+}
+
 // IsDirty reports whether the session holds unsaved edits to any in-memory
 // map file. The flag is the OR of every per-file dirty flag — the UI cares
 // only about "anything to save" granularity. Save itself reads each per-file
@@ -717,7 +770,7 @@ func (s *Session) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 func (s *Session) IsDirty() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.dirtyUnits || s.dirtyDoodads
+	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
 }
 
 // Save flushes every dirty in-memory file back through the source's write
@@ -736,15 +789,17 @@ func (s *Session) Save() error {
 		s.mu.Unlock()
 		return fmt.Errorf("no map loaded")
 	}
-	if !s.dirtyUnits && !s.dirtyDoodads {
+	if !s.dirtyUnits && !s.dirtyDoodads && !s.dirtyInfo {
 		s.mu.Unlock()
 		return nil // nothing to do
 	}
 	src := s.source
 	units := s.units
 	doodads := s.doodads
+	info := s.info
 	saveUnits := s.dirtyUnits
 	saveDoodads := s.dirtyDoodads
+	saveInfo := s.dirtyInfo
 	s.mu.Unlock()
 
 	if src == nil {
@@ -780,6 +835,18 @@ func (s *Session) Save() error {
 		}
 		s.mu.Lock()
 		s.dirtyDoodads = false
+		s.mu.Unlock()
+	}
+	if saveInfo {
+		data, err := w3i.Encode(info)
+		if err != nil {
+			return fmt.Errorf("encode war3map.w3i: %w", err)
+		}
+		if err := src.write("war3map.w3i", data); err != nil {
+			return fmt.Errorf("write war3map.w3i: %w", err)
+		}
+		s.mu.Lock()
+		s.dirtyInfo = false
 		s.mu.Unlock()
 	}
 

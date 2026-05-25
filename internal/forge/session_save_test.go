@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 )
 
 // TestMoveUnit_Save_RoundTrip is the end-to-end smoke test for the save slice:
@@ -267,6 +268,141 @@ func TestMoveUnit_FiresEntityChanged(t *testing.T) {
 	}
 	if len(changes) != 2 {
 		t.Errorf("expected 2 entity-change events after second real move, got %d", len(changes))
+	}
+}
+
+// TestMutateInfo_Save_RoundTrip is the end-to-end smoke test for the w3i
+// save slice: open a folder-backed map, mutate Info.Name via MutateInfo,
+// save, reopen, confirm the new name survived. Mirrors the MoveUnit save
+// round-trip shape — the dirtyInfo flag, MutateInfo path, and Save's
+// w3i.Encode dispatch all light up here.
+func TestMutateInfo_Save_RoundTrip(t *testing.T) {
+	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("fixture %q not available: %v", src, err)
+	}
+	tmp := t.TempDir()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(src, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644); err != nil {
+			t.Fatalf("write %s: %v", e.Name(), err)
+		}
+	}
+
+	s := &Session{}
+	var dirtyHistory []bool
+	s.OnDirtyChanged(func(d bool) { dirtyHistory = append(dirtyHistory, d) })
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if s.IsDirty() {
+		t.Errorf("freshly-opened session is dirty")
+	}
+
+	const newName = "___wc3-forge-test-name___"
+	if err := s.MutateInfo(func(info *w3i.Info) {
+		info.Name = newName
+	}); err != nil {
+		t.Fatalf("MutateInfo: %v", err)
+	}
+	if !s.IsDirty() {
+		t.Errorf("expected dirty after MutateInfo")
+	}
+
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if s.IsDirty() {
+		t.Errorf("expected clean after Save")
+	}
+
+	// Dirty history should have at least the rising + falling transitions.
+	if len(dirtyHistory) < 2 || !dirtyHistory[0] || dirtyHistory[len(dirtyHistory)-1] {
+		t.Errorf("expected dirty history starting true and ending false, got %v", dirtyHistory)
+	}
+
+	// Re-open and confirm the new name survived on disk.
+	s2 := &Session{}
+	if err := s2.Open(tmp); err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	if got := s2.Info().Name; got != newName {
+		t.Errorf("post-reopen Info.Name = %q, want %q", got, newName)
+	}
+}
+
+// TestMutateInfo_NoMapLoaded asserts MutateInfo surfaces a clear error
+// when no map is loaded (rather than panicking on the nil Info pointer).
+func TestMutateInfo_NoMapLoaded(t *testing.T) {
+	s := &Session{}
+	err := s.MutateInfo(func(info *w3i.Info) {
+		info.Name = "should not be called"
+	})
+	if err == nil {
+		t.Fatal("expected error from MutateInfo on unloaded session")
+	}
+}
+
+// TestApplyInfoUpdates_KnownKeys asserts the shared ApplyInfoUpdates walker
+// applies each documented key with the right type, ignores unknowns, and
+// returns the correct changed-field count for the MCP map.info_set response.
+func TestApplyInfoUpdates_KnownKeys(t *testing.T) {
+	info := &w3i.Info{}
+	updates := map[string]any{
+		"name":             "Test Name",
+		"author":           "Test Author",
+		"description":      "Test Description",
+		"suggestedPlayers": "2v2",
+		"lua":              true,
+		"unknown_field":    "ignored",
+		"name_typo_ish":    "also ignored",
+	}
+	changed := ApplyInfoUpdates(info, updates)
+	if changed != 5 {
+		t.Errorf("changed = %d, want 5 (5 known keys; 2 unknowns ignored)", changed)
+	}
+	if info.Name != "Test Name" {
+		t.Errorf("Name = %q", info.Name)
+	}
+	if info.Author != "Test Author" {
+		t.Errorf("Author = %q", info.Author)
+	}
+	if info.Description != "Test Description" {
+		t.Errorf("Description = %q", info.Description)
+	}
+	if info.SuggestedPlayers != "2v2" {
+		t.Errorf("SuggestedPlayers = %q", info.SuggestedPlayers)
+	}
+	if !info.Lua {
+		t.Errorf("Lua = %v, want true", info.Lua)
+	}
+}
+
+// TestApplyInfoUpdates_TypeMismatch asserts wrong-type values for known keys
+// are silently skipped (not counted in changed, not assigned). Matches the
+// permissive "make progress" contract documented on ApplyInfoUpdates.
+func TestApplyInfoUpdates_TypeMismatch(t *testing.T) {
+	info := &w3i.Info{Name: "original"}
+	updates := map[string]any{
+		"name": 42,     // wrong type — number for string field
+		"lua":  "true", // wrong type — string for bool field
+	}
+	changed := ApplyInfoUpdates(info, updates)
+	if changed != 0 {
+		t.Errorf("changed = %d, want 0 (both type-mismatched)", changed)
+	}
+	if info.Name != "original" {
+		t.Errorf("Name mutated under type mismatch: %q", info.Name)
 	}
 }
 

@@ -3,6 +3,7 @@
 import {main} from '../models';
 import {doodadsdoo} from '../models';
 import {unitsdoo} from '../models';
+import {w3i} from '../models';
 
 export function ClearSelection():Promise<main.SelectionDTO>;
 
@@ -35,6 +36,10 @@ export function ListDoodads():Promise<Array<main.DoodadDTO>>;
 export function ListUnits():Promise<Array<main.UnitDTO>>;
 
 export function LogJS(arg1:string):Promise<void>;
+
+export function MapInfoApply(arg1:Record<string, any>):Promise<void>;
+
+export function MapInfoGet():Promise<w3i.Info>;
 
 export function MoveDoodad(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
