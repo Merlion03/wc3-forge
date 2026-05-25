@@ -890,6 +890,63 @@ func (a *App) GetMapBytes() string {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
+// MinimapDTO carries the bytes of the loaded map's baked minimap image plus
+// a format hint so the JS-side decoder can dispatch correctly.
+//
+//   - Bytes    — base64-encoded raw image bytes (BLP1/BLP2/DDS/TGA)
+//   - Ext      — "blp" | "dds" | "tga" — matches the on-disk extension of the
+//                source file that was found. JS uses magic-byte sniffing for
+//                BLP/DDS dispatch (mirroring icon-loader.ts), so this is
+//                primarily a TGA-vs-image-formats discriminator.
+//   - Found    — true when a baked minimap image was located in the map. False
+//                + empty Bytes means the map ships no preview; UI should show
+//                a graceful "no minimap" placeholder.
+//
+// (Wails serializes []byte as base64; JS does atob+Uint8Array to recover.)
+type MinimapDTO struct {
+	Bytes string `json:"bytes"` // base64
+	Ext   string `json:"ext"`
+	Found bool   `json:"found"`
+}
+
+// GetMinimapBytes returns the baked minimap image embedded in the loaded map.
+// WC3 maps ship an author-drawn preview rather than a render of terrain —
+// HiveWE displays it verbatim and so do we (see project_wc3_forge memory).
+//
+// Source-file precedence — pick the first present:
+//  1. war3mapMap.blp     — Reforged-era; most common. BLP1 or BLP2.
+//  2. war3mapMap.dds     — HD Reforged variant; optional, larger.
+//  3. war3mapPreview.tga — legacy maps. TGA format; decoded JS-side.
+//
+// Returns (Found=false, "", "", nil) when no map is loaded OR the loaded map
+// has none of the three files (e.g. some test fixtures). Read errors propagate
+// — they're recoverable on the UI side (show placeholder + log).
+func (a *App) GetMinimapBytes() (MinimapDTO, error) {
+	candidates := []struct {
+		name string
+		ext  string
+	}{
+		{"war3mapMap.blp", "blp"},
+		{"war3mapMap.dds", "dds"},
+		{"war3mapPreview.tga", "tga"},
+	}
+	for _, c := range candidates {
+		b, ok, err := forge.Current.ReadFile(c.name)
+		if err != nil {
+			return MinimapDTO{}, fmt.Errorf("read %s: %w", c.name, err)
+		}
+		if !ok || len(b) == 0 {
+			continue
+		}
+		return MinimapDTO{
+			Bytes: base64.StdEncoding.EncodeToString(b),
+			Ext:   c.ext,
+			Found: true,
+		}, nil
+	}
+	return MinimapDTO{Found: false}, nil
+}
+
 // SetUnitAnimation is a dev-only hook for poking unit animations from the JS
 // devtools console (or any MCP client). Forwards (creationNumber, animName)
 // to the frontend via Wails event; the scene-instances renderer matches the

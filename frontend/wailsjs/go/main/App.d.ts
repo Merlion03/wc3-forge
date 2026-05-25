@@ -19,6 +19,8 @@ export function GetDoodadTypeIndex():Promise<Record<string, main.DoodadTypeInfo>
 
 export function GetMapBytes():Promise<string>;
 
+export function GetMinimapBytes():Promise<main.MinimapDTO>;
+
 export function GetPathingMap():Promise<main.PathingMapDTO>;
 
 export function GetReforgedMode():Promise<boolean>;
