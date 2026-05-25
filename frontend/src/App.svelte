@@ -16,7 +16,6 @@
     createScene,
     type SceneAPI, type PickHit, type SelectMode, type TerrainCellInfo,
   } from './scene-instances'
-  import Toast from './Toast.svelte'
   import Splitter from './Splitter.svelte'
   import Accordion from './Accordion.svelte'
   import ViewMenu from './ViewMenu.svelte'
@@ -25,7 +24,11 @@
   import { showToast } from './toast'
   import { loadIconURL } from './icon-loader'
   import { TEAM_COLORS_RGB } from './sloc-markers'
-  import { Button } from '$components/ui/button'
+  import { Button } from '$lib/components/ui/button'
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu'
+  import { Input } from '$lib/components/ui/input'
+  import { Toaster } from '$lib/components/ui/sonner'
+  import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
 
   // Wails drops struct typedefs from models.ts when they appear as map values,
   // so the unit/doodad type-index shapes are declared locally here. Must stay
@@ -122,20 +125,9 @@
   }
 
   // ----- File menu (header dropdown) -----
+  // Open/close + outside-click + Escape are owned by shadcn's DropdownMenu
+  // (bits-ui under the hood); we no longer hand-roll any of that.
   let fileMenuOpen: boolean = $state(false)
-  let fileMenuEl: HTMLDivElement | null = $state(null)
-  function toggleFileMenu() { fileMenuOpen = !fileMenuOpen }
-  function onDocClickForFileMenu(e: MouseEvent) {
-    if (!fileMenuOpen) return
-    if (fileMenuEl && fileMenuEl.contains(e.target as Node)) return
-    fileMenuOpen = false
-  }
-  function onDocKeyForFileMenu(e: KeyboardEvent) {
-    if (e.key === 'Escape' && fileMenuOpen) {
-      fileMenuOpen = false
-      e.stopPropagation()
-    }
-  }
   function runMenuAction(fn: () => unknown) {
     return () => {
       fileMenuOpen = false
@@ -177,8 +169,8 @@
     const v = sectionOpen[id]
     return v === undefined ? def : v
   }
-  function onSectionToggle(e: CustomEvent<{ id: string; open: boolean }>) {
-    sectionOpen = { ...sectionOpen, [e.detail.id]: e.detail.open }
+  function onSectionToggle(detail: { id: string; open: boolean }) {
+    sectionOpen = { ...sectionOpen, [detail.id]: detail.open }
   }
 
   const SEL_EVENT = 'wc3-forge:selection-changed'
@@ -299,8 +291,6 @@
     ingestSelection(sel)
     try { dirty = await IsDirty() } catch { dirty = false }
     window.addEventListener('keydown', onGlobalKeyDown)
-    document.addEventListener('mousedown', onDocClickForFileMenu, true)
-    document.addEventListener('keydown', onDocKeyForFileMenu)
     // Test-driver hook: receives commands from Go's App.EmitTestCommand so
     // verification automation can drive UI state without needing to simulate
     // clicks (WebView2 can drop synthetic input — see memory). Subscribed
@@ -488,8 +478,6 @@
     EventsOff(ENTITY_EVENT)
     EventsOff(DEV_ANIM_EVENT)
     window.removeEventListener('keydown', onGlobalKeyDown)
-    document.removeEventListener('mousedown', onDocClickForFileMenu, true)
-    document.removeEventListener('keydown', onDocKeyForFileMenu)
     scene?.dispose()
   })
 
@@ -543,8 +531,8 @@
     }
   }
 
-  function onViewToggle(e: CustomEvent<{ category: string; visible: boolean }>) {
-    const { category, visible } = e.detail
+  function onViewToggle(detail: { category: string; visible: boolean }) {
+    const { category, visible } = detail
     scene?.setDoodadCategoryVisible(category, visible)
     if (category === '*') {
       const next: Record<string, boolean> = {}
@@ -924,93 +912,100 @@
   });
 </script>
 
-<main>
-  <Button class="absolute top-1 left-1 z-50">shadcn live</Button>
-  <header>
-    <div class="file-menu" bind:this={fileMenuEl}>
-      <button class="file-btn"
-              class:open={fileMenuOpen}
-              onclick={toggleFileMenu}
-              aria-haspopup="menu"
-              aria-expanded={fileMenuOpen}
-              title="File menu">
-        File <span class="caret">▾</span>
-      </button>
-      {#if fileMenuOpen}
-        <div class="file-dropdown" role="menu">
-          <button class="file-item"
-                  role="menuitem"
-                  onclick={runMenuAction(pickAndOpen)}
-                  disabled={busy}>
-            <span class="file-item-label">Open Map…</span>
-          </button>
-          <button class="file-item"
-                  role="menuitem"
-                  onclick={runMenuAction(doSave)}
-                  disabled={!status.loaded || !dirty || saving}
-                  class:dirty
-                  title="Save pending edits (Ctrl+S).">
-            <span class="file-item-label">Save{dirty ? ' •' : ''}</span>
-            <span class="file-item-shortcut">Ctrl+S</span>
-          </button>
-          <div class="file-sep" role="separator"></div>
-          <button class="file-item"
-                  role="menuitem"
-                  onclick={runMenuAction(openMapInfoEditor)}
-                  disabled={!status.loaded}
-                  title="Edit map name, author, description, and other metadata.">
-            <span class="file-item-label">Map Info…</span>
-            <span class="file-item-shortcut">Ctrl+Shift+I</span>
-          </button>
-          <div class="file-sep" role="separator"></div>
-          <button class="file-item"
-                  role="menuitem"
-                  onclick={runMenuAction(close)}
-                  disabled={!status.loaded || busy}>
-            <span class="file-item-label">Close</span>
-          </button>
-        </div>
-      {/if}
-    </div>
+<main class="flex h-screen flex-col bg-background text-foreground">
+  <header class="flex h-11 flex-none items-center gap-1 border-b border-border bg-card px-2">
+    <DropdownMenu.Root bind:open={fileMenuOpen}>
+      <DropdownMenu.Trigger>
+        {#snippet child({ props })}
+          <Button {...props} variant="ghost" size="sm" title="File menu">
+            File
+            <ChevronDownIcon class="text-muted-foreground" />
+          </Button>
+        {/snippet}
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content class="min-w-[220px]" align="start">
+        <DropdownMenu.Item onSelect={runMenuAction(pickAndOpen)} disabled={busy}>
+          <span class="flex-1">Open Map…</span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Item
+          onSelect={runMenuAction(doSave)}
+          disabled={!status.loaded || !dirty || saving}
+          title="Save pending edits (Ctrl+S)."
+        >
+          <span class="flex-1 {dirty ? 'text-amber-400' : ''}">Save{dirty ? ' •' : ''}</span>
+          <DropdownMenu.Shortcut>Ctrl+S</DropdownMenu.Shortcut>
+        </DropdownMenu.Item>
+        <DropdownMenu.Separator />
+        <DropdownMenu.Item
+          onSelect={runMenuAction(openMapInfoEditor)}
+          disabled={!status.loaded}
+          title="Edit map name, author, description, and other metadata."
+        >
+          <span class="flex-1">Map Info…</span>
+          <DropdownMenu.Shortcut>Ctrl+Shift+I</DropdownMenu.Shortcut>
+        </DropdownMenu.Item>
+        <DropdownMenu.Separator />
+        <DropdownMenu.Item onSelect={runMenuAction(close)} disabled={!status.loaded || busy}>
+          <span class="flex-1">Close</span>
+        </DropdownMenu.Item>
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
+
     <ViewMenu categories={doodadCategoriesPresent}
               visibility={doodadVisibility}
-              on:toggle={onViewToggle} />
-    <div class="status-strip">
+              onToggle={onViewToggle} />
+
+    <div class="flex-1 truncate text-xs text-muted-foreground">
       {#if status.loaded}
-        <span class="map-name">{status.name || '(untitled)'}</span>
-        <span class="sep">·</span>
-        <span class="map-count">{status.unit_count} entities</span>
+        <span class="font-medium text-foreground">{status.name || '(untitled)'}</span>
+        <span class="mx-2 text-border">·</span>
+        <span>{status.unit_count} entities</span>
       {/if}
     </div>
-    <div class="actions">
-      <button onclick={toggleTerrainPickMode}
-              class="mode-state"
-              class:terrain={terrainPickModeOn}
-              class:doodad={!terrainPickModeOn}
-              title={terrainPickModeOn
-                ? 'Terrain mode active — clicking a cell shows its data. Click to switch to Doodad mode.'
-                : 'Doodad mode active — clicking selects entities. Click to switch to Terrain mode.'}>
+
+    <div class="flex items-center gap-1.5">
+      <Button
+        size="sm"
+        variant={terrainPickModeOn ? 'default' : 'secondary'}
+        class={terrainPickModeOn
+          ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+          : 'bg-blue-600 text-white hover:bg-blue-700'}
+        onclick={toggleTerrainPickMode}
+        title={terrainPickModeOn
+          ? 'Terrain mode active — clicking a cell shows its data. Click to switch to Doodad mode.'
+          : 'Doodad mode active — clicking selects entities. Click to switch to Terrain mode.'}
+      >
         {terrainPickModeOn ? 'Terrain Mode' : 'Doodad Mode'}
-      </button>
-      <button onclick={togglePathing}
-              class="mode-toggle"
-              class:on={pathingVisible}
-              title="Toggle the static pathing-map overlay (red=unwalkable, blue=unflyable, yellow=unbuildable).">
+      </Button>
+      <Button
+        size="sm"
+        variant={pathingVisible ? 'default' : 'secondary'}
+        class={pathingVisible ? 'bg-emerald-700 text-white hover:bg-emerald-800' : ''}
+        onclick={togglePathing}
+        title="Toggle the static pathing-map overlay (red=unwalkable, blue=unflyable, yellow=unbuildable)."
+      >
         Pathing{pathingVisible ? ' ✓' : ''}
-      </button>
-      <button onclick={toggleReforged} disabled={busy}
-              class="mode-toggle"
-              class:on={reforged}
-              title="Toggle Reforged graphics. Reloads the current map without resetting the camera.">
+      </Button>
+      <Button
+        size="sm"
+        variant={reforged ? 'default' : 'secondary'}
+        class={reforged ? 'bg-emerald-700 text-white hover:bg-emerald-800' : ''}
+        onclick={toggleReforged}
+        disabled={busy}
+        title="Toggle Reforged graphics. Reloads the current map without resetting the camera."
+      >
         Reforged Graphics{reforged ? ' ✓' : ''}
-      </button>
-      <span class="header-divider" aria-hidden="true"></span>
-      <button onclick={launchTestMap}
-              disabled={testMapDisabled}
-              class="test-map"
-              title={testMapTooltip}>
+      </Button>
+      <span class="mx-1 inline-block h-5 w-px bg-border" aria-hidden="true"></span>
+      <Button
+        size="sm"
+        onclick={launchTestMap}
+        disabled={testMapDisabled}
+        class="bg-emerald-600 font-semibold text-white hover:bg-emerald-700 disabled:bg-muted disabled:text-muted-foreground"
+        title={testMapTooltip}
+      >
         ▶ Test Map
-      </button>
+      </Button>
     </div>
   </header>
 
@@ -1018,14 +1013,14 @@
 
   <!-- 2-column layout: viewport (left/center, big) + right column (Explorer
        stacked above Properties with vertical splitter between).
-       Default: 65/35 vertical split between viewport and right column. -->
-  <div class="split">
+       Right column is fixed-width; viewport gets all remaining space. -->
+  <div class="grid min-h-0 flex-1" style="grid-template-columns: 1fr 340px;">
     <section class="viewport">
       <canvas bind:this={canvas}></canvas>
     </section>
 
-    <div class="right-col" bind:this={rightColEl}>
-      <aside class="panel explorer"
+    <div class="flex min-h-0 flex-col bg-card" bind:this={rightColEl}>
+      <aside class="flex min-h-0 flex-none flex-col overflow-hidden border-b border-border"
              style="flex: 0 0 {rightExplorerPct}%;">
         <header class="panel-header">Explorer</header>
         <div class="panel-body">
@@ -1037,9 +1032,8 @@
                  sections on first render; user toggles persist for session. -->
             {#each groups as g (g.id)}
               <Accordion id={g.id} label={g.label} open={isOpen(g.id, true)}
-                         on:toggle={onSectionToggle}>
-                <!-- @migration-task: migrate this slot by hand, `header-extras` is an invalid identifier -->
-  <span slot="header-extras">{g.entries.length}</span>
+                         onToggle={onSectionToggle}>
+                {#snippet headerExtras()}{g.entries.length}{/snippet}
                 <ul class="explorer-list">
                   {#each g.entries as u (u.creation_number)}
                     <li class:selected={selectedIds.has(u.creation_number)}
@@ -1073,15 +1067,13 @@
             {/each}
             {#if doodadCount > 0}
               <Accordion id="doodads" label="Doodads" open={isOpen('doodads', true)}
-                         on:toggle={onSectionToggle}>
-                <!-- @migration-task: migrate this slot by hand, `header-extras` is an invalid identifier -->
-  <span slot="header-extras">{doodadCount}</span>
+                         onToggle={onSectionToggle}>
+                {#snippet headerExtras()}{doodadCount}{/snippet}
                 <div class="doodad-subs">
                   {#each doodadGroups as dg (dg.id)}
                     <Accordion id={dg.id} label={dg.label} open={isOpen(dg.id, true)}
-                               on:toggle={onSectionToggle}>
-                      <!-- @migration-task: migrate this slot by hand, `header-extras` is an invalid identifier -->
-  <span slot="header-extras">{dg.entries.length}</span>
+                               onToggle={onSectionToggle}>
+                      {#snippet headerExtras()}{dg.entries.length}{/snippet}
                       <ul class="explorer-list">
                         {#each dg.entries as d (d.creation_number)}
                           <li class:selected={selectedDoodadIds.has(d.creation_number)}
@@ -1113,12 +1105,12 @@
 
       <Splitter onDrag={onRightSplitterDrag} />
 
-      <aside class="panel properties">
+      <aside class="flex min-h-0 flex-1 flex-col overflow-hidden">
         <header class="panel-header">Properties</header>
         <div class="panel-body">
         {#if previewModelPath}
           <Accordion id="p:preview" label="Preview" open={isOpen('p:preview', true)}
-                     on:toggle={onSectionToggle}>
+                     onToggle={onSectionToggle}>
             <AssetPreview modelPath={previewModelPath}
                           modelPathFallbacks={previewModelFallbacks}
                           {reforged}
@@ -1130,7 +1122,7 @@
                an entity selection (user can keep a unit selected and inspect
                cells alongside). Default open whenever a cell exists. -->
           <Accordion id="p:cell" label="Terrain Cell" open={isOpen('p:cell', true)}
-                     on:toggle={onSectionToggle}>
+                     onToggle={onSectionToggle}>
             <dl class="props">
               <dt>Cell</dt>                <dd class="mono">({terrainCell.col}, {terrainCell.row})</dd>
               <dt>World XY</dt>            <dd class="mono">({fmt(terrainCell.worldX)}, {fmt(terrainCell.worldY)})</dd>
@@ -1153,7 +1145,7 @@
         {#if primaryDoodad}
           {@const d = primaryDoodad}
           <Accordion id="p:identity" label="Identity" open={isOpen('p:identity', true)}
-                     on:toggle={onSectionToggle}>
+                     onToggle={onSectionToggle}>
             <div class="identity">
               {#await loadIconURL(doodadIconPath(d)) then iconURL}
                 {#if iconURL}
@@ -1175,7 +1167,7 @@
             </div>
           </Accordion>
           <Accordion id="p:transform" label="Transform" open={isOpen('p:transform', true)}
-                     on:toggle={onSectionToggle}>
+                     onToggle={onSectionToggle}>
             <dl class="props">
               {#if singlePositionEditable}
                 <dt>Position</dt>
@@ -1203,7 +1195,7 @@
           </Accordion>
           {#if d.life !== 0xFF}
             <Accordion id="p:destructible" label="Destructible" open={isOpen('p:destructible', true)}
-                       on:toggle={onSectionToggle}>
+                       onToggle={onSectionToggle}>
               <dl class="props">
                 <dt>Life %</dt>           <dd>{d.life}%</dd>
               </dl>
@@ -1222,7 +1214,7 @@
         {:else}
           {@const e = primaryEntity}
           <Accordion id="p:identity" label="Identity" open={isOpen('p:identity', true)}
-                     on:toggle={onSectionToggle}>
+                     onToggle={onSectionToggle}>
             <div class="identity">
               {#if e.TypeID === 'sloc'}
                 <!-- Slocs have no command-button icon — use the team-color
@@ -1260,7 +1252,7 @@
             </div>
           </Accordion>
           <Accordion id="p:transform" label="Transform" open={isOpen('p:transform', true)}
-                     on:toggle={onSectionToggle}>
+                     onToggle={onSectionToggle}>
             <dl class="props">
               {#if singlePositionEditable}
                 <dt>Position</dt>
@@ -1287,7 +1279,7 @@
             </dl>
           </Accordion>
           <Accordion id="p:status" label="Status" open={isOpen('p:status', true)}
-                     on:toggle={onSectionToggle}>
+                     onToggle={onSectionToggle}>
             <dl class="props">
               <dt>HP %</dt>               <dd>{e.HitPointsPct < 0 ? 'default' : e.HitPointsPct + '%'}</dd>
               <dt>Mana %</dt>             <dd>{e.ManaPct < 0 ? 'default' : e.ManaPct + '%'}</dd>
@@ -1301,7 +1293,7 @@
           </Accordion>
           {#if isHero(e)}
             <Accordion id="p:hero" label="Hero" open={isOpen('p:hero', true)}
-                       on:toggle={onSectionToggle}>
+                       onToggle={onSectionToggle}>
               <dl class="props">
                 <dt>Level</dt>            <dd>{e.HeroLevel || 1}</dd>
                 {#if e.HeroStr > 0 || e.HeroAgi > 0 || e.HeroInt > 0}
@@ -1312,7 +1304,7 @@
           {/if}
           {#if e.Inventory && e.Inventory.length > 0}
             <Accordion id="p:inventory" label="Inventory" open={isOpen('p:inventory', true)}
-                       on:toggle={onSectionToggle}>
+                       onToggle={onSectionToggle}>
               <dl class="props">
                 {#each e.Inventory as slot}
                   <dt>Slot {slot.Slot}</dt><dd class="mono">{slot.ItemID}</dd>
@@ -1322,7 +1314,7 @@
           {/if}
           {#if e.ItemDrops && e.ItemDrops.length > 0}
             <Accordion id="p:drops" label="Item Drops" open={isOpen('p:drops', true)}
-                       on:toggle={onSectionToggle}>
+                       onToggle={onSectionToggle}>
               <dl class="props">
                 {#each e.ItemDrops as drop}
                   <dt class="mono">{drop.ItemID}</dt><dd>{drop.Chance}%</dd>
@@ -1332,7 +1324,7 @@
           {/if}
           {#if e.AbilityModifications && e.AbilityModifications.length > 0}
             <Accordion id="p:abilities" label="Abilities" open={isOpen('p:abilities', true)}
-                       on:toggle={onSectionToggle}>
+                       onToggle={onSectionToggle}>
               <dl class="props">
                 {#each e.AbilityModifications as ab}
                   <dt class="mono">{ab.AbilityID}</dt>
@@ -1348,10 +1340,10 @@
   </div>
 
   {#if showMapInfoEditor}
-    <MapInfoEditor open={showMapInfoEditor} on:close={closeMapInfoEditor} />
+    <MapInfoEditor bind:open={showMapInfoEditor} onClose={closeMapInfoEditor} />
   {/if}
 
-  <Toast />
+  <Toaster />
 </main>
 
 <style>
@@ -1359,131 +1351,20 @@
     margin: 0;
     background: #121214;
     color: #d4d4d8;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-size: 13px;
     overflow: hidden;
   }
   :global(html), :global(body), main { height: 100vh; }
-  main { display: flex; flex-direction: column; }
 
-  header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 18px;
-    border-bottom: 1px solid #2a2a30;
-    background: #18181b;
-    flex: 0 0 auto;
-  }
-  .status-strip { flex: 1 1 auto; color: #a1a1aa; font-size: 12px; }
-  .map-name { color: #e4e4e7; font-weight: 500; }
-  .map-count { color: #71717a; }
-  .sep { color: #52525b; margin: 0 8px; }
-  .actions { display: flex; gap: 6px; align-items: center; }
-
-  button {
-    background: #2563eb; color: white; border: 0; padding: 5px 12px;
-    font-size: 12px; border-radius: 4px; cursor: pointer;
-  }
-  button:hover:not(:disabled) { background: #1d4ed8; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  button.mode-toggle {
-    background: #3f3f46; font-weight: 500;
-  }
-  button.mode-toggle:hover:not(:disabled) { background: #52525b; }
-  button.mode-toggle.on { background: #15803d; }
-  button.mode-toggle.on:hover:not(:disabled) { background: #166534; }
-  /* 2-state mode selector: always displays the CURRENT mode (Doodad blue, or
-     Terrain green). Click toggles. Visual style mirrors the other header
-     buttons — same padding, font, border radius — but the background carries
-     a stable color cue so the user can tell at a glance which mode is on
-     without having to read the label. */
-  button.mode-state { font-weight: 500; }
-  button.mode-state.doodad { background: #2563eb; }
-  button.mode-state.doodad:hover:not(:disabled) { background: #1d4ed8; }
-  button.mode-state.terrain { background: #16a34a; }
-  button.mode-state.terrain:hover:not(:disabled) { background: #15803d; }
-
-  /* Header divider: thin vertical rule that separates the secondary mode
-     toggles from the primary Test Map action button, signalling the visual
-     hierarchy (mode toggles are state-y, the right side is the do-thing).
-     Height + color tuned to the existing header section borders. */
-  .header-divider {
-    display: inline-block;
-    width: 1px; height: 22px;
-    background: #3f3f46;
-    margin: 0 4px;
-  }
-
-  /* Primary action button: filled green, distinct from the dark secondary
-     mode-toggles + the dialogs' blue. Mirrors the on-state color of the
-     mode-toggle (#15803d hover, #16a34a base) so it visually echoes "go"
-     across the header. The leading ▶ play glyph reinforces the action. */
-  button.test-map {
-    background: #16a34a; font-weight: 600;
-    padding: 5px 14px;
-  }
-  button.test-map:hover:not(:disabled) { background: #15803d; }
-  button.test-map:disabled {
-    /* Override the global button:disabled opacity:0.5 to a dimmer-but-still-
-       readable neutral. Active green at 50% opacity reads as "muted active"
-       which is misleading; a flat dark fill reads correctly as "off". */
-    background: #27272a; color: #71717a; opacity: 1; cursor: not-allowed;
-  }
-
-  .file-menu { position: relative; }
-  button.file-btn {
-    background: transparent; color: #d4d4d8; font-weight: 500;
-    padding: 5px 10px; border: 1px solid transparent; border-radius: 3px;
-    display: inline-flex; align-items: center; gap: 4px;
-  }
-  button.file-btn:hover:not(:disabled),
-  button.file-btn.open { background: #27272a; }
-  .file-btn .caret { color: #71717a; font-size: 10px; }
-  .file-dropdown {
-    position: absolute; top: calc(100% + 4px); left: 0;
-    min-width: 220px; z-index: 100;
-    background: #18181b; border: 1px solid #27272a;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-    display: flex; flex-direction: column; padding: 4px 0;
-  }
-  button.file-item {
-    background: transparent; color: #e4e4e7;
-    border: 0; border-radius: 0;
-    padding: 6px 14px; font-size: 12px; font-weight: 400;
-    text-align: left; cursor: pointer;
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 16px;
-  }
-  button.file-item:hover:not(:disabled) { background: #27272a; color: #fff; }
-  button.file-item:disabled { color: #52525b; cursor: not-allowed; opacity: 1; }
-  button.file-item.dirty .file-item-label { color: #fbbf24; }
-  .file-item-shortcut { color: #71717a; font-size: 11px; font-family: 'Cascadia Mono', Consolas, monospace; }
-  button.file-item:disabled .file-item-shortcut { color: #3f3f46; }
-  .file-sep { height: 1px; background: #27272a; margin: 4px 0; }
+  .viewport { position: relative; min-width: 0; min-height: 0; border-right: 1px solid #2a2a30; }
+  canvas { display: block; width: 100%; height: 100%; }
 
   .error { background: #7f1d1d; color: #fecaca; padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; max-height: 200px; overflow: auto; }
   .error pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 
-  /* 2-column layout: viewport claims left/center, right column claims right.
-     The right column is fixed-width (340px); viewport gets all remaining
-     horizontal space — significantly more than the prior 3-column model. */
-  .split { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
-  .viewport { position: relative; min-width: 0; min-height: 0; border-right: 1px solid #2a2a30; }
-  canvas { display: block; width: 100%; height: 100%; }
-
-  /* Right column: Explorer (top) + Splitter + Properties (bottom).
-     Splitter drags update rightExplorerPct so the Explorer's flex-basis
-     adjusts; Properties absorbs the rest via flex: 1 1 auto. */
-  .right-col {
-    display: flex; flex-direction: column; min-height: 0;
-    background: #161618;
-  }
-  .panel { background: #161618; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-  .panel.explorer {
-    border-bottom: 1px solid #2a2a30;
-  }
-  .panel.properties { flex: 1 1 auto; }
+  /* Explorer / Properties panel header strip: tight all-caps label above each
+     panel body. Tailwind utilities on the parent <aside> handle the panel
+     chrome; this just styles the inner title bar. */
   .panel-header {
     padding: 8px 14px; font-size: 10px; font-weight: 600; color: #a1a1aa;
     text-transform: uppercase; letter-spacing: 0.08em;
