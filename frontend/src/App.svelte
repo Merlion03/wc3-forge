@@ -368,7 +368,13 @@
     // (when set). Null cell = click missed the map; we keep the previous
     // cell info around so the user can still inspect what they last picked
     // until they pick another cell.
-    if (cell) terrainCell = cell
+    if (cell) {
+      terrainCell = cell
+      // Mirror the pick to the 3D viewport so the user can SEE which cell
+      // the panel data refers to. Persists until replaced or the mode toggles
+      // off (see toggleTerrainPickMode).
+      scene?.setHighlightedCell({ col: cell.col, row: cell.row })
+    }
   }
 
   function composeSelection(
@@ -438,8 +444,11 @@
     // placeDoodad). The View menu shows ONLY categories present in the map.
     doodadCategoriesPresent = scene?.getDoodadCategories() ?? []
     // Drop terrain-cell info for a new map — the old (col, row) refers to
-    // a map that's no longer loaded.
+    // a map that's no longer loaded. Scene-side highlight is also cleared via
+    // loadMap's internal setCell(null) (see scene-instances.ts), but call
+    // explicitly so a keep-camera reload also clears the stale wireframe.
     terrainCell = null
+    scene?.setHighlightedCell(null)
     const apply = (window as any).__applyStartupCamera
     if (typeof apply === 'function') apply()
   }
@@ -452,7 +461,13 @@
   function toggleTerrainPickMode() {
     terrainPickModeOn = !terrainPickModeOn
     scene?.setTerrainPickMode(terrainPickModeOn)
-    if (!terrainPickModeOn) terrainCell = null
+    if (!terrainPickModeOn) {
+      terrainCell = null
+      // Drop the yellow wireframe overlay when leaving terrain mode — the
+      // user has switched to doodad mode and the persistent highlight would
+      // otherwise sit at a cell they're no longer working with.
+      scene?.setHighlightedCell(null)
+    }
   }
 
   function onViewToggle(e: CustomEvent<{ category: string; visible: boolean }>) {
@@ -608,20 +623,36 @@
   //   - Append .mdx if no extension declared.
   //   - For multi-variant doodads (num_var > 1), use the doodad's variation
   //     index as a suffix (ATtr0.mdx etc.). Single-variant doodads use the
-  //     unsuffixed path. (The preview takes one path; if it 404s the lib
-  //     surfaces the error in the preview's own error band.)
+  //     unsuffixed path.
+  //   - Returns a PRIMARY path + ordered FALLBACK list. The AssetPreview
+  //     walks them in order until one loads — same as placeDoodad's variant
+  //     → unsuffixed → other-extension chain in scene-instances.ts. Without
+  //     the fallbacks, doodad rows whose SLK declares N variants but whose
+  //     CASC ships only the unsuffixed file (e.g. "Statue 1" on Enfo's FFB
+  //     → ANst.mdx exists, ANst1.mdx 404s) surface as "load failed".
   // Slocs (type_id === 'sloc') intentionally return null — they're editor-
   // only markers with no model file.
   function mdxPathFor(file: string): string {
     if (/\.(mdl|mdx)$/i.test(file)) return file
     return file + '.mdx'
   }
-  $: previewModelPath = (() => {
+  interface PreviewPaths {
+    primary: string
+    fallbacks: string[]
+  }
+  $: previewPaths = ((): PreviewPaths | null => {
     if (primaryEntity) {
       if (primaryEntity.TypeID === 'sloc') return null
       const info = unitTypes[primaryEntity.TypeID]
       if (!info || !info.file) return null
-      return mdxPathFor(info.file)
+      const extMatch = info.file.match(/\.(mdl|mdx)$/i)
+      const declaredExt = extMatch ? extMatch[0] : '.mdx'
+      const stem = extMatch ? info.file.slice(0, -extMatch[0].length) : info.file
+      const otherExt = declaredExt.toLowerCase() === '.mdx' ? '.mdl' : '.mdx'
+      return {
+        primary: mdxPathFor(info.file),
+        fallbacks: [stem + otherExt],
+      }
     }
     if (primaryDoodad) {
       const info = doodadTypes[primaryDoodad.type_id]
@@ -629,14 +660,30 @@
       const extMatch = info.file.match(/\.(mdl|mdx)$/i)
       const declaredExt = extMatch ? extMatch[0] : '.mdx'
       const stem = extMatch ? info.file.slice(0, -extMatch[0].length) : info.file
+      const otherExt = declaredExt.toLowerCase() === '.mdx' ? '.mdl' : '.mdx'
+      let primary: string
+      const fallbacks: string[] = []
       if (info.num_var > 1) {
         const variantIdx = Math.min(Math.max(0, primaryDoodad.variation), info.num_var - 1)
-        return stem + variantIdx + declaredExt
+        primary = stem + variantIdx + declaredExt
+        // unsuffixed with declared extension — covers SLK-declares-N-but-
+        // only-the-base-file-shipped cases (Statue 1).
+        fallbacks.push(stem + declaredExt)
+        // unsuffixed with the OTHER extension — custom maps often declare
+        // .mdl but ship .mdx (or vice versa).
+        fallbacks.push(stem + otherExt)
+        // last resort: variant + other extension
+        fallbacks.push(stem + variantIdx + otherExt)
+      } else {
+        primary = stem + declaredExt
+        fallbacks.push(stem + otherExt)
       }
-      return stem + declaredExt
+      return { primary, fallbacks }
     }
     return null
   })()
+  $: previewModelPath = previewPaths?.primary ?? null
+  $: previewModelFallbacks = previewPaths?.fallbacks ?? []
 
   function fmt(n: number, decimals: number = 0): string {
     return n.toFixed(decimals)
@@ -793,10 +840,13 @@
     </div>
     <div class="actions">
       <button on:click={toggleTerrainPickMode}
-              class="mode-toggle"
-              class:on={terrainPickModeOn}
-              title="Pick terrain cells. Click a cell in the viewport to see its data in the Properties panel.">
-        Pick Terrain{terrainPickModeOn ? ' ✓' : ''}
+              class="mode-state"
+              class:terrain={terrainPickModeOn}
+              class:doodad={!terrainPickModeOn}
+              title={terrainPickModeOn
+                ? 'Terrain mode active — clicking a cell shows its data. Click to switch to Doodad mode.'
+                : 'Doodad mode active — clicking selects entities. Click to switch to Terrain mode.'}>
+        {terrainPickModeOn ? 'Terrain Mode' : 'Doodad Mode'}
       </button>
       <button on:click={togglePathing}
               class="mode-toggle"
@@ -892,7 +942,9 @@
         {#if previewModelPath}
           <Accordion id="p:preview" label="Preview" open={isOpen('p:preview', true)}
                      on:toggle={onSectionToggle}>
-            <AssetPreview modelPath={previewModelPath} {reforged}
+            <AssetPreview modelPath={previewModelPath}
+                          modelPathFallbacks={previewModelFallbacks}
+                          {reforged}
                           teamColor={primaryEntity ? primaryEntity.Player : 0} />
           </Accordion>
         {/if}
@@ -1124,6 +1176,16 @@
   button.mode-toggle:hover:not(:disabled) { background: #52525b; }
   button.mode-toggle.on { background: #15803d; }
   button.mode-toggle.on:hover:not(:disabled) { background: #166534; }
+  /* 2-state mode selector: always displays the CURRENT mode (Doodad blue, or
+     Terrain green). Click toggles. Visual style mirrors the other header
+     buttons — same padding, font, border radius — but the background carries
+     a stable color cue so the user can tell at a glance which mode is on
+     without having to read the label. */
+  button.mode-state { font-weight: 500; }
+  button.mode-state.doodad { background: #2563eb; }
+  button.mode-state.doodad:hover:not(:disabled) { background: #1d4ed8; }
+  button.mode-state.terrain { background: #16a34a; }
+  button.mode-state.terrain:hover:not(:disabled) { background: #15803d; }
 
   .file-menu { position: relative; }
   button.file-btn {

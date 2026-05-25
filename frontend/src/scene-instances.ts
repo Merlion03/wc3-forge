@@ -43,6 +43,7 @@ import { computeCliffPlacements, renderCliffs, type CliffRendering } from './cli
 import {
   buildSlocRenderer, type SlocRenderer, type SlocMarker,
 } from './sloc-markers'
+import { buildCellHighlight, type CellHighlight } from './cell-highlight'
 
 // Apply the MDX parser patch BEFORE any viewer code touches the library — the
 // lib's MdxModel constructor parses on construction, and the patch fixes a
@@ -356,6 +357,15 @@ export interface SceneAPI {
    */
   onTerrainPick(cb: TerrainPickCallback): void
   /**
+   * Set the currently-highlighted terrain cell (yellow wireframe overlay).
+   * `null` clears the highlight. The cell persists across frames until
+   * replaced or cleared — caller controls when to drop it (e.g. on map open
+   * or explicit Escape). Persistence here matches the Properties-panel
+   * convention: the panel keeps the last-picked cell info around so the user
+   * can compare cells, and the highlight does the same.
+   */
+  setHighlightedCell(cell: { col: number; row: number } | null): void
+  /**
    * Hide or show every doodad instance in a category. Pass "*" to affect
    * every doodad. Visibility is rendering-only — the underlying data is
    * unchanged, never persisted. Re-applied on every loadMap so hidden
@@ -523,6 +533,15 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   } catch (e) {
     flog('[slocs] init failed:', e instanceof Error ? e.message : String(e))
   }
+  // Cell-highlight overlay (yellow wireframe quad at the currently-picked
+  // terrain cell). Built once per scene; the cell + terrain references are
+  // updated via setHighlightedCell / loadMap. Non-fatal if build fails.
+  let cellHighlight: CellHighlight | null = null
+  try {
+    cellHighlight = buildCellHighlight((viewer as any).gl as WebGLRenderingContext)
+  } catch (e) {
+    flog('[cell-highlight] init failed:', e instanceof Error ? e.message : String(e))
+  }
   // Background color (used by our own clear call now that scene.alpha=true).
   const bg = [0.07, 0.07, 0.09]
   // Real-dt tracking for viewer.update(). Mdx-m3-viewer's contract is that
@@ -626,6 +645,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // of terrain + cliffs + opaque model passes. The lib's translucent
         // pass already ran inside viewer.render(); water sits above that.
         if (water) water.draw(scene.camera.viewProjectionMatrix)
+        // Cell-highlight overlay (yellow wireframe quad for picked cell).
+        // Drawn LAST so the wireframe sits visually on top of every other
+        // layer including water. The shader disables depth-test for the
+        // same reason — the user wants the highlight always-visible, not
+        // buried under a translucent surface.
+        if (cellHighlight) cellHighlight.draw(scene.camera.viewProjectionMatrix)
       } catch (e) {
         crashed = true
         flog('[render-loop crash]', e instanceof Error ? e.stack : String(e))
@@ -1460,6 +1485,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // Cache for the terrain-pick path — picker reads cell data straight
         // from this without a Go round-trip per click.
         cachedTerrainDTO = t
+        // Hand the same DTO to the cell-highlight overlay (reads per-corner Z
+        // and the center_offset to position the wireframe at the right cell).
+        // Also clear any stale cell highlight from a prior map — the (col,
+        // row) it referred to may no longer exist on the new grid.
+        if (cellHighlight) {
+          cellHighlight.setTerrain(t as unknown as any)
+          cellHighlight.setCell(null)
+        }
         const gl = (viewer as any).gl as WebGLRenderingContext
         terrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
         if (terrain && !keepCamera) {
@@ -1654,6 +1687,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         slocRenderer.dispose()
         slocRenderer = null
       }
+      if (cellHighlight) {
+        cellHighlight.dispose()
+        cellHighlight = null
+      }
     },
     setSelected(units: Set<number>, doodads: Set<number>) {
       // Units: clear tint on no-longer-selected, paint tint on newly-selected.
@@ -1766,6 +1803,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     isTerrainPickMode() { return terrainPickMode },
     onTerrainPick(cb: TerrainPickCallback) {
       terrainPickCallback = cb
+    },
+    setHighlightedCell(cell: { col: number; row: number } | null) {
+      cellHighlight?.setCell(cell)
     },
     setDoodadCategoryVisible(category: string, visible: boolean) {
       // "*" affects every category. Walk the per-instance category map and
