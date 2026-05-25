@@ -1914,13 +1914,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       // ray-pick AABB walker can route selection through the same path
       // unit / doodad picks use.
       const pathBlockerMarkers: PathBlockerMarker[] = []
-      // Per-instance scale for path-blocker overlay sizing. Doodad scale[0]
-      // is the X-axis scale stored in war3map.doo (parsed and /128'd by the
-      // Go side); multiplying our default 64-stud half-extent by it lets a
-      // map author scale a blocker up to cover a larger pathing footprint
-      // and have the overlay grow to match. SLK base scale (defScale) also
-      // multiplies in — same as how placeDoodad combines uniformScale.
-      const blockerHalf = (s: number, baseScale: number) => 64 * (s || 1) * (baseScale || 1)
+      // Per-instance scale for path-blocker box sizing. Doodad scale[0] is
+      // the X-axis scale stored in war3map.doo (parsed and /128'd by the Go
+      // side); multiplying our default 32-stud half-extent by it lets a map
+      // author scale a blocker up to cover a larger pathing footprint and
+      // have the box grow to match. SLK base scale (defScale) also multiplies
+      // in — same as how placeDoodad combines uniformScale. The 32-stud
+      // default = 64-stud side = 1/4 the area of one 128-stud terrain tile,
+      // matching the user-spec "1/4 square unit of tile size" — large enough
+      // to spot at any zoom, small enough to not cover adjacent doodads.
+      const blockerHalf = (s: number, baseScale: number) => 32 * (s || 1) * (baseScale || 1)
       for (const d of doodads) {
         if (d.position[0] < xmin) xmin = d.position[0]
         if (d.position[0] > xmax) xmax = d.position[0]
