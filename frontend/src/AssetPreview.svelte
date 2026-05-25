@@ -18,6 +18,15 @@
   /** Team-color index for setTeamColor on the loaded instance. Defaults to 0
    *  (red) — pass the unit's player for an accurate preview. Doodads ignore. */
   export let teamColor: number = 0
+  /**
+   * Optional fallback paths the loader tries when `modelPath` fails (load
+   * error or 404). Mirrors placeDoodad's variant → unsuffixed → other-extension
+   * chain from scene-instances.ts. The Properties panel passes the variant-
+   * suffixed path as `modelPath` and the unsuffixed stem + .mdl as fallbacks;
+   * that's the shape that catches custom "Statue 1"-style doodad rows whose
+   * SLK declares N variants but only the unsuffixed file ships in CASC.
+   */
+  export let modelPathFallbacks: string[] = []
 
   const MV: any = (MV_ns as any).default ?? MV_ns
   patchMdxParser() // idempotent guard inside
@@ -34,6 +43,16 @@
   let loadToken = 0
   let error = ''
   let currentReforged = reforged
+  // Real-dt tracking for viewer.update(). Mirrors the main scene's tick logic
+  // (scene-instances.ts) — mdx-m3-viewer's `update(dt)` wants MILLISECONDS
+  // elapsed since last update, but viewer.updateAndRender's DEFAULT is a
+  // hardcoded `1000/60` (= 16.67ms). On a high-refresh display (120/144/240Hz)
+  // RAF fires 2-4× per logical 60Hz frame, but the hardcoded dt still advances
+  // animations as if a full 60Hz frame had passed — so WC3 stand cycles play
+  // 2-4× too fast. Tracking real elapsed time and clamping to 250ms mirrors
+  // HiveWE's `std::clamp(delta, 0.0, 0.5)` on the seconds path.
+  let lastFrameTs = performance.now()
+  const MAX_DT_MS = 250
 
   // Orbit state. yaw/pitch are spherical around the model center; distance is
   // the orbit radius. Defaults chosen for a 3/4 hero-pose framing — slightly
@@ -45,10 +64,13 @@
   let distance = 400
 
   function fitDistanceToModel(): number {
-    // 2.4× radius gives a comfortable framing with margin. FOV is PI/3 (60°);
-    // tan(FOV/2) ≈ 0.577 → distance = radius / 0.577 ≈ 1.73·radius just fills
-    // the viewport; 2.4× leaves ~28% padding.
-    return Math.max(120, modelRadius * 2.4)
+    // 1.6× radius pulls the model in close enough to fill the preview canvas.
+    // FOV is PI/3 (60°); tan(FOV/2) ≈ 0.577 → distance = radius / 0.577 ≈
+    // 1.73·radius JUST fills the viewport at the bounds equator. 1.6× sits
+    // slightly inside that, so the sphere extends a hair past the canvas
+    // edges — gives the model real presence without clipping the silhouette.
+    // (Previous 2.4× left the model floating in a sea of dark gray.)
+    return Math.max(80, modelRadius * 1.6)
   }
 
   function sizeToBox() {
@@ -84,7 +106,16 @@
     if (disposed || !viewer) return
     sizeToBox()
     applyCamera()
-    try { viewer.updateAndRender() } catch (e) {
+    // Pass REAL elapsed ms, not the lib's default 16.67ms — otherwise
+    // animations play 2-4× too fast on 120-240Hz monitors. Same fix the main
+    // scene received in commit c916013 (project memory). Clamped so a tab-
+    // wake or a hitch can't fast-forward several seconds in one tick.
+    try {
+      const nowTs = performance.now()
+      const dtMs = Math.min(MAX_DT_MS, Math.max(0, nowTs - lastFrameTs))
+      lastFrameTs = nowTs
+      viewer.updateAndRender(dtMs)
+    } catch (e) {
       error = 'render: ' + (e instanceof Error ? e.message : String(e))
     }
     rafId = requestAnimationFrame(tick)
@@ -104,22 +135,38 @@
     model = null
   }
 
+  async function tryLoadOne(path: string): Promise<any | null> {
+    if (!viewer) return null
+    try {
+      const m = await viewer.load(path, pathSolver)
+      if (m && typeof m.addInstance === 'function') return m
+      return null
+    } catch {
+      // The viewer's 'error' listener (attached in initViewer) is what stops
+      // emit('error', ...) from throwing the Node EventEmitter "Unhandled
+      // error. (undefined)" up here. We still catch defensively in case a
+      // future code path throws synchronously.
+      return null
+    }
+  }
+
   async function loadModel(path: string) {
     if (!viewer) return
     const token = ++loadToken
     error = ''
-    let m: any
-    try {
-      m = await viewer.load(path, pathSolver)
-    } catch (e) {
+    // Walk modelPath then each fallback. First non-null wins. Mirrors
+    // placeDoodad's variant → unsuffixed → other-extension chain.
+    const candidates = [path, ...modelPathFallbacks].filter(Boolean)
+    let m: any = null
+    let triedPaths: string[] = []
+    for (const candidate of candidates) {
+      triedPaths.push(candidate)
+      m = await tryLoadOne(candidate)
       if (token !== loadToken || disposed) return
-      error = 'load failed: ' + (e instanceof Error ? e.message : String(e))
-      clearInstance()
-      return
+      if (m) break
     }
-    if (token !== loadToken || disposed) return
-    if (!m || typeof m.addInstance !== 'function') {
-      error = 'no model'
+    if (!m) {
+      error = 'load failed: ' + triedPaths.join(' / ')
       clearInstance()
       return
     }
@@ -187,6 +234,15 @@
       }
       sizeToBox()
       viewer = new v.ModelViewer(canvas)
+      // CRITICAL: mdx-m3-viewer extends Node's EventEmitter. When viewer.load
+      // fails (404, missing handler, etc.) the lib calls emit('error', ...).
+      // EventEmitter THROWS synchronously on emit('error') when no listener
+      // is registered — surfaces in the console as "Unhandled error.
+      // (undefined)" because the lib's error payload is an object, not an
+      // Error. Without this listener, EVERY load failure crashes the load
+      // path before our `catch (e)` can swallow it. The main scene-instances
+      // attaches the same listener for the same reason (see line ~431).
+      viewer.on('error', () => { /* swallowed; load() resolves to undefined */ })
       viewer.addHandler(v.handlers.blp)
       viewer.addHandler(v.handlers.dds)
       viewer.addHandler(v.handlers.tga)
@@ -195,6 +251,9 @@
       scene = viewer.addScene()
       ;(scene as any).color = [0.07, 0.07, 0.09]
       currentReforged = reforged
+      // Reset the dt baseline so the first tick after (re)init doesn't see
+      // a multi-second gap from the previous viewer lifetime / Svelte mount.
+      lastFrameTs = performance.now()
       rafId = requestAnimationFrame(tick)
     } catch (e) {
       error = 'init failed: ' + (e instanceof Error ? e.message : String(e))
