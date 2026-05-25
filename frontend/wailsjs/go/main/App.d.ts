@@ -31,6 +31,8 @@ export function GetUnitTypeIndex():Promise<Record<string, main.UnitTypeInfo>>;
 
 export function IsDirty():Promise<boolean>;
 
+export function LaunchInWC3():Promise<void>;
+
 export function ListDoodads():Promise<Array<main.DoodadDTO>>;
 
 export function ListUnits():Promise<Array<main.UnitDTO>>;

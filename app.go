@@ -11,6 +11,7 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
+	"github.com/StephenSHorton/wc3-forge/internal/wc3launch"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -911,6 +912,38 @@ func (a *App) IsDirty() bool {
 // suggest extracting to a folder.
 func (a *App) SaveMap() error {
 	return forge.Current.Save()
+}
+
+// LaunchInWC3 spawns Warcraft III with the currently-loaded map preloaded
+// via the `-loadfile` CLI flag. Mirrors HiveWE's "Test Map" ribbon button.
+// Returns immediately after spawning — WC3 runs as a detached peer process.
+//
+// v1 limitations (documented in detail in internal/wc3launch/launch.go):
+//   - We do NOT save the session before launching. The JS caller MUST disable
+//     the Test Map button when forge.Current.IsDirty() to avoid running a
+//     stale .w3x. (Folder-backed maps could save first, but WC3 only runs
+//     packaged .w3x files — wc3-forge has no MPQ writer yet, so the folder
+//     contents can't be re-bundled.)
+//   - Only file-backed sessions can be tested. Folder-backed sessions return
+//     wc3launch.ErrMapNotFound (path is a folder). The JS caller can detect
+//     this from the Status().path heuristic and disable the button.
+//
+// Returns:
+//   - wc3launch.ErrBinaryNotFound when Warcraft III.exe isn't at the expected
+//     install path (env WC3FORGE_WC3_PATH overrides; else
+//     `C:\Program Files (x86)\Warcraft III\_retail_\x86_64\Warcraft III.exe`).
+//   - wc3launch.ErrMapNotFound when the session path doesn't resolve to a
+//     real .w3x file.
+//   - a fmt.Errorf for "no map loaded" / exec failures.
+func (a *App) LaunchInWC3() error {
+	if !forge.Current.IsLoaded() {
+		return fmt.Errorf("no map loaded")
+	}
+	mapPath := forge.Current.Path()
+	if mapPath == "" {
+		return fmt.Errorf("no map path available")
+	}
+	return wc3launch.LaunchWithMap(mapPath)
 }
 
 // MapInfoGet returns the full parsed war3map.w3i for the loaded map. The

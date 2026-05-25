@@ -54,6 +54,10 @@ export function IsDirty() {
   return window['go']['main']['App']['IsDirty']();
 }
 
+export function LaunchInWC3() {
+  return window['go']['main']['App']['LaunchInWC3']();
+}
+
 export function ListDoodads() {
   return window['go']['main']['App']['ListDoodads']();
 }

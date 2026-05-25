@@ -6,6 +6,7 @@
     GetReforgedMode, SetReforgedMode,
     GetUnitTypeIndex, GetDoodadTypeIndex,
     MoveUnit, MoveDoodad, IsDirty, SaveMap,
+    LaunchInWC3,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
@@ -79,6 +80,54 @@
   let scene: SceneAPI | null = null
   let dirty: boolean = false
   let saving: boolean = false
+  let launching: boolean = false
+
+  // ----- Test Map button (launch WC3 with the current map preloaded) -----
+  //
+  // Mirrors HiveWE's ribbon `Test Map` action. v1 constraints (see
+  // app.go::LaunchInWC3 + internal/wc3launch/launch.go):
+  //   - Session must be loaded.
+  //   - Session must NOT be dirty — wc3-forge has no MPQ writer yet, so
+  //     edits can't be packaged into the .w3x that WC3 needs to load. The
+  //     button is gated below; future work: save + repackage + launch.
+  //   - Session path must be a .w3x/.w3m/.mpq archive, NOT a folder.
+  //     Folder-backed sessions can't be launched directly because WC3 only
+  //     opens packaged archives.
+  $: testMapLoaded = status.loaded && !!status.path
+  $: testMapIsFile = (() => {
+    const p = (status.path || '').toLowerCase()
+    return /\.(w3x|w3m|mpq)$/.test(p)
+  })()
+  $: testMapDisabled = !testMapLoaded || !testMapIsFile || dirty || launching
+  $: testMapTooltip = (() => {
+    if (!testMapLoaded) return 'Open a map first'
+    if (!testMapIsFile) return 'Folder-backed maps can\'t be tested — open a packaged .w3x first'
+    if (dirty) return 'Save changes first (note: saving to MPQ archives is not yet supported, so edits must be discarded or applied externally before testing)'
+    if (launching) return 'Launching…'
+    return 'Launch Warcraft III with this map (-loadfile)'
+  })()
+  async function launchTestMap() {
+    if (testMapDisabled) return
+    launching = true
+    try {
+      await LaunchInWC3()
+      showToast('Launching Warcraft III…', 'info')
+    } catch (e) {
+      const msg = String(e)
+      if (/Warcraft III\.exe not found/i.test(msg)) {
+        showToast(
+          'Warcraft III.exe not found. Set WC3FORGE_WC3_PATH to your WC3 install root if it\'s not at the default location.',
+          'error',
+        )
+      } else if (/map file not found/i.test(msg)) {
+        showToast('Map file not found at: ' + (status.path || '(unknown)'), 'error')
+      } else {
+        showToast('launch failed: ' + msg, 'error')
+      }
+    } finally {
+      launching = false
+    }
+  }
 
   // ----- Map Info Editor modal -----
   // Conditional mount in the template (`{#if showMapInfoEditor}`) so the
@@ -344,6 +393,11 @@
         sectionOpen = { ...sectionOpen, [id]: open }
       },
       getDoodadCategories: () => doodadCategoriesPresent,
+      // Test-only: drive the Test Map button programmatically for verification
+      // automation (the harness can't easily click HTML buttons via WebView2).
+      launchTestMap: () => launchTestMap(),
+      // Test-only: report current Test Map button state for verification.
+      testMapState: () => ({ disabled: testMapDisabled, tooltip: testMapTooltip }),
     }
   })
 
@@ -944,6 +998,13 @@
               title="Toggle Reforged graphics. Reloads the current map without resetting the camera.">
         Reforged Graphics{reforged ? ' ✓' : ''}
       </button>
+      <span class="header-divider" aria-hidden="true"></span>
+      <button on:click={launchTestMap}
+              disabled={testMapDisabled}
+              class="test-map"
+              title={testMapTooltip}>
+        ▶ Test Map
+      </button>
     </div>
   </header>
 
@@ -1333,6 +1394,33 @@
   button.mode-state.doodad:hover:not(:disabled) { background: #1d4ed8; }
   button.mode-state.terrain { background: #16a34a; }
   button.mode-state.terrain:hover:not(:disabled) { background: #15803d; }
+
+  /* Header divider: thin vertical rule that separates the secondary mode
+     toggles from the primary Test Map action button, signalling the visual
+     hierarchy (mode toggles are state-y, the right side is the do-thing).
+     Height + color tuned to the existing header section borders. */
+  .header-divider {
+    display: inline-block;
+    width: 1px; height: 22px;
+    background: #3f3f46;
+    margin: 0 4px;
+  }
+
+  /* Primary action button: filled green, distinct from the dark secondary
+     mode-toggles + the dialogs' blue. Mirrors the on-state color of the
+     mode-toggle (#15803d hover, #16a34a base) so it visually echoes "go"
+     across the header. The leading ▶ play glyph reinforces the action. */
+  button.test-map {
+    background: #16a34a; font-weight: 600;
+    padding: 5px 14px;
+  }
+  button.test-map:hover:not(:disabled) { background: #15803d; }
+  button.test-map:disabled {
+    /* Override the global button:disabled opacity:0.5 to a dimmer-but-still-
+       readable neutral. Active green at 50% opacity reads as "muted active"
+       which is misleading; a flat dark fill reads correctly as "off". */
+    background: #27272a; color: #71717a; opacity: 1; cursor: not-allowed;
+  }
 
   .file-menu { position: relative; }
   button.file-btn {
