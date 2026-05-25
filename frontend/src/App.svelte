@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run as run_1 } from 'svelte/legacy';
+
   import { onMount, onDestroy } from 'svelte'
   import {
     OpenMapDialog, OpenMap, CloseMap, ListUnits, ListDoodads, Status,
@@ -23,6 +25,7 @@
   import { showToast } from './toast'
   import { loadIconURL } from './icon-loader'
   import { TEAM_COLORS_RGB } from './sloc-markers'
+  import { Button } from '$components/ui/button'
 
   // Wails drops struct typedefs from models.ts when they appear as map values,
   // so the unit/doodad type-index shapes are declared locally here. Must stay
@@ -39,73 +42,49 @@
     icon_art: string
   }
 
-  let status: main.MapStatus = { loaded: false, unit_count: 0 }
-  let units: main.UnitDTO[] = []
-  let doodads: main.DoodadDTO[] = []
-  let unitTypes: Record<string, UnitTypeInfo> = {}
-  let doodadTypes: Record<string, DoodadTypeInfo> = {}
+  let status: main.MapStatus = $state({ loaded: false, unit_count: 0 })
+  let units: main.UnitDTO[] = $state([])
+  let doodads: main.DoodadDTO[] = $state([])
+  let unitTypes: Record<string, UnitTypeInfo> = $state({})
+  let doodadTypes: Record<string, DoodadTypeInfo> = $state({})
   // Selection state is split by kind because creation_number is per-kind in
   // WC3 — a unit and a doodad can share an id, so a single Set can't tell
   // them apart. The full SelectionItemDTO[] mirror (selectionItems) is what
   // we use to compose new selections on mode='add'/'toggle' picks.
-  let selectedIds = new Set<number>()           // unit creation numbers
-  let selectedDoodadIds = new Set<number>()     // doodad creation numbers
-  let selectionItems: main.SelectionItemDTO[] = []
-  let primaryEntity: unitsdoo.Entity | null = null
-  let primaryDoodad: main.DoodadDTO | null = null
+  let selectedIds = $state(new Set<number>())           // unit creation numbers
+  let selectedDoodadIds = $state(new Set<number>())     // doodad creation numbers
+  let selectionItems: main.SelectionItemDTO[] = $state([])
+  let primaryEntity: unitsdoo.Entity | null = $state(null)
+  let primaryDoodad: main.DoodadDTO | null = $state(null)
   // Persistent state errors only — currently just the scene-init-failed path
   // during onMount. Transient operational errors (Save/Open/Move/Reforged
   // toggle) go through showToast() so they auto-dismiss.
-  let error: string = ''
-  let busy: boolean = false
-  let reforged: boolean = false
-  let pathingVisible: boolean = false
+  let error: string = $state('')
+  let busy: boolean = $state(false)
+  let reforged: boolean = $state(false)
+  let pathingVisible: boolean = $state(false)
 
   // Terrain-pick mode state. Owned here, mirrored to the scene via
   // scene.setTerrainPickMode. When a click hits a cell, terrainCell is set
   // and the Properties panel renders an additional section. Selecting an
   // entity (or clicking outside the map) does NOT clear it on its own — the
   // user explicitly clicks elsewhere on terrain to update.
-  let terrainPickModeOn: boolean = false
-  let terrainCell: TerrainCellInfo | null = null
+  let terrainPickModeOn: boolean = $state(false)
+  let terrainCell: TerrainCellInfo | null = $state(null)
 
   // Doodad-category visibility — owned here, mirrored to scene via
   // scene.setDoodadCategoryVisible. Categories absent from the map are
   // omitted from the View menu. Visibility is RENDERING-ONLY (never persists
   // to the saved map; the View-menu toggle is a viewport filter).
-  let doodadVisibility: Record<string, boolean> = {}
-  let doodadCategoriesPresent: string[] = []
+  let doodadVisibility: Record<string, boolean> = $state({})
+  let doodadCategoriesPresent: string[] = $state([])
 
-  let canvas: HTMLCanvasElement
+  let canvas: HTMLCanvasElement = $state()
   let scene: SceneAPI | null = null
-  let dirty: boolean = false
-  let saving: boolean = false
-  let launching: boolean = false
+  let dirty: boolean = $state(false)
+  let saving: boolean = $state(false)
+  let launching: boolean = $state(false)
 
-  // ----- Test Map button (launch WC3 with the current map preloaded) -----
-  //
-  // Mirrors HiveWE's ribbon `Test Map` action. v1 constraints (see
-  // app.go::LaunchInWC3 + internal/wc3launch/launch.go):
-  //   - Session must be loaded.
-  //   - Session must NOT be dirty — wc3-forge has no MPQ writer yet, so
-  //     edits can't be packaged into the .w3x that WC3 needs to load. The
-  //     button is gated below; future work: save + repackage + launch.
-  //   - Session path must be a .w3x/.w3m/.mpq archive, NOT a folder.
-  //     Folder-backed sessions can't be launched directly because WC3 only
-  //     opens packaged archives.
-  $: testMapLoaded = status.loaded && !!status.path
-  $: testMapIsFile = (() => {
-    const p = (status.path || '').toLowerCase()
-    return /\.(w3x|w3m|mpq)$/.test(p)
-  })()
-  $: testMapDisabled = !testMapLoaded || !testMapIsFile || dirty || launching
-  $: testMapTooltip = (() => {
-    if (!testMapLoaded) return 'Open a map first'
-    if (!testMapIsFile) return 'Folder-backed maps can\'t be tested — open a packaged .w3x first'
-    if (dirty) return 'Save changes first (note: saving to MPQ archives is not yet supported, so edits must be discarded or applied externally before testing)'
-    if (launching) return 'Launching…'
-    return 'Launch Warcraft III with this map (-loadfile)'
-  })()
   async function launchTestMap() {
     if (testMapDisabled) return
     launching = true
@@ -133,7 +112,7 @@
   // Conditional mount in the template (`{#if showMapInfoEditor}`) so the
   // dialog component fully unmounts on close — keeps the focus-trap +
   // global keydown listeners scoped to when the modal is actually open.
-  let showMapInfoEditor: boolean = false
+  let showMapInfoEditor: boolean = $state(false)
   function openMapInfoEditor() {
     if (!status.loaded) return
     showMapInfoEditor = true
@@ -143,8 +122,8 @@
   }
 
   // ----- File menu (header dropdown) -----
-  let fileMenuOpen: boolean = false
-  let fileMenuEl: HTMLDivElement | null = null
+  let fileMenuOpen: boolean = $state(false)
+  let fileMenuEl: HTMLDivElement | null = $state(null)
   function toggleFileMenu() { fileMenuOpen = !fileMenuOpen }
   function onDocClickForFileMenu(e: MouseEvent) {
     if (!fileMenuOpen) return
@@ -171,10 +150,10 @@
   // splitter component reports dy in pixels; we convert to a percent delta
   // against the column's pixel height each drag tick.
   // Default: 50/50. Session-only (no persistence).
-  let rightExplorerPct: number = 50
+  let rightExplorerPct: number = $state(50)
   const RIGHT_MIN_PCT = 15
   const RIGHT_MAX_PCT = 85
-  let rightColEl: HTMLDivElement | null = null
+  let rightColEl: HTMLDivElement | null = $state(null)
   function onRightSplitterDrag(dy: number) {
     if (!rightColEl) return
     const h = rightColEl.clientHeight
@@ -628,7 +607,6 @@
   // ----- Explorer categorization -----
 
   type Group = { id: string; label: string; entries: main.UnitDTO[] }
-  $: groups = bucket(units, unitTypes)
   function unitDisplayName(u: main.UnitDTO): string {
     // Slocs are start-location markers, not real units — there's no
     // UnitData.slk row for them so the type-index has no entry. Without
@@ -665,11 +643,9 @@
     return out
   }
 
-  $: doodadCount = doodads.length
 
   // ----- Doodad explorer grouping -----
   type DGroup = { id: string; label: string; entries: main.DoodadDTO[] }
-  $: doodadGroups = bucketDoodads(doodads, doodadTypes)
   function doodadDisplayName(d: main.DoodadDTO): string {
     const info = doodadTypes[d.type_id]
     return info && info.name ? info.name : d.type_id
@@ -743,50 +719,6 @@
     primary: string
     fallbacks: string[]
   }
-  $: previewPaths = ((): PreviewPaths | null => {
-    if (primaryEntity) {
-      if (primaryEntity.TypeID === 'sloc') return null
-      const info = unitTypes[primaryEntity.TypeID]
-      if (!info || !info.file) return null
-      const extMatch = info.file.match(/\.(mdl|mdx)$/i)
-      const declaredExt = extMatch ? extMatch[0] : '.mdx'
-      const stem = extMatch ? info.file.slice(0, -extMatch[0].length) : info.file
-      const otherExt = declaredExt.toLowerCase() === '.mdx' ? '.mdl' : '.mdx'
-      return {
-        primary: mdxPathFor(info.file),
-        fallbacks: [stem + otherExt],
-      }
-    }
-    if (primaryDoodad) {
-      const info = doodadTypes[primaryDoodad.type_id]
-      if (!info || !info.file) return null
-      const extMatch = info.file.match(/\.(mdl|mdx)$/i)
-      const declaredExt = extMatch ? extMatch[0] : '.mdx'
-      const stem = extMatch ? info.file.slice(0, -extMatch[0].length) : info.file
-      const otherExt = declaredExt.toLowerCase() === '.mdx' ? '.mdl' : '.mdx'
-      let primary: string
-      const fallbacks: string[] = []
-      if (info.num_var > 1) {
-        const variantIdx = Math.min(Math.max(0, primaryDoodad.variation), info.num_var - 1)
-        primary = stem + variantIdx + declaredExt
-        // unsuffixed with declared extension — covers SLK-declares-N-but-
-        // only-the-base-file-shipped cases (Statue 1).
-        fallbacks.push(stem + declaredExt)
-        // unsuffixed with the OTHER extension — custom maps often declare
-        // .mdl but ship .mdx (or vice versa).
-        fallbacks.push(stem + otherExt)
-        // last resort: variant + other extension
-        fallbacks.push(stem + variantIdx + otherExt)
-      } else {
-        primary = stem + declaredExt
-        fallbacks.push(stem + otherExt)
-      }
-      return { primary, fallbacks }
-    }
-    return null
-  })()
-  $: previewModelPath = previewPaths?.primary ?? null
-  $: previewModelFallbacks = previewPaths?.fallbacks ?? []
 
   function fmt(n: number, decimals: number = 0): string {
     return n.toFixed(decimals)
@@ -835,25 +767,8 @@
     return e.HeroLevel > 0 || (e.TypeID.length > 0 && e.TypeID[0] >= 'A' && e.TypeID[0] <= 'Z')
   }
 
-  $: singlePositionEditable = (
-    selectionItems.length === 1 &&
-    (
-      (selectionItems[0].kind === 'unit' && primaryEntity !== null) ||
-      (selectionItems[0].kind === 'doodad' && primaryDoodad !== null)
-    )
-  )
 
-  let posEdit: { x: string; y: string; z: string } = { x: '', y: '', z: '' }
-  $: if (singlePositionEditable) {
-    const pos = primaryEntity ? primaryEntity.Position : (primaryDoodad ? primaryDoodad.position : null)
-    if (pos) {
-      posEdit = {
-        x: fmt(pos[0]),
-        y: fmt(pos[1]),
-        z: fmt(pos[2]),
-      }
-    }
-  }
+  let posEdit: { x: string; y: string; z: string } = $state({ x: '', y: '', z: '' })
 
   function primaryPosition(): [number, number, number] | null {
     if (primaryEntity) return [primaryEntity.Position[0], primaryEntity.Position[1], primaryEntity.Position[2]]
@@ -917,14 +832,105 @@
     if (s < 0) return '(no shadow map)'
     return s >= 0x80 ? `${s} (shadowed)` : `${s} (lit)`
   }
+  // ----- Test Map button (launch WC3 with the current map preloaded) -----
+  //
+  // Mirrors HiveWE's ribbon `Test Map` action. v1 constraints (see
+  // app.go::LaunchInWC3 + internal/wc3launch/launch.go):
+  //   - Session must be loaded.
+  //   - Session must NOT be dirty — wc3-forge has no MPQ writer yet, so
+  //     edits can't be packaged into the .w3x that WC3 needs to load. The
+  //     button is gated below; future work: save + repackage + launch.
+  //   - Session path must be a .w3x/.w3m/.mpq archive, NOT a folder.
+  //     Folder-backed sessions can't be launched directly because WC3 only
+  //     opens packaged archives.
+  let testMapLoaded = $derived(status.loaded && !!status.path)
+  let testMapIsFile = $derived((() => {
+    const p = (status.path || '').toLowerCase()
+    return /\.(w3x|w3m|mpq)$/.test(p)
+  })())
+  let testMapDisabled = $derived(!testMapLoaded || !testMapIsFile || dirty || launching)
+  let testMapTooltip = $derived((() => {
+    if (!testMapLoaded) return 'Open a map first'
+    if (!testMapIsFile) return 'Folder-backed maps can\'t be tested — open a packaged .w3x first'
+    if (dirty) return 'Save changes first (note: saving to MPQ archives is not yet supported, so edits must be discarded or applied externally before testing)'
+    if (launching) return 'Launching…'
+    return 'Launch Warcraft III with this map (-loadfile)'
+  })())
+  let groups = $derived(bucket(units, unitTypes))
+  let doodadCount = $derived(doodads.length)
+  let doodadGroups = $derived(bucketDoodads(doodads, doodadTypes))
+  let previewPaths = $derived(((): PreviewPaths | null => {
+    if (primaryEntity) {
+      if (primaryEntity.TypeID === 'sloc') return null
+      const info = unitTypes[primaryEntity.TypeID]
+      if (!info || !info.file) return null
+      const extMatch = info.file.match(/\.(mdl|mdx)$/i)
+      const declaredExt = extMatch ? extMatch[0] : '.mdx'
+      const stem = extMatch ? info.file.slice(0, -extMatch[0].length) : info.file
+      const otherExt = declaredExt.toLowerCase() === '.mdx' ? '.mdl' : '.mdx'
+      return {
+        primary: mdxPathFor(info.file),
+        fallbacks: [stem + otherExt],
+      }
+    }
+    if (primaryDoodad) {
+      const info = doodadTypes[primaryDoodad.type_id]
+      if (!info || !info.file) return null
+      const extMatch = info.file.match(/\.(mdl|mdx)$/i)
+      const declaredExt = extMatch ? extMatch[0] : '.mdx'
+      const stem = extMatch ? info.file.slice(0, -extMatch[0].length) : info.file
+      const otherExt = declaredExt.toLowerCase() === '.mdx' ? '.mdl' : '.mdx'
+      let primary: string
+      const fallbacks: string[] = []
+      if (info.num_var > 1) {
+        const variantIdx = Math.min(Math.max(0, primaryDoodad.variation), info.num_var - 1)
+        primary = stem + variantIdx + declaredExt
+        // unsuffixed with declared extension — covers SLK-declares-N-but-
+        // only-the-base-file-shipped cases (Statue 1).
+        fallbacks.push(stem + declaredExt)
+        // unsuffixed with the OTHER extension — custom maps often declare
+        // .mdl but ship .mdx (or vice versa).
+        fallbacks.push(stem + otherExt)
+        // last resort: variant + other extension
+        fallbacks.push(stem + variantIdx + otherExt)
+      } else {
+        primary = stem + declaredExt
+        fallbacks.push(stem + otherExt)
+      }
+      return { primary, fallbacks }
+    }
+    return null
+  })())
+  let previewModelPath = $derived(previewPaths?.primary ?? null)
+  let previewModelFallbacks = $derived(previewPaths?.fallbacks ?? [])
+  let singlePositionEditable = (
+    $derived(selectionItems.length === 1 &&
+    (
+      (selectionItems[0].kind === 'unit' && primaryEntity !== null) ||
+      (selectionItems[0].kind === 'doodad' && primaryDoodad !== null)
+    ))
+  )
+  run_1(() => {
+    if (singlePositionEditable) {
+      const pos = primaryEntity ? primaryEntity.Position : (primaryDoodad ? primaryDoodad.position : null)
+      if (pos) {
+        posEdit = {
+          x: fmt(pos[0]),
+          y: fmt(pos[1]),
+          z: fmt(pos[2]),
+        }
+      }
+    }
+  });
 </script>
 
 <main>
+  <Button class="absolute top-1 left-1 z-50">shadcn live</Button>
   <header>
     <div class="file-menu" bind:this={fileMenuEl}>
       <button class="file-btn"
               class:open={fileMenuOpen}
-              on:click={toggleFileMenu}
+              onclick={toggleFileMenu}
               aria-haspopup="menu"
               aria-expanded={fileMenuOpen}
               title="File menu">
@@ -934,13 +940,13 @@
         <div class="file-dropdown" role="menu">
           <button class="file-item"
                   role="menuitem"
-                  on:click={runMenuAction(pickAndOpen)}
+                  onclick={runMenuAction(pickAndOpen)}
                   disabled={busy}>
             <span class="file-item-label">Open Map…</span>
           </button>
           <button class="file-item"
                   role="menuitem"
-                  on:click={runMenuAction(doSave)}
+                  onclick={runMenuAction(doSave)}
                   disabled={!status.loaded || !dirty || saving}
                   class:dirty
                   title="Save pending edits (Ctrl+S).">
@@ -950,7 +956,7 @@
           <div class="file-sep" role="separator"></div>
           <button class="file-item"
                   role="menuitem"
-                  on:click={runMenuAction(openMapInfoEditor)}
+                  onclick={runMenuAction(openMapInfoEditor)}
                   disabled={!status.loaded}
                   title="Edit map name, author, description, and other metadata.">
             <span class="file-item-label">Map Info…</span>
@@ -959,7 +965,7 @@
           <div class="file-sep" role="separator"></div>
           <button class="file-item"
                   role="menuitem"
-                  on:click={runMenuAction(close)}
+                  onclick={runMenuAction(close)}
                   disabled={!status.loaded || busy}>
             <span class="file-item-label">Close</span>
           </button>
@@ -977,7 +983,7 @@
       {/if}
     </div>
     <div class="actions">
-      <button on:click={toggleTerrainPickMode}
+      <button onclick={toggleTerrainPickMode}
               class="mode-state"
               class:terrain={terrainPickModeOn}
               class:doodad={!terrainPickModeOn}
@@ -986,20 +992,20 @@
                 : 'Doodad mode active — clicking selects entities. Click to switch to Terrain mode.'}>
         {terrainPickModeOn ? 'Terrain Mode' : 'Doodad Mode'}
       </button>
-      <button on:click={togglePathing}
+      <button onclick={togglePathing}
               class="mode-toggle"
               class:on={pathingVisible}
               title="Toggle the static pathing-map overlay (red=unwalkable, blue=unflyable, yellow=unbuildable).">
         Pathing{pathingVisible ? ' ✓' : ''}
       </button>
-      <button on:click={toggleReforged} disabled={busy}
+      <button onclick={toggleReforged} disabled={busy}
               class="mode-toggle"
               class:on={reforged}
               title="Toggle Reforged graphics. Reloads the current map without resetting the camera.">
         Reforged Graphics{reforged ? ' ✓' : ''}
       </button>
       <span class="header-divider" aria-hidden="true"></span>
-      <button on:click={launchTestMap}
+      <button onclick={launchTestMap}
               disabled={testMapDisabled}
               class="test-map"
               title={testMapTooltip}>
@@ -1032,11 +1038,12 @@
             {#each groups as g (g.id)}
               <Accordion id={g.id} label={g.label} open={isOpen(g.id, true)}
                          on:toggle={onSectionToggle}>
-                <span slot="header-extras">{g.entries.length}</span>
+                <!-- @migration-task: migrate this slot by hand, `header-extras` is an invalid identifier -->
+  <span slot="header-extras">{g.entries.length}</span>
                 <ul class="explorer-list">
                   {#each g.entries as u (u.creation_number)}
                     <li class:selected={selectedIds.has(u.creation_number)}
-                        on:click={(e) => clickRow(e, 'unit', u.creation_number)}
+                        onclick={(e) => clickRow(e, 'unit', u.creation_number)}
                         title="{u.type_id} #{u.creation_number}">
                       {#if u.type_id === 'sloc'}
                         <!-- Slocs have no command-button icon — use a colored
@@ -1057,7 +1064,7 @@
                       <span class="name">{unitDisplayName(u)}</span>
                       <span class="cat dim">{unitCategory(u)}</span>
                       <button class="pan-btn"
-                              on:click={(e) => panToEntity(e, u.position)}
+                              onclick={(e) => panToEntity(e, u.position)}
                               title="Pan camera to this entity">⊕</button>
                     </li>
                   {/each}
@@ -1067,16 +1074,18 @@
             {#if doodadCount > 0}
               <Accordion id="doodads" label="Doodads" open={isOpen('doodads', true)}
                          on:toggle={onSectionToggle}>
-                <span slot="header-extras">{doodadCount}</span>
+                <!-- @migration-task: migrate this slot by hand, `header-extras` is an invalid identifier -->
+  <span slot="header-extras">{doodadCount}</span>
                 <div class="doodad-subs">
                   {#each doodadGroups as dg (dg.id)}
                     <Accordion id={dg.id} label={dg.label} open={isOpen(dg.id, true)}
                                on:toggle={onSectionToggle}>
-                      <span slot="header-extras">{dg.entries.length}</span>
+                      <!-- @migration-task: migrate this slot by hand, `header-extras` is an invalid identifier -->
+  <span slot="header-extras">{dg.entries.length}</span>
                       <ul class="explorer-list">
                         {#each dg.entries as d (d.creation_number)}
                           <li class:selected={selectedDoodadIds.has(d.creation_number)}
-                              on:click={(e) => clickRow(e, 'doodad', d.creation_number)}
+                              onclick={(e) => clickRow(e, 'doodad', d.creation_number)}
                               title="{d.type_id} #{d.creation_number}">
                             {#await loadIconURL(doodadIconPath(d)) then iconURL}
                               {#if iconURL}
@@ -1088,7 +1097,7 @@
                             <span class="name">{doodadDisplayName(d)}</span>
                             <span class="cat dim">{doodadCategoryFor(d)}</span>
                             <button class="pan-btn"
-                                    on:click={(e) => panToEntity(e, d.position)}
+                                    onclick={(e) => panToEntity(e, d.position)}
                                     title="Pan camera to this doodad">⊕</button>
                           </li>
                         {/each}
@@ -1172,16 +1181,16 @@
                 <dt>Position</dt>
                 <dd class="mono pos-edit">
                   <input type="number" step="1" bind:value={posEdit.x}
-                         on:blur={() => commitPositionEdit('x')}
-                         on:keydown={(e) => onPosKeydown(e, 'x')}
+                         onblur={() => commitPositionEdit('x')}
+                         onkeydown={(e) => onPosKeydown(e, 'x')}
                          title="X (game coords). Enter to commit, Esc to revert." />
                   <input type="number" step="1" bind:value={posEdit.y}
-                         on:blur={() => commitPositionEdit('y')}
-                         on:keydown={(e) => onPosKeydown(e, 'y')}
+                         onblur={() => commitPositionEdit('y')}
+                         onkeydown={(e) => onPosKeydown(e, 'y')}
                          title="Y (game coords). Enter to commit, Esc to revert." />
                   <input type="number" step="1" bind:value={posEdit.z}
-                         on:blur={() => commitPositionEdit('z')}
-                         on:keydown={(e) => onPosKeydown(e, 'z')}
+                         onblur={() => commitPositionEdit('z')}
+                         onkeydown={(e) => onPosKeydown(e, 'z')}
                          title="Z (game coords). Enter to commit, Esc to revert." />
                 </dd>
               {:else}
@@ -1257,16 +1266,16 @@
                 <dt>Position</dt>
                 <dd class="mono pos-edit">
                   <input type="number" step="1" bind:value={posEdit.x}
-                         on:blur={() => commitPositionEdit('x')}
-                         on:keydown={(e) => onPosKeydown(e, 'x')}
+                         onblur={() => commitPositionEdit('x')}
+                         onkeydown={(e) => onPosKeydown(e, 'x')}
                          title="X (game coords). Enter to commit, Esc to revert." />
                   <input type="number" step="1" bind:value={posEdit.y}
-                         on:blur={() => commitPositionEdit('y')}
-                         on:keydown={(e) => onPosKeydown(e, 'y')}
+                         onblur={() => commitPositionEdit('y')}
+                         onkeydown={(e) => onPosKeydown(e, 'y')}
                          title="Y (game coords). Enter to commit, Esc to revert." />
                   <input type="number" step="1" bind:value={posEdit.z}
-                         on:blur={() => commitPositionEdit('z')}
-                         on:keydown={(e) => onPosKeydown(e, 'z')}
+                         onblur={() => commitPositionEdit('z')}
+                         onkeydown={(e) => onPosKeydown(e, 'z')}
                          title="Z (game coords). Enter to commit, Esc to revert." />
                 </dd>
               {:else}

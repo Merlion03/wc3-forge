@@ -13,7 +13,7 @@
     <div class="toast {t.severity}" role={ariaRole(t.severity)}>
       <div class="toast-msg">{t.message}</div>
       <button class="toast-close"
-              on:click={() => dismissToast(t.id)}
+              onclick={() => dismissToast(t.id)}
               title="Dismiss"
               aria-label="Dismiss notification">×</button>
     </div>

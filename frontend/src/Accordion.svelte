@@ -1,3 +1,4 @@
+<!-- @migration-task Error while migrating Svelte code: This migration would change the name of a slot (header-extras to header_extras) making the component unusable -->
 <script lang="ts">
   // Generic collapsible section with a clickable header + chevron affordance.
   // Used in Explorer and Properties panels to let users hide sections they

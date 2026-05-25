@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { run, nonpassive, createBubbler, preventDefault } from 'svelte/legacy';
+
+  const bubble = createBubbler();
   // Tiny standalone ModelViewer for the Properties panel — loads one MDX for
   // the currently-selected unit/doodad and renders it on a small canvas with
   // orbit controls + a reset button. Independent of the main scene; uses its
@@ -13,12 +16,15 @@
   import { pathSolver } from './scene-instances'
   import { patchMdxParser } from './mdx-parser-patch'
 
-  export let modelPath: string | null = null
-  export let reforged: boolean = false
-  /** Team-color index for setTeamColor on the loaded instance. Defaults to 0
+  
+  
+  interface Props {
+    modelPath?: string | null;
+    reforged?: boolean;
+    /** Team-color index for setTeamColor on the loaded instance. Defaults to 0
    *  (red) — pass the unit's player for an accurate preview. Doodads ignore. */
-  export let teamColor: number = 0
-  /**
+    teamColor?: number;
+    /**
    * Optional fallback paths the loader tries when `modelPath` fails (load
    * error or 404). Mirrors placeDoodad's variant → unsuffixed → other-extension
    * chain from scene-instances.ts. The Properties panel passes the variant-
@@ -26,13 +32,21 @@
    * that's the shape that catches custom "Statue 1"-style doodad rows whose
    * SLK declares N variants but only the unsuffixed file ships in CASC.
    */
-  export let modelPathFallbacks: string[] = []
+    modelPathFallbacks?: string[];
+  }
+
+  let {
+    modelPath = null,
+    reforged = false,
+    teamColor = 0,
+    modelPathFallbacks = []
+  }: Props = $props();
 
   const MV: any = (MV_ns as any).default ?? MV_ns
   patchMdxParser() // idempotent guard inside
 
-  let canvas: HTMLCanvasElement
-  let viewer: any = null
+  let canvas: HTMLCanvasElement = $state()
+  let viewer: any = $state(null)
   let scene: any = null
   let instance: any = null
   let model: any = null
@@ -41,8 +55,8 @@
   let rafId = 0
   let disposed = false
   let loadToken = 0
-  let error = ''
-  let currentReforged = reforged
+  let error = $state('')
+  let currentReforged = $state(reforged)
   // Real-dt tracking for viewer.update(). Mirrors the main scene's tick logic
   // (scene-instances.ts) — mdx-m3-viewer's `update(dt)` wants MILLISECONDS
   // elapsed since last update, but viewer.updateAndRender's DEFAULT is a
@@ -198,17 +212,7 @@
     reset()
   }
 
-  // Reactive reload on path/reforged change. Guard against null/empty path.
-  $: if (viewer && currentReforged === reforged) {
-    if (modelPath) void loadModel(modelPath)
-    else clearInstance()
-  }
 
-  // Reforged toggle: rebuild the viewer so the MDX handler re-registers with
-  // the new flag. Cheap enough — the preview holds at most one model.
-  $: if (viewer && currentReforged !== reforged) {
-    rebuildViewer()
-  }
 
   function rebuildViewer() {
     teardownViewer()
@@ -312,14 +316,28 @@
     window.removeEventListener('mouseup', onUp)
     teardownViewer()
   })
+  // Reactive reload on path/reforged change. Guard against null/empty path.
+  run(() => {
+    if (viewer && currentReforged === reforged) {
+      if (modelPath) void loadModel(modelPath)
+      else clearInstance()
+    }
+  });
+  // Reforged toggle: rebuild the viewer so the MDX handler re-registers with
+  // the new flag. Cheap enough — the preview holds at most one model.
+  run(() => {
+    if (viewer && currentReforged !== reforged) {
+      rebuildViewer()
+    }
+  });
 </script>
 
 <div class="preview">
   <canvas bind:this={canvas}
-          on:mousedown={onDown}
-          on:wheel|nonpassive={onWheel}
-          on:contextmenu|preventDefault></canvas>
-  <button class="reset" on:click={reset} title="Reset view">Reset</button>
+          onmousedown={onDown}
+          use:nonpassive={['wheel', () => onWheel]}
+          oncontextmenu={preventDefault(bubble('contextmenu'))}></canvas>
+  <button class="reset" onclick={reset} title="Reset view">Reset</button>
   {#if error}<div class="error">{error}</div>{/if}
 </div>
 

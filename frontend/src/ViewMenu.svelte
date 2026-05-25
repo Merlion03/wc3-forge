@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   // View menu — dropdown sibling to File menu in the header. Hosts visibility
   // toggles for doodad categories (and any future "show / hide" affordances).
   //
@@ -21,15 +23,19 @@
 
   import { createEventDispatcher } from 'svelte'
 
-  export let categories: string[] = []  // present-in-map ordered list
-  export let visibility: Record<string, boolean> = {}  // category → visible
+  interface Props {
+    categories?: string[]; // present-in-map ordered list
+    visibility?: Record<string, boolean>; // category → visible
+  }
+
+  let { categories = [], visibility = {} }: Props = $props();
 
   const dispatch = createEventDispatcher<{
     toggle: { category: string; visible: boolean }
   }>()
 
-  let open = false
-  let menuEl: HTMLDivElement | null = null
+  let open = $state(false)
+  let menuEl: HTMLDivElement | null = $state(null)
 
   function toggleMenu() { open = !open }
   function onDocClick(e: MouseEvent) {
@@ -45,12 +51,12 @@
   }
 
   // Sub-menu (Doodads) hover-open. Click also toggles, for keyboard / non-hover.
-  let doodadOpen = false
+  let doodadOpen = $state(false)
   function toggleDoodadSub() { doodadOpen = !doodadOpen }
 
-  $: allVisibleCount = categories.filter(c => visibility[c] !== false).length
-  $: allChecked = categories.length > 0 && allVisibleCount === categories.length
-  $: allIndeterminate = allVisibleCount > 0 && allVisibleCount < categories.length
+  let allVisibleCount = $derived(categories.filter(c => visibility[c] !== false).length)
+  let allChecked = $derived(categories.length > 0 && allVisibleCount === categories.length)
+  let allIndeterminate = $derived(allVisibleCount > 0 && allVisibleCount < categories.length)
 
   function setAll(v: boolean) {
     dispatch('toggle', { category: '*', visible: v })
@@ -73,19 +79,21 @@
 
   // Bind doc listeners while menu is open. We add/remove on `open` change
   // rather than always-on so we don't pay the cost when the menu is closed.
-  $: if (open) {
-    document.addEventListener('mousedown', onDocClick, true)
-    document.addEventListener('keydown', onDocKey)
-  } else {
-    document.removeEventListener('mousedown', onDocClick, true)
-    document.removeEventListener('keydown', onDocKey)
-    doodadOpen = false
-  }
+  run(() => {
+    if (open) {
+      document.addEventListener('mousedown', onDocClick, true)
+      document.addEventListener('keydown', onDocKey)
+    } else {
+      document.removeEventListener('mousedown', onDocClick, true)
+      document.removeEventListener('keydown', onDocKey)
+      doodadOpen = false
+    }
+  });
 </script>
 
 <div class="view-menu" bind:this={menuEl}>
   <button class="view-btn" class:open
-          on:click={toggleMenu}
+          onclick={toggleMenu}
           aria-haspopup="menu"
           aria-expanded={open}
           title="View menu">
@@ -94,7 +102,7 @@
   {#if open}
     <div class="view-dropdown" role="menu">
       <button class="view-item parent"
-              on:click={toggleDoodadSub}
+              onclick={toggleDoodadSub}
               aria-expanded={doodadOpen}>
         <span class="chev">{doodadOpen ? '▾' : '▸'}</span>
         <span class="lbl">Doodads</span>
@@ -106,7 +114,7 @@
             <input type="checkbox"
                    checked={allChecked}
                    indeterminate={allIndeterminate}
-                   on:change={onAllChange} />
+                   onchange={onAllChange} />
             <span class="lbl">All</span>
           </label>
           <div class="sep"></div>
@@ -114,7 +122,7 @@
             <label class="check-item">
               <input type="checkbox"
                      checked={visibility[cat] !== false}
-                     on:change={(e) => onCatChange(e, cat)} />
+                     onchange={(e) => onCatChange(e, cat)} />
               <span class="lbl">{cat}</span>
             </label>
           {/each}

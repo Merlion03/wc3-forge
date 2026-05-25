@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   // Modal dialog for editing war3map.w3i metadata. v1 ships Tab 1
   // (Description) with full edit/apply/save plumbing; tabs 2–6 are
   // placeholders so the framework is validated and future agents can drop
@@ -27,7 +29,11 @@
   import { MapInfoGet, MapInfoApply } from '../wailsjs/go/main/App.js'
   import { showToast } from './toast'
 
-  export let open: boolean = false
+  interface Props {
+    open?: boolean;
+  }
+
+  let { open = $bindable(false) }: Props = $props();
 
   const dispatch = createEventDispatcher<{ close: void }>()
 
@@ -45,7 +51,7 @@
     { id: 'size',        label: 'Size & Camera Bounds' },
     { id: 'advanced',    label: 'Advanced' },
   ]
-  let activeTab: TabId = 'description'
+  let activeTab: TabId = $state('description')
 
   // Pending edits — the local mutable copy that the form binds to. Initialized
   // from the parsed Info on dialog open. On Apply/OK, we diff against the
@@ -64,30 +70,30 @@
     description: string
     suggestedPlayers: string
   }
-  let pending: Pending = blankPending()
-  let baseline: Pending = blankPending()
+  let pending: Pending = $state(blankPending())
+  let baseline: Pending = $state(blankPending())
 
   // Readonly metadata pulled at open. Surfaced in the dialog header (Map
   // Version on disclosure) and in the body's metadata disclosure. Not edited.
-  let mapVersion: number = 0
-  let editorVersion: number = 0
-  let fileVersion: number = 0
-  let gameVersion: number[] = [0, 0, 0, 0]
+  let mapVersion: number = $state(0)
+  let editorVersion: number = $state(0)
+  let fileVersion: number = $state(0)
+  let gameVersion: number[] = $state([0, 0, 0, 0])
 
   // Validation state. Per-field error message; empty string = valid. The
   // helper-text under each input renders this; the input gets a red border
   // when non-empty. OK button is disabled while any field is invalid.
-  let nameError: string = ''
-  let descError: string = ''
-  $: hasErrors = !!nameError || !!descError
+  let nameError: string = $state('')
+  let descError: string = $state('')
+  let hasErrors = $derived(!!nameError || !!descError)
 
   // Live-changed: pending differs from baseline (any field). Drives the
   // Apply button's enabled state — no point Apply'ing an empty diff.
-  $: isChanged =
-    pending.name !== baseline.name ||
+  let isChanged =
+    $derived(pending.name !== baseline.name ||
     pending.author !== baseline.author ||
     pending.description !== baseline.description ||
-    pending.suggestedPlayers !== baseline.suggestedPlayers
+    pending.suggestedPlayers !== baseline.suggestedPlayers)
 
   // Char counts. Limits per design doc / lobby behavior:
   //   - Name: 80 (lobby truncates)
@@ -98,16 +104,16 @@
   const NAME_MAX = 80
   const DESC_MAX = 512
 
-  let loading: boolean = false
-  let applying: boolean = false
+  let loading: boolean = $state(false)
+  let applying: boolean = $state(false)
 
   // Refs for focus trap + autofocus on open.
-  let dialogEl: HTMLDivElement | null = null
-  let firstFocusableEl: HTMLInputElement | null = null
+  let dialogEl: HTMLDivElement | null = $state(null)
+  let firstFocusableEl: HTMLInputElement | null = $state(null)
 
   // Show-metadata disclosure (Game Version, File Version) — hidden by
   // default per design (it's diagnostic, not user-editable).
-  let showMetadata: boolean = false
+  let showMetadata: boolean = $state(false)
 
   function blankPending(): Pending {
     return { name: '', author: '', description: '', suggestedPlayers: '' }
@@ -141,13 +147,15 @@
 
   // Re-run on `open` transitioning false→true. Svelte runs $: reactives in
   // dependency order; this gate prevents double-load on re-render.
-  let lastOpen = false
-  $: if (open && !lastOpen) {
-    lastOpen = true
-    void loadInfo().then(() => tick().then(() => firstFocusableEl?.focus()))
-  } else if (!open && lastOpen) {
-    lastOpen = false
-  }
+  let lastOpen = $state(false)
+  run(() => {
+    if (open && !lastOpen) {
+      lastOpen = true
+      void loadInfo().then(() => tick().then(() => firstFocusableEl?.focus()))
+    } else if (!open && lastOpen) {
+      lastOpen = false
+    }
+  });
 
   function validateAll() {
     validateName()
@@ -286,13 +294,13 @@
 
   // Live header title — pulls from pending.name so the user sees their
   // edits reflected immediately (matches design doc §2.1 UX improvement).
-  $: dialogTitle = `Map Info — ${(pending.name || '').trim() || '(untitled)'}`
+  let dialogTitle = $derived(`Map Info — ${(pending.name || '').trim() || '(untitled)'}`)
 
   // Char-count helpers. Past the limit, switch the counter to red.
-  $: nameCount = (pending.name ?? '').length
-  $: descCount = (pending.description ?? '').length
-  $: nameCountOver = nameCount > NAME_MAX
-  $: descCountOver = descCount > DESC_MAX
+  let nameCount = $derived((pending.name ?? '').length)
+  let descCount = $derived((pending.description ?? '').length)
+  let nameCountOver = $derived(nameCount > NAME_MAX)
+  let descCountOver = $derived(descCount > DESC_MAX)
 
   function onFieldInput(field: keyof Pending) {
     if (field === 'name') validateName()
@@ -306,9 +314,9 @@
 </script>
 
 {#if open}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="modal-backdrop"
-       on:mousedown={onBackdropMouseDown}
+       onmousedown={onBackdropMouseDown}
        role="presentation">
     <div class="dialog"
          bind:this={dialogEl}
@@ -328,7 +336,7 @@
                     class:active={activeTab === t.id}
                     role="tab"
                     aria-selected={activeTab === t.id}
-                    on:click={() => activeTab = t.id}>
+                    onclick={() => activeTab = t.id}>
               {t.label}
             </button>
           {/each}
@@ -346,7 +354,7 @@
                        type="text"
                        maxlength={NAME_MAX * 2}
                        bind:value={pending.name}
-                       on:input={() => onFieldInput('name')}
+                       oninput={() => onFieldInput('name')}
                        class:invalid={!!nameError}
                        bind:this={firstFocusableEl} />
                 <div class="field-meta">
@@ -369,7 +377,7 @@
                 <textarea id="mi-desc"
                           rows="6"
                           bind:value={pending.description}
-                          on:input={() => onFieldInput('description')}
+                          oninput={() => onFieldInput('description')}
                           class:invalid={!!descError}></textarea>
                 <div class="field-meta">
                   <span class="count" class:over={descCountOver}>{descCount}/{DESC_MAX}</span>
@@ -412,17 +420,17 @@
       </div>
 
       <footer class="dialog-footer">
-        <button class="btn cancel" on:click={onCancel} type="button">
+        <button class="btn cancel" onclick={onCancel} type="button">
           Cancel
         </button>
         <button class="btn apply"
-                on:click={() => applyDiff(false)}
+                onclick={() => applyDiff(false)}
                 type="button"
                 disabled={hasErrors || !isChanged || applying || loading}>
           Apply
         </button>
         <button class="btn primary ok"
-                on:click={() => applyDiff(true)}
+                onclick={() => applyDiff(true)}
                 type="button"
                 disabled={hasErrors || applying || loading}>
           OK

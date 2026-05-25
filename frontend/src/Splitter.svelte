@@ -15,14 +15,20 @@
   //  - PointerEvents (not Mouse) — captures the pointer so move/up fire even
   //    if the cursor leaves the window. setPointerCapture is critical: without
   //    it, Wails/WebView2 stops delivering pointer events outside the strip
-  //    bounds when the drag goes fast.
+  
 
-  export let onDrag: (dy: number) => void
   // Optional callback fired on drag-end so consumers can persist final sizes
-  // (e.g. snap-to-min, save to localStorage). Not used yet but cheap to plumb.
-  export let onDragEnd: (() => void) | undefined = undefined
+  
+  interface Props {
+    //    bounds when the drag goes fast.
+    onDrag: (dy: number) => void;
+    // (e.g. snap-to-min, save to localStorage). Not used yet but cheap to plumb.
+    onDragEnd?: (() => void) | undefined;
+  }
 
-  let dragging = false
+  let { onDrag, onDragEnd = undefined }: Props = $props();
+
+  let dragging = $state(false)
   let lastY = 0
 
   function onPointerDown(e: PointerEvent) {
@@ -56,10 +62,10 @@
      class:dragging
      role="separator"
      aria-orientation="horizontal"
-     on:pointerdown={onPointerDown}
-     on:pointermove={onPointerMove}
-     on:pointerup={onPointerUp}
-     on:pointercancel={onPointerUp}>
+     onpointerdown={onPointerDown}
+     onpointermove={onPointerMove}
+     onpointerup={onPointerUp}
+     onpointercancel={onPointerUp}>
   <div class="line"></div>
 </div>
 
