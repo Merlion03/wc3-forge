@@ -323,12 +323,12 @@ interface ScaleDrag {
   axis: GizmoAxis
   origin: [number, number, number]
   entities: EntityOrig[]
-  anchorSignedDist: number
-  // Snapshot of handleScale at mousedown — used as the reference distance
-  // for the exponential factor (1 handleScale of drag = 2x scale). Snapshot
-  // rather than live value so mid-drag camera zoom doesn't whipsaw the
-  // sensitivity.
-  refHandleScale: number
+  // Screen-space distance (canvas pixels) from cursor to gizmo origin at
+  // mousedown. The factor during the drag is currentScreenDist /
+  // anchorScreenDist — Blender's convention. Purely 2D math, robust
+  // against axis-near-camera-direction projection weirdness that broke
+  // the earlier world-space approach.
+  anchorScreenDist: number
   currentFactor: number
 }
 
@@ -549,6 +549,27 @@ function wrapAngle(a: number): number {
 function snap(v: number, step: number): number {
   if (!isFinite(step) || step <= 0) return v
   return Math.round(v / step) * step
+}
+
+/**
+ * Project a world point through the camera's view-projection matrix into
+ * canvas-pixel space (DOM-Y, origin top-left). Returns null if the point
+ * is behind the camera (w<=0). Used by the screen-space scale-drag math.
+ *
+ * Mirrors scene-instances.ts::worldToCanvasPx — kept private to gizmo.ts
+ * to avoid taking a public API dependency on the SceneAPI surface.
+ */
+function worldToScreen(scene: any, canvas: HTMLCanvasElement, world: [number, number, number]): { x: number; y: number } | null {
+  const m = scene.camera.viewProjectionMatrix as Float32Array
+  const wx = world[0], wy = world[1], wz = world[2]
+  const x = m[0]*wx + m[4]*wy + m[8]*wz + m[12]
+  const y = m[1]*wx + m[5]*wy + m[9]*wz + m[13]
+  const w = m[3]*wx + m[7]*wy + m[11]*wz + m[15]
+  if (w <= 0) return null
+  const nx = x / w, ny = y / w
+  const sx = (nx * 0.5 + 0.5) * canvas.clientWidth
+  const syBottom = (ny * 0.5 + 0.5) * canvas.clientHeight
+  return { x: sx, y: canvas.clientHeight - syBottom }
 }
 
 // ─── Main builder ──────────────────────────────────────────────────────────
@@ -994,17 +1015,19 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           }
         }
       } else if (pick.mode === 'scale') {
-        const [adx, ady, adz] = AXIS_DIRS[pick.axis]
-        const nearest = rayLineNearest(
-          rox, roy, roz, rdx, rdy, rdz,
-          origin[0], origin[1], origin[2], adx, ady, adz,
-        )
-        if (!nearest) return
-        const anchor = Math.abs(nearest.s) < 1e-3 ? 1e-3 : nearest.s
+        // Blender-style: factor = current_screen_dist / mousedown_screen_dist.
+        // Purely 2D so it doesn't whipsaw based on axis-vs-view angle the way
+        // the world-space ray-line projection did. Axis choice is purely
+        // cosmetic (the scaled value is uniform — see commit branch below).
+        const sp = worldToScreen(scene, canvas, origin)
+        if (!sp) return
+        // Floor anchor at 10px so clicks very close to the gizmo origin
+        // (shouldn't happen — the cube sits at the END of the stem — but
+        // defense in depth) can't divide-by-near-zero into a huge factor.
+        const anchorScreenDist = Math.max(10, Math.hypot(px - sp.x, py - sp.y))
         dragState = {
           mode: 'scale', axis: pick.axis, origin, entities,
-          anchorSignedDist: anchor,
-          refHandleScale: lastHandleScale > 0 ? lastHandleScale : 100,
+          anchorScreenDist,
           currentFactor: 1,
         }
       } else if (pick.mode === 'rotate') {
@@ -1073,22 +1096,15 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           }
         }
       } else if (ds.mode === 'scale') {
-        const [adx, ady, adz] = AXIS_DIRS[ds.axis]
-        const nearest = rayLineNearest(
-          rox, roy, roz, rdx, rdy, rdz,
-          origin[0], origin[1], origin[2], adx, ady, adz,
-        )
-        if (!nearest) return
-        // Exponential factor based on world-space drag distance, scaled by
-        // the gizmo's visible size × SCALE_DRAG_REFERENCE. With reference=5,
-        // dragging by 5 handleScales (≈ five gizmo widths on screen) gives
-        // a 2× scale; dragging back the same distance gives 0.5×. Symmetric,
-        // multiplicative, screen-size-invariant. Tuned softer than the
-        // original 1-handleScale-per-doubling because the original felt
-        // jumpy in practice; bump SCALE_DRAG_REFERENCE if it still does.
-        const SCALE_DRAG_REFERENCE = 5
-        const delta = nearest.s - ds.anchorSignedDist
-        let factor = Math.pow(2, delta / (ds.refHandleScale * SCALE_DRAG_REFERENCE))
+        // Screen-space ratio (Blender). factor = current_screen_dist /
+        // mousedown_screen_dist from the gizmo's projected pixel position.
+        // Dead-simple 2D: move the cursor twice as far from the gizmo as
+        // where you clicked → 2×. Move it half as far → 0.5×. Axis choice
+        // is purely cosmetic (the commit branch writes uniform scale).
+        const sp = worldToScreen(scene, canvas, origin)
+        if (!sp) return
+        const currentScreenDist = Math.max(1, Math.hypot(px - sp.x, py - sp.y))
+        let factor = currentScreenDist / ds.anchorScreenDist
         if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
         if (factor < 0.01) factor = 0.01
         if (factor > 100) factor = 100
