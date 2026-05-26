@@ -115,8 +115,8 @@ func main() {
 	app := NewApp()
 	err := wails.Run(&options.App{
 		Title:  fmt.Sprintf("wc3-forge [PID %d]", os.Getpid()),
-		Width:  1280,
-		Height: 800,
+		Width:  1600,
+		Height: 1000,
 		AssetServer: &assetserver.Options{
 			Assets:  assets,
 			Handler: newAssetHandler(),
