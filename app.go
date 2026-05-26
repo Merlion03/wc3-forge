@@ -67,6 +67,9 @@ type App struct {
 	// callback knows the user already confirmed via the modal and lets the
 	// close proceed without re-prompting.
 	forceQuitting bool
+	// pidTag is the cached " — PID <n>" suffix for the OS window title. The
+	// PID never changes for this process so we format it once at startup.
+	pidTag string
 }
 
 func NewApp() *App {
@@ -83,6 +86,52 @@ func (a *App) LogJS(message string) {
 	}
 	defer f.Close()
 	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format("15:04:05.000"), message)
+}
+
+// buildWindowTitle composes the OS-visible window title from the four inputs
+// that drive it. Pure so it's unit-testable without spinning up Wails.
+//
+// Format (matches what an agent sees as it labels its instance):
+//
+//	[* ]<map-or-default>[ — <label>] — PID <n>
+//
+// The leading "* " marks unsaved edits; <map-or-default> is the loaded map
+// name or "wc3-forge" when no map is open; the label segment is omitted when
+// empty (whitespace-only inputs also collapse to omitted). The PID suffix is
+// always present so users can pair a window with the PID an agent reports.
+func buildWindowTitle(mapName, label string, dirty bool, pidTag string) string {
+	leading := ""
+	if dirty {
+		leading = "* "
+	}
+	primary := strings.TrimSpace(mapName)
+	if primary == "" {
+		primary = "wc3-forge"
+	}
+	mid := ""
+	if l := strings.TrimSpace(label); l != "" {
+		mid = " — " + l
+	}
+	return leading + primary + mid + pidTag
+}
+
+// refreshWindowTitle re-reads current session truth and pushes a new OS
+// window title. Cheap to call from any of the three buses (map/dirty/label)
+// because the underlying state lookups are RLock-only.
+func (a *App) refreshWindowTitle() {
+	if a.ctx == nil {
+		return
+	}
+	var mapName string
+	if info := forge.Current.Info(); info != nil {
+		mapName = info.Name
+	}
+	runtime.WindowSetTitle(a.ctx, buildWindowTitle(
+		mapName,
+		forge.Current.AgentLabel(),
+		forge.Current.IsDirty(),
+		a.pidTag,
+	))
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -117,32 +166,38 @@ func (a *App) startup(ctx context.Context) {
 	forge.Current.OnSelectionChanged(func(s forge.SelectionState) {
 		runtime.EventsEmit(a.ctx, eventSelectionChanged, s)
 	})
+	// OS-visible Wails window title is the composition of (dirty marker,
+	// loaded map name, agent label, PID). Three independent buses can change
+	// any of those, so each one calls back into refreshWindowTitle which
+	// re-reads current truth and pushes a single WindowSetTitle. The JS side's
+	// document.title only updates the inner WebView2 child window, which the
+	// user never sees; runtime.WindowSetTitle hits the outer Wails window so
+	// the taskbar + alt-tab entry pick up changes too. The PID suffix is
+	// cached once — it can't change for the life of this process.
+	a.pidTag = fmt.Sprintf(" — PID %d", os.Getpid())
 	// Forward map open/close from any source (App method OR bridge OR
-	// --open flag at startup) to the frontend so it reloads.
+	// --open flag at startup) to the frontend so it reloads, AND refresh
+	// the window title since the map name segment just changed.
 	forge.Current.OnMapChanged(func(loaded bool) {
 		runtime.EventsEmit(a.ctx, eventMapChanged, map[string]any{"loaded": loaded})
+		a.refreshWindowTitle()
 	})
 	// Forward dirty-state changes (MoveUnit edits, Save flushes) so the UI
 	// can keep its modified-dot + Save-button enable state in sync without
 	// polling. Payload mirrors the map-changed shape: { dirty: bool }.
-	//
-	// Also reflect dirty state in the OS-visible Wails window title. The JS
-	// side's document.title only updates the inner WebView2 child window,
-	// which the user never sees; runtime.WindowSetTitle hits the outer Wails
-	// window so the taskbar + window-list entry pick up the `* ` prefix too.
-	// Title format includes the process PID so users running multiple
-	// wc3-forge windows (e.g. coordinating with parallel AI agents) can tell
-	// them apart at a glance in the taskbar + window list. The PID never
-	// changes for this process so we capture it once.
-	pidTag := fmt.Sprintf(" [PID %d]", os.Getpid())
 	forge.Current.OnDirtyChanged(func(dirty bool) {
 		runtime.EventsEmit(a.ctx, eventDirtyChanged, map[string]any{"dirty": dirty})
-		title := "wc3-forge" + pidTag
-		if dirty {
-			title = "* wc3-forge" + pidTag
-		}
-		runtime.WindowSetTitle(a.ctx, title)
+		a.refreshWindowTitle()
 	})
+	// Agents can label this wc3-forge window via the window.set_title MCP
+	// handler so users running multiple parallel instances tell them apart
+	// in the taskbar/alt-tab list without memorizing PIDs.
+	forge.Current.OnAgentLabelChanged(func(string) {
+		a.refreshWindowTitle()
+	})
+	// Push an initial title now so the bare "wc3-forge" Wails default is
+	// replaced with our PID-tagged version even before the first map opens.
+	a.refreshWindowTitle()
 	// Forward entity-change notifications (MoveUnit, future SetRotation/etc.)
 	// so two stale views can refresh in lockstep:
 	//   - Properties panel re-fetches the primary entity to repaint inputs

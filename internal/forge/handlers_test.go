@@ -170,3 +170,75 @@ func TestHandleMapSave_OK(t *testing.T) {
 		t.Errorf("expected ok:true, got %v", m["ok"])
 	}
 }
+
+// TestHandleWindowSetTitle_RoundTrip asserts the agent label is stored on the
+// session and surfaced in the response. Doesn't need a loaded map — the label
+// is session-global state, not per-map.
+func TestHandleWindowSetTitle_RoundTrip(t *testing.T) {
+	prev := Current
+	t.Cleanup(func() { Current = prev })
+	Current = &Session{}
+
+	res, err := handleWindowSetTitle(json.RawMessage(`{"label":"testing cliff fix"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r, ok := res.(windowSetTitleResponse)
+	if !ok {
+		t.Fatalf("expected windowSetTitleResponse, got %T", res)
+	}
+	if !r.OK || r.Label != "testing cliff fix" {
+		t.Errorf("unexpected response: %+v", r)
+	}
+	if got := Current.AgentLabel(); got != "testing cliff fix" {
+		t.Errorf("session AgentLabel = %q, want %q", got, "testing cliff fix")
+	}
+}
+
+// TestHandleWindowSetTitle_EmptyClears asserts the empty-string case is
+// accepted (not rejected as "missing label") so agents can clear their tag.
+func TestHandleWindowSetTitle_EmptyClears(t *testing.T) {
+	prev := Current
+	t.Cleanup(func() { Current = prev })
+	Current = &Session{}
+	Current.SetAgentLabel("stale label")
+
+	if _, err := handleWindowSetTitle(json.RawMessage(`{"label":""}`)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := Current.AgentLabel(); got != "" {
+		t.Errorf("AgentLabel after clear = %q, want empty", got)
+	}
+}
+
+// TestHandleWindowSetTitle_InvalidParams asserts malformed JSON returns a
+// clean error rather than panicking.
+func TestHandleWindowSetTitle_InvalidParams(t *testing.T) {
+	if _, err := handleWindowSetTitle(json.RawMessage(`{"label":123}`)); err == nil {
+		t.Fatal("expected error for non-string label")
+	}
+}
+
+// TestSessionAgentLabel_NotifiesOnce confirms the listener fires exactly once
+// per distinct value — repeated SetAgentLabel("foo") calls are no-ops so the
+// window-title refresh chain doesn't churn.
+func TestSessionAgentLabel_NotifiesOnce(t *testing.T) {
+	s := &Session{}
+	var fires []string
+	s.OnAgentLabelChanged(func(l string) { fires = append(fires, l) })
+
+	s.SetAgentLabel("first")
+	s.SetAgentLabel("first") // duplicate — no-op
+	s.SetAgentLabel("second")
+	s.SetAgentLabel("")
+
+	want := []string{"first", "second", ""}
+	if len(fires) != len(want) {
+		t.Fatalf("got %d fires, want %d (%v)", len(fires), len(want), fires)
+	}
+	for i := range want {
+		if fires[i] != want[i] {
+			t.Errorf("fire %d = %q, want %q", i, fires[i], want[i])
+		}
+	}
+}

@@ -171,6 +171,15 @@ type Session struct {
 	// forge.*) while still letting bridge handlers reach UI state.
 	uiCommandListeners []func(string)
 
+	// Agent label — free-form short string set by a connected MCP client to
+	// describe what that agent is doing in this wc3-forge window. The App
+	// layer reads it when building the OS window title so users running
+	// multiple wc3-forge instances in parallel can tell them apart at a
+	// glance (taskbar + alt-tab list) without having to memorize PIDs.
+	// Persists across map opens — the label describes the agent, not the map.
+	agentLabel          string
+	agentLabelListeners []func(string)
+
 	// Undo/redo machinery (history.go). history stores applied commands
 	// oldest-first; redoStack holds commands that have been undone and are
 	// ready to be re-applied. groupDepth + pendingGroup support transactional
@@ -1358,5 +1367,47 @@ func (s *Session) EmitUICommand(cmd string) {
 	s.mu.RUnlock()
 	for _, fn := range listeners {
 		fn(cmd)
+	}
+}
+
+// AgentLabel returns the free-form label most recently set by an MCP client.
+// Empty when no agent has labeled this window.
+func (s *Session) AgentLabel() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.agentLabel
+}
+
+// SetAgentLabel replaces the agent label and fires the change bus. No-op
+// (and no notification) when the value matches the current label, so
+// repeated SetAgentLabel("foo") calls don't churn the window title.
+func (s *Session) SetAgentLabel(label string) {
+	s.mu.Lock()
+	if s.agentLabel == label {
+		s.mu.Unlock()
+		return
+	}
+	s.agentLabel = label
+	s.mu.Unlock()
+	s.notifyAgentLabel(label)
+}
+
+// OnAgentLabelChanged subscribes to agent-label changes. Fires AFTER the
+// session lock is released, so listeners may call back into Session safely.
+// The App layer uses this to rebuild the OS window title when an agent
+// re-labels its instance.
+func (s *Session) OnAgentLabelChanged(fn func(string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.agentLabelListeners = append(s.agentLabelListeners, fn)
+}
+
+func (s *Session) notifyAgentLabel(label string) {
+	s.mu.RLock()
+	listeners := make([]func(string), len(s.agentLabelListeners))
+	copy(listeners, s.agentLabelListeners)
+	s.mu.RUnlock()
+	for _, fn := range listeners {
+		fn(label)
 	}
 }
