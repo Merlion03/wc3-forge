@@ -10,6 +10,7 @@
     MoveUnit, MoveDoodad, IsDirty, SaveMap,
     LaunchInWC3,
     Undo, Redo, CanUndo, CanRedo, HistoryList,
+    ForceQuit,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
@@ -29,6 +30,7 @@
   import { loadIconURL } from './icon-loader'
   import { TEAM_COLORS_RGB } from './sloc-markers'
   import { Button } from '$lib/components/ui/button'
+  import * as Dialog from '$lib/components/ui/dialog'
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu'
   import { Input } from '$lib/components/ui/input'
   import { Toaster } from '$lib/components/ui/sonner'
@@ -121,6 +123,15 @@
   let canRedo: boolean = $state(false)
   let undoLabel: string = $state('')
   let redoLabel: string = $state('')
+
+  // Unsaved-changes modal. Open is driven by the wc3-forge:close-requested
+  // event fired from Go's OnBeforeClose handler when the user clicks the
+  // window X (or Alt+F4) on a dirty session. The three buttons map to:
+  //   Save & Quit    → SaveMap() then ForceQuit()
+  //   Discard & Quit → ForceQuit() (in-memory edits drop on process exit)
+  //   Cancel         → close the modal, do nothing
+  let quitGuardOpen: boolean = $state(false)
+  let quitGuardSaving: boolean = $state(false)
 
   async function launchTestMap() {
     if (testMapDisabled) return
@@ -501,6 +512,12 @@
       flog('[history] wc3-forge:history-changed received')
       void refreshHistoryState()
     })
+    // Window-close gate: Go's OnBeforeClose handler emits this event when
+    // the user tries to close a dirty session. Show the confirmation modal.
+    EventsOn('wc3-forge:close-requested', () => {
+      flog('[quit-guard] close-requested fired (dirty session)')
+      quitGuardOpen = true
+    })
     // capture=true so we run BEFORE WebView2's default editing-shortcut
     // handlers, which can grab Ctrl+Z even with nothing focused (Chromium
     // treats the whole page as potential text edit context). Document
@@ -750,6 +767,30 @@
     flog(`[history] doRedo called, canRedo=${canRedo}`)
     if (!canRedo) return
     try { await Redo() } catch (e) { showToast('error', `Redo failed: ${e instanceof Error ? e.message : String(e)}`) }
+  }
+
+  async function quitGuardSaveAndQuit() {
+    if (quitGuardSaving) return
+    quitGuardSaving = true
+    try {
+      await SaveMap()
+      // Save succeeded → drop the modal and ForceQuit. If Save fails (e.g.
+      // ErrMPQWriteNotImplemented), show the toast and leave the modal open
+      // so the user can pick Discard or Cancel instead.
+      quitGuardOpen = false
+      await ForceQuit()
+    } catch (e) {
+      showToast('error', `Save failed: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      quitGuardSaving = false
+    }
+  }
+  async function quitGuardDiscardAndQuit() {
+    quitGuardOpen = false
+    await ForceQuit()
+  }
+  function quitGuardCancel() {
+    quitGuardOpen = false
   }
 
   function pushSnap() {
@@ -1874,6 +1915,30 @@
   {#if showMapInfoEditor}
     <MapInfoEditor bind:open={showMapInfoEditor} onClose={closeMapInfoEditor} />
   {/if}
+
+  <!-- Unsaved-changes confirmation. Driven by the wc3-forge:close-requested
+       event emitted from Go's OnBeforeClose when the user X-es a dirty
+       session. interactOutsideBehavior=ignore so click-outside doesn't
+       silently dismiss — the user MUST pick one of the three buttons. -->
+  <Dialog.Root bind:open={quitGuardOpen}>
+    <Dialog.Content interactOutsideBehavior="ignore" class="max-w-md">
+      <Dialog.Header>
+        <Dialog.Title>Unsaved changes</Dialog.Title>
+        <Dialog.Description>
+          You have unsaved edits to <span class="font-medium text-foreground">{status.name || status.path || 'this map'}</span>.
+          Closing now will discard them.
+        </Dialog.Description>
+      </Dialog.Header>
+      <Dialog.Footer class="gap-2 sm:gap-2">
+        <Button variant="ghost" onclick={quitGuardCancel} disabled={quitGuardSaving}>Cancel</Button>
+        <Button variant="destructive" onclick={quitGuardDiscardAndQuit} disabled={quitGuardSaving}>Discard &amp; Quit</Button>
+        <Button class="bg-amber-500 text-white hover:bg-amber-600"
+                onclick={quitGuardSaveAndQuit} disabled={quitGuardSaving}>
+          {quitGuardSaving ? 'Saving…' : 'Save & Quit'}
+        </Button>
+      </Dialog.Footer>
+    </Dialog.Content>
+  </Dialog.Root>
 
   <Toaster />
 </main>

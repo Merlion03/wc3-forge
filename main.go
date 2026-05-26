@@ -123,6 +123,14 @@ func main() {
 		},
 		BackgroundColour: &options.RGBA{R: 18, G: 18, B: 20, A: 1},
 		OnStartup:        app.startup,
+		// OnBeforeClose: gate the window-close on dirty state. When clean,
+		// returns false → close proceeds. When dirty, emits a JS event so
+		// App.svelte can show its "unsaved changes" modal and returns true
+		// → this close is aborted. The user's choice (Save & Quit / Discard
+		// & Quit / Cancel) drives App.SaveMap() + App.ForceQuit() or just
+		// App.ForceQuit(). Returning true MUST be paired with a JS path
+		// that can actually quit — App.ForceQuit exists for that.
+		OnBeforeClose: app.onBeforeClose,
 		Bind: []interface{}{
 			app,
 		},
