@@ -419,6 +419,115 @@ export namespace main {
 	        this.gold_amount = source["gold_amount"];
 	    }
 	}
+	export class UnitObjectField {
+	    id: string;
+	    field: string;
+	    display_name: string;
+	    category: string;
+	    type: string;
+	    value: string;
+	    display: string;
+	    overridden: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new UnitObjectField(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.field = source["field"];
+	        this.display_name = source["display_name"];
+	        this.category = source["category"];
+	        this.type = source["type"];
+	        this.value = source["value"];
+	        this.display = source["display"];
+	        this.overridden = source["overridden"];
+	    }
+	}
+	export class UnitObjectDetail {
+	    id: string;
+	    name: string;
+	    base_id?: string;
+	    is_custom: boolean;
+	    is_edited: boolean;
+	    race: string;
+	    kind: string;
+	    icon_art: string;
+	    model_path: string;
+	    model_fallbacks: string[];
+	    fields: UnitObjectField[];
+	
+	    static createFrom(source: any = {}) {
+	        return new UnitObjectDetail(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.base_id = source["base_id"];
+	        this.is_custom = source["is_custom"];
+	        this.is_edited = source["is_edited"];
+	        this.race = source["race"];
+	        this.kind = source["kind"];
+	        this.icon_art = source["icon_art"];
+	        this.model_path = source["model_path"];
+	        this.model_fallbacks = source["model_fallbacks"];
+	        this.fields = this.convertValues(source["fields"], UnitObjectField);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class UnitObjectListEntity {
+	    id: string;
+	    name: string;
+	    race: string;
+	    race_label: string;
+	    kind: string;
+	    category: string;
+	    is_custom: boolean;
+	    is_edited: boolean;
+	    base_id?: string;
+	    campaign: boolean;
+	    icon_art: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UnitObjectListEntity(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.race = source["race"];
+	        this.race_label = source["race_label"];
+	        this.kind = source["kind"];
+	        this.category = source["category"];
+	        this.is_custom = source["is_custom"];
+	        this.is_edited = source["is_edited"];
+	        this.base_id = source["base_id"];
+	        this.campaign = source["campaign"];
+	        this.icon_art = source["icon_art"];
+	    }
+	}
 
 }
 

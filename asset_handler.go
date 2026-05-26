@@ -148,8 +148,17 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // siblingExtension returns the same path with the format-pair extension
-// swapped (BLP↔DDS for textures, MDX↔MDL for models). Returns "" if the
-// extension isn't one of those pairs.
+// swapped (BLP↔DDS for textures, MDX↔MDL for models, .tif→.dds for the
+// Reforged HD PBR-texture references). Returns "" if the extension isn't
+// one of those pairs.
+//
+// Reforged HD MDX files reference their PBR textures as `.tif` paths
+// (e.g. `units/orc/rokhan/orc_rokhan_main_diffuse.tif`) but CASC actually
+// ships the bytes as `.dds`. Without this swap, every HD-only unit
+// (Shadow Hunter, Beastmaster, several Reforged-era heroes) renders
+// invisible in any preview / scene that loads its MDX — the geometry is
+// there but every texture binding is null. One-way map: .dds doesn't
+// fall back to .tif because nothing in the wild stores it the other way.
 func siblingExtension(p string) string {
 	ext := path.Ext(p)
 	stem := p[:len(p)-len(ext)]
@@ -158,6 +167,8 @@ func siblingExtension(p string) string {
 		return stem + ".dds"
 	case ".dds":
 		return stem + ".blp"
+	case ".tif":
+		return stem + ".dds"
 	case ".mdx":
 		return stem + ".mdl"
 	case ".mdl":

@@ -67,6 +67,14 @@ func main() {
 		log.SetOutput(logFile)
 	}
 
+	// The forge package needs to read CASC + map assets to load the Object
+	// Editor's stock tables. Wire it through readBaseAsset (the same
+	// map-first-then-CASC lookup the typeindex / asset handler use) so
+	// feature code in internal/forge doesn't have to import the asset
+	// machinery directly. Set BEFORE bridge starts so the first MCP request
+	// after startup already sees a live reader.
+	forge.SetBaseAssetReader(readBaseAsset)
+
 	// Bridge always runs unless explicitly disabled. The GUI and external MCP
 	// clients can coexist — both read/write the same forge.Session.
 	var b *bridge.Bridge
