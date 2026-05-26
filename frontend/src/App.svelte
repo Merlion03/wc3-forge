@@ -26,6 +26,7 @@
   import GameplayConstantsEditor from './GameplayConstantsEditor.svelte'
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
+  import CameraOrbitGizmo from './CameraOrbitGizmo.svelte'
   import { showToast } from './toast'
   import { flog } from './debuglog'
   import { loadIconURL } from './icon-loader'
@@ -111,7 +112,7 @@
   let doodadCategoriesPresent: string[] = $state([])
 
   let canvas: HTMLCanvasElement = $state()
-  let scene: SceneAPI | null = null
+  let scene: SceneAPI | null = $state(null)
   let dirty: boolean = $state(false)
   let saving: boolean = $state(false)
   let launching: boolean = $state(false)
@@ -1600,6 +1601,14 @@
       <canvas bind:this={canvas}></canvas>
       {#if showMinimap}
         <Minimap {scene} {mapLoadGen} />
+      {/if}
+      <!-- View-orbit gizmo: top-right of the viewport. Lives in the same
+           anchor container as the minimap (which sits bottom-right) and
+           reads its camera handle from the SceneAPI so it never depends on
+           window-globals. Only mounts when scene exists so the camera
+           handle is guaranteed non-null. -->
+      {#if scene}
+        <CameraOrbitGizmo camera={scene.getCamera()} />
       {/if}
     </section>
 
