@@ -1559,8 +1559,6 @@
 
     <div class="flex-1 truncate text-xs text-muted-foreground">
       {#if status.loaded}
-        <span class="font-medium text-foreground">{status.name || '(untitled)'}</span>
-        <span class="mx-2 text-border">·</span>
         <span>{status.unit_count} entities</span>
       {/if}
     </div>
