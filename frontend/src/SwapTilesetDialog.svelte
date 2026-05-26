@@ -83,7 +83,11 @@
       // Run both fetches in parallel; ListTilesets is the slow one (CASC
       // SLK load on first call). GetTerrain returns the current palettes.
       const [cat, terrain] = await Promise.all([
-        ListTilesets() as Promise<TilesetInfo[]>,
+        // Cast via unknown: Wails generates TilesetInfoDTO with `color: number[]`
+        // while the local TilesetInfo declares `color: [number, number, number]`.
+        // The shapes are runtime-identical but TS's strict overlap check rejects
+        // the direct cast.
+        ListTilesets() as unknown as Promise<TilesetInfo[]>,
         GetTerrain() as Promise<any>,
       ])
       catalog = cat ?? []

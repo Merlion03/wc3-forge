@@ -820,12 +820,12 @@
   async function doUndo() {
     flog(`[history] doUndo called, canUndo=${canUndo}`)
     if (!canUndo) return
-    try { await Undo() } catch (e) { showToast('error', `Undo failed: ${e instanceof Error ? e.message : String(e)}`) }
+    try { await Undo() } catch (e) { showToast(`Undo failed: ${e instanceof Error ? e.message : String(e)}`, 'error') }
   }
   async function doRedo() {
     flog(`[history] doRedo called, canRedo=${canRedo}`)
     if (!canRedo) return
-    try { await Redo() } catch (e) { showToast('error', `Redo failed: ${e instanceof Error ? e.message : String(e)}`) }
+    try { await Redo() } catch (e) { showToast(`Redo failed: ${e instanceof Error ? e.message : String(e)}`, 'error') }
   }
 
   async function quitGuardSaveAndQuit() {
@@ -839,7 +839,7 @@
       quitGuardOpen = false
       await ForceQuit()
     } catch (e) {
-      showToast('error', `Save failed: ${e instanceof Error ? e.message : String(e)}`)
+      showToast(`Save failed: ${e instanceof Error ? e.message : String(e)}`, 'error')
     } finally {
       quitGuardSaving = false
     }

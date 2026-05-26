@@ -468,7 +468,7 @@ export interface GizmoRenderer {
 
   cancelDrag(): void
   isDragging(): boolean
-  dragAxis(): GizmoAxis | null
+  dragAxis(): GizmoAxis | 'centroid' | null
   dragMode(): GizmoMode | null
   /**
    * Returns the world-space arrow-tip positions for the X/Y/Z move arrows,
@@ -1267,6 +1267,9 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
       if (entities.length === 0) return
 
       if (pick.mode === 'move') {
+        // pickMove only returns GizmoAxis (no 'centroid'); narrow so the
+        // MoveDrag literal below typechecks against MoveDrag.axis: GizmoAxis.
+        if (pick.axis === 'centroid') return
         if (isPlaneAxis(pick.axis)) {
           // Plane move: project ray onto plane → 3D anchor point.
           const [nx, ny, nz] = PLANE_NORMAL[pick.axis]
@@ -1359,6 +1362,9 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           return
         }
       } else if (pick.mode === 'rotate') {
+        // Rotate pick uses pickMove (axis arrows), which never returns
+        // 'centroid'. Narrow so RotateDrag.axis: GizmoAxis typechecks.
+        if (pick.axis === 'centroid') return
         const hit = rayPlane(
           rox, roy, roz, rdx, rdy, rdz,
           origin[0], origin[1], origin[2],
