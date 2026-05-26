@@ -719,16 +719,18 @@
     }
     // Gizmo mode hotkeys: W=move, E=rotate, R=scale (Blender-ish; we use W
     // instead of G to avoid colliding with WASD camera pan if that returns
-    // someday). Bare keys only; ignore when typing in an input.
+    // someday). 1/2/3 are alternate bindings for users with the number-row
+    // muscle memory. Bare keys only; ignore when typing in an input.
     if (!e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
-        && (e.key === 'w' || e.key === 'W' || e.key === 'e' || e.key === 'E' || e.key === 'r' || e.key === 'R')) {
+        && (e.key === 'w' || e.key === 'W' || e.key === 'e' || e.key === 'E' || e.key === 'r' || e.key === 'R'
+         || e.key === '1' || e.key === '2' || e.key === '3')) {
       const tgt = e.target as HTMLElement | null
       const tagName = tgt?.tagName?.toLowerCase()
       if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
       const next: 'move' | 'rotate' | 'scale' | null =
-        (e.key === 'w' || e.key === 'W') ? 'move' :
-        (e.key === 'e' || e.key === 'E') ? 'rotate' :
-        (e.key === 'r' || e.key === 'R') ? 'scale' : null
+        (e.key === 'w' || e.key === 'W' || e.key === '1') ? 'move' :
+        (e.key === 'e' || e.key === 'E' || e.key === '2') ? 'rotate' :
+        (e.key === 'r' || e.key === 'R' || e.key === '3') ? 'scale' : null
       if (next) {
         e.preventDefault()
         setGizmoMode(next)
