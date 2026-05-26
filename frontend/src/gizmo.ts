@@ -1080,13 +1080,15 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
         )
         if (!nearest) return
         // Exponential factor based on world-space drag distance, scaled by
-        // the gizmo's visible size. Dragging by one handleScale = 2x size;
-        // by two handleScales = 4x; dragging back the same distance = 0.5x.
-        // Multiplicative + symmetric + screen-size-invariant. The old linear
-        // ratio (current/anchor) could produce 100x changes from small drags
-        // when the user clicked close to the gizmo origin.
+        // the gizmo's visible size × SCALE_DRAG_REFERENCE. With reference=5,
+        // dragging by 5 handleScales (≈ five gizmo widths on screen) gives
+        // a 2× scale; dragging back the same distance gives 0.5×. Symmetric,
+        // multiplicative, screen-size-invariant. Tuned softer than the
+        // original 1-handleScale-per-doubling because the original felt
+        // jumpy in practice; bump SCALE_DRAG_REFERENCE if it still does.
+        const SCALE_DRAG_REFERENCE = 5
         const delta = nearest.s - ds.anchorSignedDist
-        let factor = Math.pow(2, delta / ds.refHandleScale)
+        let factor = Math.pow(2, delta / (ds.refHandleScale * SCALE_DRAG_REFERENCE))
         if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
         if (factor < 0.01) factor = 0.01
         if (factor > 100) factor = 100
