@@ -610,6 +610,14 @@ export interface SceneAPI {
     rotateOn: boolean; rotateStep: number
     scaleOn: boolean; scaleStep: number
   }
+  /**
+   * Frame-selected: move the camera pivot to the centroid of the current
+   * selection and zoom in so the bounding box of the selection fits the
+   * viewport. Orbit angles are preserved. Returns true if anything was
+   * focused; false when the selection is empty or none of the selected
+   * items have a live world position yet. Bound to the 'f' hotkey.
+   */
+  focusSelection(): boolean
 }
 
 export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {
@@ -2597,6 +2605,57 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     },
     getCamera() {
       return camera
+    },
+    focusSelection(): boolean {
+      // Build a list of world positions for everything in the current
+      // selection. Units (including sloc MDX instances, which the sloc
+      // renderer registers in unitInstances) and doodads expose live
+      // worldLocation arrays; for slocs that don't have an MDX instance
+      // yet, fall back to the marker's stored position via slocRenderer.
+      const positions: Array<[number, number, number]> = []
+      for (const cn of selectedSet) {
+        const inst = unitInstances.get(cn)
+        const wl = inst?.worldLocation
+        if (wl) {
+          positions.push([wl[0], wl[1], wl[2]])
+          continue
+        }
+        // Sloc pillar-fallback: no MDX instance, look it up by cn.
+        const info = slocRenderer?.pickInfos().find(p => p.creationNumber === cn)
+        if (info) positions.push([info.center[0], info.center[1], info.center[2]])
+      }
+      for (const cn of selectedDoodadSet) {
+        const inst = doodadInstances.get(cn)
+        const wl = inst?.worldLocation
+        if (wl) positions.push([wl[0], wl[1], wl[2]])
+      }
+      if (positions.length === 0) return false
+
+      // Centroid + axis-aligned bounding box.
+      let cx = 0, cy = 0, cz = 0
+      let minX = Infinity, maxX = -Infinity
+      let minY = Infinity, maxY = -Infinity
+      let minZ = Infinity, maxZ = -Infinity
+      for (const [x, y, z] of positions) {
+        cx += x; cy += y; cz += z
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+        if (z < minZ) minZ = z
+        if (z > maxZ) maxZ = z
+      }
+      const n = positions.length
+      cx /= n; cy /= n; cz /= n
+      // Half the bounding-box diagonal is a tight upper bound on the
+      // farthest selected point from the centroid. Add a 256-stud pad so
+      // unit silhouettes (which extend past their pivot point) aren't
+      // clipped against the viewport edges, and floor at 384 so a
+      // singleton doesn't zoom in past the camera's near-plane comfort.
+      const halfDiag = 0.5 * Math.hypot(maxX - minX, maxY - minY, maxZ - minZ)
+      const radius = Math.max(halfDiag + 256, 384)
+      camera.focus(cx, cy, cz, radius)
+      return true
     },
     updateUnitPosition(cn: number, x: number, y: number, z: number) {
       // Delegates to the shared impl so direct callers and the

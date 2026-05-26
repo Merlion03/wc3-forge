@@ -793,6 +793,17 @@
       e.preventDefault()
       setGizmoMode(next)
     }
+    // Frame-selected hotkey: bare 'f'. Centers the camera on the current
+    // selection's centroid and zooms in to fit. Matches the Blender / Maya
+    // / Unity muscle memory. Same input-focus gate as 'M' so typing in the
+    // Properties panel doesn't yank the camera away.
+    if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+      const tgt = e.target as HTMLElement | null
+      const tagName = tgt?.tagName?.toLowerCase()
+      if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
+      e.preventDefault()
+      scene?.focusSelection()
+    }
   }
 
   function setGizmoMode(m: 'move' | 'rotate' | 'scale') {

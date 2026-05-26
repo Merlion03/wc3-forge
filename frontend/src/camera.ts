@@ -65,6 +65,13 @@ export interface RTSCamera {
   setOrbit(yaw: number, pitch: number): void
   /** Reset orbit to editor defaults (DEFAULT_YAW, DEFAULT_PITCH). Pivot and distance untouched. */
   resetOrbit(): void
+  /**
+   * Move the pivot to (cx, cy, cz) and pick a distance that frames a sphere
+   * of the given radius around it. Used by the "frame selected" hotkey to
+   * zoom in on whatever the user has selected. Orbit angles are preserved
+   * so the user doesn't lose their current viewpoint.
+   */
+  focus(cx: number, cy: number, cz: number, radius: number): void
 }
 
 export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSCamera {
@@ -291,6 +298,22 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
     resetOrbit() {
       yaw = DEFAULT_YAW
       pitch = DEFAULT_PITCH
+      applyToViewer()
+    },
+    focus(cx: number, cy: number, cz: number, radius: number) {
+      if (!isFinite(cx) || !isFinite(cy) || !isFinite(cz) || !isFinite(radius)) return
+      pivot[0] = cx
+      pivot[1] = cy
+      pivot[2] = cz
+      // Fit a sphere of the given radius into the vertical FOV with a small
+      // margin (×1.3) so the framed object doesn't kiss the screen edges.
+      // The 1/cos(pitch) factor compensates for tilt — at non-zero pitch a
+      // sphere of radius r projects to a taller ellipse on the ground plane,
+      // so we back off proportionally. Floor at 0.4 matches frame() to avoid
+      // exploding the distance near the floor-eye clamp.
+      const r = Math.max(1, radius)
+      const d = (r * 1.3) / Math.tan(FOV / 2) / Math.max(0.4, Math.cos(pitch))
+      distance = Math.max(DIST_MIN, Math.min(DIST_MAX, d))
       applyToViewer()
     },
   }
