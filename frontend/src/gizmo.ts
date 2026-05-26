@@ -164,25 +164,29 @@ const CUBE_VERTS = buildCube()
 const PLANE_LO = 0.18
 const PLANE_HI = 0.40
 
+// Y axis is rendered/dragged in -Y direction (see ROT_Y + AXIS_DIRS.y
+// above). The XY and YZ plane patches must mirror their Y coords so the
+// patches sit at the elbow between the X (resp. Z) arrow and the visible
+// -Y arrow, not in the abandoned +Y quadrant.
 function buildPlaneXY(): Float32Array {
-  // Quad in z=0 plane, between +X and +Y axes.
+  // Quad in z=0 plane, between +X arrow and -Y arrow.
   return new Float32Array([
-    PLANE_LO, PLANE_LO, 0,  PLANE_HI, PLANE_LO, 0,  PLANE_HI, PLANE_HI, 0,
-    PLANE_LO, PLANE_LO, 0,  PLANE_HI, PLANE_HI, 0,  PLANE_LO, PLANE_HI, 0,
+    PLANE_LO, -PLANE_LO, 0,  PLANE_HI, -PLANE_LO, 0,  PLANE_HI, -PLANE_HI, 0,
+    PLANE_LO, -PLANE_LO, 0,  PLANE_HI, -PLANE_HI, 0,  PLANE_LO, -PLANE_HI, 0,
   ])
 }
 function buildPlaneXZ(): Float32Array {
-  // Quad in y=0 plane, between +X and +Z axes.
+  // Quad in y=0 plane, between +X and +Z axes. No Y component → unaffected by the flip.
   return new Float32Array([
     PLANE_LO, 0, PLANE_LO,  PLANE_HI, 0, PLANE_LO,  PLANE_HI, 0, PLANE_HI,
     PLANE_LO, 0, PLANE_LO,  PLANE_HI, 0, PLANE_HI,  PLANE_LO, 0, PLANE_HI,
   ])
 }
 function buildPlaneYZ(): Float32Array {
-  // Quad in x=0 plane, between +Y and +Z axes.
+  // Quad in x=0 plane, between -Y arrow and +Z axis.
   return new Float32Array([
-    0, PLANE_LO, PLANE_LO,  0, PLANE_HI, PLANE_LO,  0, PLANE_HI, PLANE_HI,
-    0, PLANE_LO, PLANE_LO,  0, PLANE_HI, PLANE_HI,  0, PLANE_LO, PLANE_HI,
+    0, -PLANE_LO, PLANE_LO,  0, -PLANE_HI, PLANE_LO,  0, -PLANE_HI, PLANE_HI,
+    0, -PLANE_LO, PLANE_LO,  0, -PLANE_HI, PLANE_HI,  0, -PLANE_LO, PLANE_HI,
   ])
 }
 const PLANE_XY_VERTS = buildPlaneXY()
@@ -222,8 +226,12 @@ void main() {
 const ROT_X_R0 = new Float32Array([0, 0, 1])
 const ROT_X_R1 = new Float32Array([0, 1, 0])
 const ROT_X_R2 = new Float32Array([-1, 0, 0])
+// Y axis flipped: arrow points in -Y direction (toward the camera in the
+// default top-down view), which the user found easier to drag. The
+// rotation matrix maps local +Z to world -Y; AXIS_DIRS.y is also flipped
+// below so the drag math + pick math agree with the visible arrow.
 const ROT_Y_R0 = new Float32Array([1, 0, 0])
-const ROT_Y_R1 = new Float32Array([0, 0, 1])
+const ROT_Y_R1 = new Float32Array([0, 0, -1])
 const ROT_Y_R2 = new Float32Array([0, -1, 0])
 const ROT_Z_R0 = new Float32Array([1, 0, 0])
 const ROT_Z_R1 = new Float32Array([0, 1, 0])
@@ -272,9 +280,12 @@ const AXIS_COLOR: Record<'x' | 'y' | 'z', [number, number, number]> = {
   x: X_COLOR, y: Y_COLOR, z: Z_COLOR,
 }
 
+// Y axis direction is flipped to -Y so the drag math + pick zones agree
+// with the visible arrow (which points in -Y per the flipped ROT_Y above).
+// X and Z are conventional positive directions.
 const AXIS_DIRS: Record<'x' | 'y' | 'z', [number,number,number]> = {
   x: [1, 0, 0],
-  y: [0, 1, 0],
+  y: [0, -1, 0],
   z: [0, 0, 1],
 }
 
@@ -703,9 +714,11 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
       // Check the two axes in the plane are both within [PLANE_LO, PLANE_HI]*scale.
       const lo = PLANE_LO * scale, hi = PLANE_HI * scale
       let inPlane = false
-      if (p === 'xy') inPlane = lx >= lo && lx <= hi && ly >= lo && ly <= hi
+      // Y bounds are negated because the Y axis is rendered/dragged in -Y
+      // (the patches sit in the -Y quadrant; see buildPlaneXY / buildPlaneYZ).
+      if (p === 'xy') inPlane = lx >= lo && lx <= hi && ly <= -lo && ly >= -hi
       if (p === 'xz') inPlane = lx >= lo && lx <= hi && lz >= lo && lz <= hi
-      if (p === 'yz') inPlane = ly >= lo && ly <= hi && lz >= lo && lz <= hi
+      if (p === 'yz') inPlane = ly <= -lo && ly >= -hi && lz >= lo && lz <= hi
       if (!inPlane) continue
       if (hit.t > 0 && hit.t < bestT) { bestT = hit.t; bestAxis = plane }
     }
