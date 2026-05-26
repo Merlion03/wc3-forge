@@ -675,10 +675,20 @@ function instanceBounds(inst: any): { cx: number; cy: number; cz: number; r: num
   const sx = inst.worldScale?.[0] ?? 1
   const sy = inst.worldScale?.[1] ?? 1
   const sz = inst.worldScale?.[2] ?? 1
+  // The bounds offset (b.x/y/z) is in LOCAL space. To get the world-space
+  // sphere center it has to be SCALED by the entity's worldScale then
+  // ROTATED by the entity's worldRotation, THEN translated by worldLocation.
+  // Without the rotation step, a rotated entity's bounds offset stays on
+  // the world axes — so a banner doodad with bounds offset (30, 0, 50)
+  // and a 90° yaw rotation would have its scale gizmo offset by world +X
+  // when it should be offset by world +Y.
+  const wr = inst.worldRotation ?? [0, 0, 0, 1]
+  const localOffset: [number, number, number] = [b.x * sx, b.y * sy, b.z * sz]
+  const worldOffset = rotateVecByQuat(localOffset, wr)
   return {
-    cx: inst.worldLocation[0] + b.x,
-    cy: inst.worldLocation[1] + b.y,
-    cz: inst.worldLocation[2] + b.z,
+    cx: inst.worldLocation[0] + worldOffset[0],
+    cy: inst.worldLocation[1] + worldOffset[1],
+    cz: inst.worldLocation[2] + worldOffset[2],
     r: b.r, sx, sy, sz,
   }
 }
