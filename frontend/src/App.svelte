@@ -717,24 +717,18 @@
       e.preventDefault()
       toggleMinimap()
     }
-    // Gizmo mode hotkeys: W=move, E=rotate, R=scale (Blender-ish; we use W
-    // instead of G to avoid colliding with WASD camera pan if that returns
-    // someday). 1/2/3 are alternate bindings for users with the number-row
-    // muscle memory. Bare keys only; ignore when typing in an input.
+    // Gizmo mode hotkeys: 1=move, 2=rotate, 3=scale. (W/E/R were the
+    // original Blender-style bindings; dropped per user preference for
+    // the number-row form.) Bare keys only; ignore when typing in an input.
     if (!e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
-        && (e.key === 'w' || e.key === 'W' || e.key === 'e' || e.key === 'E' || e.key === 'r' || e.key === 'R'
-         || e.key === '1' || e.key === '2' || e.key === '3')) {
+        && (e.key === '1' || e.key === '2' || e.key === '3')) {
       const tgt = e.target as HTMLElement | null
       const tagName = tgt?.tagName?.toLowerCase()
       if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
-      const next: 'move' | 'rotate' | 'scale' | null =
-        (e.key === 'w' || e.key === 'W' || e.key === '1') ? 'move' :
-        (e.key === 'e' || e.key === 'E' || e.key === '2') ? 'rotate' :
-        (e.key === 'r' || e.key === 'R' || e.key === '3') ? 'scale' : null
-      if (next) {
-        e.preventDefault()
-        setGizmoMode(next)
-      }
+      const next: 'move' | 'rotate' | 'scale' =
+        e.key === '1' ? 'move' : e.key === '2' ? 'rotate' : 'scale'
+      e.preventDefault()
+      setGizmoMode(next)
     }
   }
 
@@ -1484,21 +1478,21 @@
           variant={gizmoMode === 'move' ? 'default' : 'secondary'}
           class="rounded-r-none {gizmoMode === 'move' ? 'bg-amber-500 text-white hover:bg-amber-600' : ''}"
           onclick={() => setGizmoMode('move')}
-          title="Move (W) — drag arrows to translate"
+          title="Move (1) — drag arrows to translate"
         >Move</Button>
         <Button
           size="sm"
           variant={gizmoMode === 'rotate' ? 'default' : 'secondary'}
           class="rounded-none border-l-0 {gizmoMode === 'rotate' ? 'bg-amber-500 text-white hover:bg-amber-600' : ''}"
           onclick={() => setGizmoMode('rotate')}
-          title="Rotate (E) — drag the Z ring to rotate around vertical axis"
+          title="Rotate (2) — drag the Z ring to rotate around vertical axis"
         >Rotate</Button>
         <Button
           size="sm"
           variant={gizmoMode === 'scale' ? 'default' : 'secondary'}
           class="rounded-l-none border-l-0 {gizmoMode === 'scale' ? 'bg-amber-500 text-white hover:bg-amber-600' : ''}"
           onclick={() => setGizmoMode('scale')}
-          title="Scale (R) — drag a cube to scale uniformly"
+          title="Scale (3) — drag a face handle to scale on that axis"
         >Scale</Button>
       </div>
       <!-- Snap settings (Phase D). DropdownMenu popover with 3 channels.
