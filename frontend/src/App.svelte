@@ -25,6 +25,7 @@
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
   import { showToast } from './toast'
+  import { flog } from './debuglog'
   import { loadIconURL } from './icon-loader'
   import { TEAM_COLORS_RGB } from './sloc-markers'
   import { Button } from '$lib/components/ui/button'
@@ -497,9 +498,14 @@
     try { dirty = await IsDirty() } catch { dirty = false }
     await refreshHistoryState()
     EventsOn('wc3-forge:history-changed', () => {
+      flog('[history] wc3-forge:history-changed received')
       void refreshHistoryState()
     })
-    window.addEventListener('keydown', onGlobalKeyDown)
+    // capture=true so we run BEFORE WebView2's default editing-shortcut
+    // handlers, which can grab Ctrl+Z even with nothing focused (Chromium
+    // treats the whole page as potential text edit context). Document
+    // capture-phase also fires before any per-element keydown handlers.
+    document.addEventListener('keydown', onGlobalKeyDown, true)
     window.addEventListener('resize', onWindowResize)
     // Test-driver hook: receives commands from Go's App.EmitTestCommand so
     // verification automation can drive UI state without needing to simulate
@@ -649,26 +655,24 @@
       e.preventDefault()
       void doSave()
     }
-    // Undo: Ctrl+Z (no shift). Skip when an input/textarea has focus so the
-    // browser's text-undo keeps working. Same skip pattern the WASD-pan
-    // hotkeys use.
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'z' || e.key === 'Z')) {
+    // Undo: Ctrl+Z (no shift). Redo: Ctrl+Shift+Z (Blender/Adobe convention,
+    // also matches the Cmd+Shift+Z muscle memory). We deliberately do NOT
+    // bind Ctrl+Y as a Redo alias — the user explicitly asked for
+    // Shift+Z-only after preferring it during evaluation.
+    //
+    // Skip when an input/textarea has focus so the browser's text-undo keeps
+    // working. Same skip pattern the WASD-pan hotkeys use. Registered with
+    // capture=true (see addEventListener call) so we run BEFORE WebView2's
+    // own editing shortcuts grab Ctrl+Z/Y from the page.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'z' || e.key === 'Z')) {
       const tgt = e.target as HTMLElement | null
       const tagName = tgt?.tagName?.toLowerCase()
       if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
       e.preventDefault()
-      void doUndo()
-    }
-    // Redo: Ctrl+Y OR Ctrl+Shift+Z (both common; Y is Windows-canonical,
-    // Shift+Z is Blender/Adobe). Skip in inputs.
-    if ((e.ctrlKey || e.metaKey) && !e.altKey
-        && ((e.key === 'y' || e.key === 'Y') && !e.shiftKey
-         || (e.key === 'z' || e.key === 'Z') && e.shiftKey)) {
-      const tgt = e.target as HTMLElement | null
-      const tagName = tgt?.tagName?.toLowerCase()
-      if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
-      e.preventDefault()
-      void doRedo()
+      e.stopPropagation()
+      flog(`[hotkey] ${e.shiftKey ? 'redo' : 'undo'} canUndo=${canUndo} canRedo=${canRedo}`)
+      if (e.shiftKey) void doRedo()
+      else            void doUndo()
     }
     // Map Info Editor hotkey: Ctrl+Shift+I. Picked because Ctrl+I alone is
     // commonly bound (italic) and Shift differentiates without conflicting
@@ -727,19 +731,23 @@
       canRedo = r
       undoLabel = (list.undo && list.undo.length > 0) ? list.undo[list.undo.length - 1].label : ''
       redoLabel = (list.redo && list.redo.length > 0) ? list.redo[list.redo.length - 1].label : ''
+      flog(`[history] refresh canUndo=${u} canRedo=${r} undo="${undoLabel}" redo="${redoLabel}"`)
       // Dirty may have been flipped by undo/redo too (the in-memory state
       // changed; we mark dirty defensively in the Go-side Undo/Redo path).
       // Refresh the local flag so the Save pill / OS title stay correct.
       try { dirty = await IsDirty() } catch {}
-    } catch {
+    } catch (e) {
+      flog(`[history] refresh failed: ${e instanceof Error ? e.message : String(e)}`)
       canUndo = false; canRedo = false; undoLabel = ''; redoLabel = ''
     }
   }
   async function doUndo() {
+    flog(`[history] doUndo called, canUndo=${canUndo}`)
     if (!canUndo) return
     try { await Undo() } catch (e) { showToast('error', `Undo failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
   async function doRedo() {
+    flog(`[history] doRedo called, canRedo=${canRedo}`)
     if (!canRedo) return
     try { await Redo() } catch (e) { showToast('error', `Redo failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
@@ -858,7 +866,7 @@
     EventsOff(DIRTY_EVENT)
     EventsOff(ENTITY_EVENT)
     EventsOff(DEV_ANIM_EVENT)
-    window.removeEventListener('keydown', onGlobalKeyDown)
+    document.removeEventListener('keydown', onGlobalKeyDown, true)
     window.removeEventListener('resize', onWindowResize)
     if (systemMQ) {
       try { systemMQ.removeEventListener('change', onSystemThemeChange) } catch {}
@@ -1348,6 +1356,34 @@
         </DropdownMenu.Item>
         <DropdownMenu.Separator />
         <DropdownMenu.Item
+          onSelect={runMenuAction(openMapInfoEditor)}
+          disabled={!status.loaded}
+          title="Edit map name, author, description, and other metadata."
+        >
+          <span class="flex-1">Map Info…</span>
+          <DropdownMenu.Shortcut>Ctrl+Shift+I</DropdownMenu.Shortcut>
+        </DropdownMenu.Item>
+        <DropdownMenu.Separator />
+        <DropdownMenu.Item onSelect={runMenuAction(close)} disabled={!status.loaded || busy}>
+          <span class="flex-1">Close</span>
+        </DropdownMenu.Item>
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
+
+    <!-- Edit menu (Phase: history). Hosts Undo/Redo with live labels and
+         enabled state pulled from CanUndo/CanRedo. Each item's tooltip
+         shows what would be undone/redone ("Undo Move doodad"). -->
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger>
+        {#snippet child({ props })}
+          <Button {...props} variant="ghost" size="sm" title="Edit menu">
+            Edit
+            <ChevronDownIcon class="text-muted-foreground" />
+          </Button>
+        {/snippet}
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content class="min-w-[240px]" align="start">
+        <DropdownMenu.Item
           onSelect={runMenuAction(doUndo)}
           disabled={!canUndo}
           title={undoLabel ? `Undo: ${undoLabel}` : 'Nothing to undo'}
@@ -1361,20 +1397,7 @@
           title={redoLabel ? `Redo: ${redoLabel}` : 'Nothing to redo'}
         >
           <span class="flex-1">Redo{redoLabel ? ` — ${redoLabel}` : ''}</span>
-          <DropdownMenu.Shortcut>Ctrl+Y</DropdownMenu.Shortcut>
-        </DropdownMenu.Item>
-        <DropdownMenu.Separator />
-        <DropdownMenu.Item
-          onSelect={runMenuAction(openMapInfoEditor)}
-          disabled={!status.loaded}
-          title="Edit map name, author, description, and other metadata."
-        >
-          <span class="flex-1">Map Info…</span>
-          <DropdownMenu.Shortcut>Ctrl+Shift+I</DropdownMenu.Shortcut>
-        </DropdownMenu.Item>
-        <DropdownMenu.Separator />
-        <DropdownMenu.Item onSelect={runMenuAction(close)} disabled={!status.loaded || busy}>
-          <span class="flex-1">Close</span>
+          <DropdownMenu.Shortcut>Ctrl+Shift+Z</DropdownMenu.Shortcut>
         </DropdownMenu.Item>
       </DropdownMenu.Content>
     </DropdownMenu.Root>
