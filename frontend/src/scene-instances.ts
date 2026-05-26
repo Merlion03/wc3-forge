@@ -782,6 +782,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // other overlays) so it's always on top. Non-fatal if build fails; user
   // falls back to drag-to-move. Lifetime matches the other overlay renderers.
   let gizmo: GizmoRenderer | null = null
+  // Axis labels (X/Y/Z) for the move gizmo. Forward-declared null here so
+  // the render loop's first synchronous tick (loop() runs immediately after
+  // RAF setup, before the rest of init runs) doesn't TDZ on the const that
+  // used to live at the bottom of init. Populated further down once
+  // overlayHost exists; updateAxisLabels null-checks before touching it.
+  let axisLabelEls: Record<'x' | 'y' | 'z', HTMLDivElement> | null = null
   try {
     gizmo = buildGizmo((viewer as any).gl as WebGLRenderingContext)
     flog('[gizmo] built ok')
@@ -1239,6 +1245,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // the gizmo isn't visible in move mode; otherwise projects each arrow's
   // tip world position to canvas pixels and positions the labels there.
   function updateAxisLabels() {
+    // Null-check axisLabelEls — the render loop's very first synchronous
+    // tick happens BEFORE the labels are created further down in init.
+    // (The let was forward-declared as null; assigned later.)
+    if (!axisLabelEls) return
     const tips = gizmo?.getMoveArrowTips?.()
     if (!tips) {
       axisLabelEls.x.style.display = 'none'
@@ -1550,11 +1560,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   const overlayHost = canvas.parentElement ?? document.body
   overlayHost.appendChild(overlay)
 
-  // Per-axis labels for the move gizmo. Three absolute-positioned divs in the
-  // same overlay container, repositioned per frame to sit just past each
-  // arrow's cone tip. Hidden whenever the gizmo isn't in move mode or no
-  // entity is selected. Pointer-events:none so they don't intercept clicks.
-  const axisLabelEls: Record<'x' | 'y' | 'z', HTMLDivElement> = {
+  // Per-axis labels for the move gizmo. Three absolute-positioned divs in
+  // the same overlay container, repositioned per frame to sit just past
+  // each arrow's cone tip. Hidden whenever the gizmo isn't in move mode
+  // or no entity is selected. Pointer-events:none so they don't intercept
+  // clicks. Assigned to the forward-declared axisLabelEls above (let, not
+  // const) so the render loop's earlier synchronous tick sees null and
+  // skips gracefully instead of TDZ-throwing.
+  axisLabelEls = {
     x: document.createElement('div'),
     y: document.createElement('div'),
     z: document.createElement('div'),
@@ -2332,8 +2345,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       // tolerant of duplicate offs (no-op when no listener is attached).
       EventsOff(ENTITY_EVENT)
       try { overlay.remove() } catch { /* parent already gone */ }
-      for (const ax of ['x', 'y', 'z'] as const) {
-        try { axisLabelEls[ax].remove() } catch { /* parent already gone */ }
+      if (axisLabelEls) {
+        for (const ax of ['x', 'y', 'z'] as const) {
+          try { axisLabelEls[ax].remove() } catch { /* parent already gone */ }
+        }
       }
       if (slocRenderer) {
         slocRenderer.dispose()
