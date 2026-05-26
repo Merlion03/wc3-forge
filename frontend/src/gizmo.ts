@@ -324,6 +324,11 @@ interface ScaleDrag {
   origin: [number, number, number]
   entities: EntityOrig[]
   anchorSignedDist: number
+  // Snapshot of handleScale at mousedown — used as the reference distance
+  // for the exponential factor (1 handleScale of drag = 2x scale). Snapshot
+  // rather than live value so mid-drag camera zoom doesn't whipsaw the
+  // sensitivity.
+  refHandleScale: number
   currentFactor: number
 }
 
@@ -998,7 +1003,9 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
         const anchor = Math.abs(nearest.s) < 1e-3 ? 1e-3 : nearest.s
         dragState = {
           mode: 'scale', axis: pick.axis, origin, entities,
-          anchorSignedDist: anchor, currentFactor: 1,
+          anchorSignedDist: anchor,
+          refHandleScale: lastHandleScale > 0 ? lastHandleScale : 100,
+          currentFactor: 1,
         }
       } else if (pick.mode === 'rotate') {
         const hit = rayPlane(
@@ -1072,7 +1079,14 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           origin[0], origin[1], origin[2], adx, ady, adz,
         )
         if (!nearest) return
-        let factor = nearest.s / ds.anchorSignedDist
+        // Exponential factor based on world-space drag distance, scaled by
+        // the gizmo's visible size. Dragging by one handleScale = 2x size;
+        // by two handleScales = 4x; dragging back the same distance = 0.5x.
+        // Multiplicative + symmetric + screen-size-invariant. The old linear
+        // ratio (current/anchor) could produce 100x changes from small drags
+        // when the user clicked close to the gizmo origin.
+        const delta = nearest.s - ds.anchorSignedDist
+        let factor = Math.pow(2, delta / ds.refHandleScale)
         if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
         if (factor < 0.01) factor = 0.01
         if (factor > 100) factor = 100
