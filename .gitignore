@@ -39,8 +39,8 @@ Thumbs.db
 # Wails build outputs
 /build/bin/
 
-# Runtime log
-/wc3-forge.log
+# Runtime log (anywhere it gets written; the binary writes to CWD)
+wc3-forge.log
 
 # Diagnostic helper output: scripts/extract-mdx pulls MDX files out of the
 # user's local CASC install into ./tmp-mdx/ for hex inspection + parser
@@ -55,4 +55,8 @@ Thumbs.db
 !/frontend/dist/.gitkeep
 # Wails-CLI install-cache marker — regenerated on every `wails build`
 /frontend/package.json.md5
+
+# MCP server build artifacts
+/mcp/node_modules/
+/mcp/dist/
 
