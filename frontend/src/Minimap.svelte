@@ -197,7 +197,7 @@
     if (w > 0 && h > 0) aspect = w / h
   }
 
-  // Click-to-pan: convert minimap-pixel coords → world game-coord, then
+  // Click/drag-to-pan: convert minimap-pixel coords → world game-coord, then
   // call SceneAPI.panTo. The math:
   //   - Minimap image dimensions are arbitrary (e.g. 256×256 for BLP).
   //     The pixel-space u,v ∈ [0,1] is independent of resolution.
@@ -208,20 +208,54 @@
   //   - vertex (W-1, H-1) = center_offset + (worldW, worldH) (top-right)
   //   - u=0,v=0 (top-left of image) maps to (x=center_offset.x, y=center_offset.y+worldH)
   //     — image Y is flipped vs world Y (image has +Y down, world has +Y up).
-  function onMinimapClick(e: MouseEvent) {
+  function panFromPointer(clientX: number, clientY: number) {
     if (!scene || !imgEl) return
     if (terrainW <= 1 || terrainH <= 1) return
     const rect = imgEl.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return
-    const u = (e.clientX - rect.left) / rect.width // 0 = left edge
-    const v = (e.clientY - rect.top) / rect.height // 0 = top edge (image space)
-    if (u < 0 || u > 1 || v < 0 || v > 1) return
+    // Clamp into [0,1] so the drag still pans to the edge when the pointer
+    // strays outside the minimap mid-drag (pointer capture keeps events
+    // flowing to us, but the cursor can sit anywhere on the page).
+    const u = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    const v = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height))
     const worldW = (terrainW - 1) * STUDS_PER_CELL
     const worldH = (terrainH - 1) * STUDS_PER_CELL
     // Image Y is top-down; world Y is bottom-up. Flip v before mapping.
     const x = centerOffset[0] + u * worldW
     const y = centerOffset[1] + (1 - v) * worldH
     scene.panTo(x, y)
+  }
+
+  // Drag-to-pan state. Track the active pointer id so we ignore stray
+  // secondary pointers (multitouch, second mouse button) during a drag.
+  let dragPointerId: number | null = $state(null)
+
+  function onPointerDown(e: PointerEvent) {
+    // Primary button (left mouse / touch) only — right-click is reserved
+    // for context menus / camera orbit etc.
+    if (e.button !== 0) return
+    if (!imgEl) return
+    dragPointerId = e.pointerId
+    // Capture so we keep receiving move/up events when the cursor leaves
+    // the minimap mid-drag — without this the drag would snap-stop at the
+    // image bounds.
+    try {
+      imgEl.setPointerCapture(e.pointerId)
+    } catch {}
+    panFromPointer(e.clientX, e.clientY)
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    if (dragPointerId === null || e.pointerId !== dragPointerId) return
+    panFromPointer(e.clientX, e.clientY)
+  }
+
+  function onPointerUp(e: PointerEvent) {
+    if (dragPointerId === null || e.pointerId !== dragPointerId) return
+    try {
+      imgEl?.releasePointerCapture(e.pointerId)
+    } catch {}
+    dragPointerId = null
   }
 </script>
 
@@ -242,14 +276,17 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <img
-      class="block w-full h-full object-contain cursor-crosshair select-none"
+      class="block w-full h-full object-contain cursor-crosshair select-none touch-none"
       src={dataURL}
       alt="Map minimap"
       bind:this={imgEl}
       onload={onImgLoad}
-      onclick={onMinimapClick}
+      onpointerdown={onPointerDown}
+      onpointermove={onPointerMove}
+      onpointerup={onPointerUp}
+      onpointercancel={onPointerUp}
       draggable="false"
-      title="Click to pan camera to this location"
+      title="Click or drag to pan camera"
     />
     {#if frustumPointsAttr}
       <!-- Frustum-corner polygon. viewBox is [0,1]×[0,1] so the
