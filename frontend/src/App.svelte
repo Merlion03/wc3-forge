@@ -1959,7 +1959,7 @@
      panel body. Tailwind utilities on the parent <aside> handle the panel
      chrome; this just styles the inner title bar. */
   .panel-header {
-    padding: 8px 14px; font-size: 10px; font-weight: 600; color: #a1a1aa;
+    padding: 3px 14px; font-size: 10px; font-weight: 600; color: #a1a1aa;
     text-transform: uppercase; letter-spacing: 0.08em;
     border-bottom: 1px solid #27272a; background: #1c1c1f;
     flex: 0 0 auto;
