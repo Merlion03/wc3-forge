@@ -170,6 +170,22 @@ export namespace main {
 	        this.flags = source["flags"];
 	    }
 	}
+	export class GameplayConstantRow {
+	    section: string;
+	    key: string;
+	    value: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GameplayConstantRow(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.section = source["section"];
+	        this.key = source["key"];
+	        this.value = source["value"];
+	    }
+	}
 	export class MapStatus {
 	    loaded: boolean;
 	    path?: string;

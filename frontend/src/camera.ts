@@ -11,17 +11,18 @@
 //   - pitch is the angle below the horizon. 0 = looking flat across the
 //     map; π/2 = straight down. WC3's default sits around 45° (≈ 0.78 rad).
 //
-// Input bindings (default; subject to tuning):
+// Input bindings:
 //   - mouse wheel             → zoom (change distance)
-//   - middle-mouse drag       → pan (drag map under cursor)
-//   - right-mouse drag        → also pan (more discoverable than MMB)
+//   - right-mouse drag        → pan (drag map under cursor)
+//   - middle-mouse drag       → orbit (yaw on x, pitch on y)
 //   - WASD / arrow keys       → pan (keyboard fallback)
 //
-// Camera rotation is intentionally disabled — WC3 doesn't let players
-// rotate the camera in-game, and the editor mirrors that constraint. Pitch
-// and yaw stay at their default values for the lifetime of the camera.
-// Mouse-edge panning is also disabled because the mouse can leave the
-// window mid-pan and strand the camera in motion.
+// In-game WC3 doesn't let players rotate the camera, so the editor defaults
+// to a fixed top-down-ish orientation (DEFAULT_YAW/DEFAULT_PITCH). MMB-drag
+// and the on-screen orbit gizmo let editor users tilt off-axis for spatial
+// inspection; resetOrbit() snaps back to the default. Mouse-edge panning is
+// disabled because the mouse can leave the window mid-pan and strand the
+// camera in motion.
 
 const PITCH_MIN = 0.18  // ~10°, prevents the floor-eye view
 const PITCH_MAX = 1.45  // ~83°, prevents flipping past straight down
@@ -34,6 +35,11 @@ const WHEEL_ZOOM_STEP = 1.1
 const DRAG_YAW_SENS = 0.005           // radians per pixel
 const DRAG_PITCH_SENS = 0.004
 const FOV = Math.PI / 3
+// Editor-default orientation. ~60° pitch is close to top-down with enough
+// horizon to see doodad/unit silhouettes; yaw=0 has +Y (north) pointing
+// "up" on screen. resetOrbit() snaps back to these.
+const DEFAULT_YAW = 0
+const DEFAULT_PITCH = Math.PI / 3
 
 export interface RTSCamera {
   /** Re-center on a map: set pivot to (cx, cy) on the ground plane and frame the given span. */
@@ -53,6 +59,12 @@ export interface RTSCamera {
   dispose(): void
   /** World-space eye position. Used by the gizmo to compute fixed-screen-space handle scale. */
   getEye(): [number, number, number]
+  /** Current orbit angles. yaw: any radians; pitch: radians below horizon, clamped to [PITCH_MIN, PITCH_MAX]. */
+  getOrbit(): { yaw: number; pitch: number }
+  /** Absolute orbit setter. Pitch is clamped; yaw is taken as-is. */
+  setOrbit(yaw: number, pitch: number): void
+  /** Reset orbit to editor defaults (DEFAULT_YAW, DEFAULT_PITCH). Pivot and distance untouched. */
+  resetOrbit(): void
 }
 
 export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSCamera {
@@ -60,13 +72,8 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
   // viewer camera sits on a sphere of radius `distance` centered on pivot.
   const pivot = [0, 0, 0]
   let distance = 6000
-  // Editor-style "looking down at the work" pitch. ~60° down feels right
-  // for spatial inspection — close to top-down but with enough horizon to
-  // see doodad/unit silhouettes. WC3's in-game cam sits around ~50°; we
-  // tilt slightly steeper for editor work where you're locating things
-  // more than experiencing them.
-  let pitch = Math.PI / 3
-  let yaw = 0
+  let pitch = DEFAULT_PITCH
+  let yaw = DEFAULT_YAW
   let aspect = 1
   // Current world-space eye position, updated every applyToViewer(). Exposed
   // via getEye() so the gizmo can compute fixed-screen-space handle scale
@@ -136,14 +143,24 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
       const dy = e.clientY - dragging.lastY
       dragging.lastX = e.clientX
       dragging.lastY = e.clientY
-      // Drag-pan: convert screen delta to world delta. Pan speed scales with
-      // distance so dragging the same screen distance moves the world by the
-      // same screen distance at any zoom. dy is flipped because screen Y
-      // grows downward but our world Y grows north (up on screen at yaw=0).
-      // The 0.0015 constant tunes "1 px of drag ≈ this much world movement
-      // per stud of camera distance" — adjusted by feel.
-      const k = -distance * 0.0015
-      pan(dx * k, -dy * k)
+      if (dragging.button === 1) {
+        // MMB → orbit. Dragging right increases yaw (camera swings clockwise
+        // around pivot when viewed from above); dragging up reduces pitch
+        // (tilts toward horizontal). Sign on dy is negated so pulling the
+        // mouse down — which on a top-down editor view feels like "tip the
+        // camera back toward me" — increases pitch and approaches true top-
+        // down, matching the muscle memory from Blender / Unity orbit cams.
+        rotate(dx * DRAG_YAW_SENS, -dy * DRAG_PITCH_SENS)
+      } else {
+        // RMB → pan. Convert screen delta to world delta. Pan speed scales
+        // with distance so dragging the same screen distance moves the world
+        // by the same screen distance at any zoom. dy is flipped because
+        // screen Y grows downward but our world Y grows north (up on screen
+        // at yaw=0). The 0.0015 constant tunes "1 px of drag ≈ this much
+        // world movement per stud of camera distance" — adjusted by feel.
+        const k = -distance * 0.0015
+        pan(dx * k, -dy * k)
+      }
     }
   }
   function onMouseLeave() { pointer = null }
@@ -261,6 +278,20 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
     },
     getEye(): [number, number, number] {
       return [currentEye[0], currentEye[1], currentEye[2]]
+    },
+    getOrbit() {
+      return { yaw, pitch }
+    },
+    setOrbit(y: number, p: number) {
+      if (!isFinite(y) || !isFinite(p)) return
+      yaw = y
+      pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, p))
+      applyToViewer()
+    },
+    resetOrbit() {
+      yaw = DEFAULT_YAW
+      pitch = DEFAULT_PITCH
+      applyToViewer()
     },
   }
 }

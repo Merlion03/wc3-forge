@@ -24,8 +24,10 @@
   import AssetPreview from './AssetPreview.svelte'
   import MapInfoEditor from './MapInfoEditor.svelte'
   import SwapTilesetDialog from './SwapTilesetDialog.svelte'
+  import GameplayConstantsEditor from './GameplayConstantsEditor.svelte'
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
+  import CameraOrbitGizmo from './CameraOrbitGizmo.svelte'
   import { showToast } from './toast'
   import { flog } from './debuglog'
   import { loadIconURL } from './icon-loader'
@@ -111,7 +113,7 @@
   let doodadCategoriesPresent: string[] = $state([])
 
   let canvas: HTMLCanvasElement = $state()
-  let scene: SceneAPI | null = null
+  let scene: SceneAPI | null = $state(null)
   let dirty: boolean = $state(false)
   let saving: boolean = $state(false)
   let launching: boolean = $state(false)
@@ -164,9 +166,9 @@
   // owned here so the header toggle button + Ctrl+` hotkey can drive it.
   // Persisted to localStorage so reload preserves open/closed state.
   const LS_BRIDGE_CONSOLE_OPEN = 'wc3forge.bridge-console.open'
-  let bridgeConsoleOpen: boolean = (() => {
+  let bridgeConsoleOpen: boolean = $state((() => {
     try { return localStorage.getItem(LS_BRIDGE_CONSOLE_OPEN) === '1' } catch { return false }
-  })()
+  })())
   function toggleBridgeConsole() {
     bridgeConsoleOpen = !bridgeConsoleOpen
   }
@@ -195,6 +197,19 @@
   }
   function closeSwapTileset() {
     showSwapTileset = false
+  }
+
+  // ----- Gameplay Constants Editor modal -----
+  // Same lifecycle pattern as MapInfoEditor: conditional mount keeps the
+  // global keydown + focus-trap listeners scoped to when the modal is
+  // actually visible.
+  let showGameplayConstantsEditor: boolean = $state(false)
+  function openGameplayConstantsEditor() {
+    if (!status.loaded) return
+    showGameplayConstantsEditor = true
+  }
+  function closeGameplayConstantsEditor() {
+    showGameplayConstantsEditor = false
   }
 
   // ----- Minimap overlay (bottom-right of viewport) -----
@@ -1430,6 +1445,13 @@
         >
           <span class="flex-1">Swap Tileset…</span>
         </DropdownMenu.Item>
+        <DropdownMenu.Item
+          onSelect={runMenuAction(openGameplayConstantsEditor)}
+          disabled={!status.loaded}
+          title="Edit per-map gameplay constants (war3mapMisc.txt)."
+        >
+          <span class="flex-1">Gameplay Constants…</span>
+        </DropdownMenu.Item>
         <DropdownMenu.Separator />
         <DropdownMenu.Item onSelect={runMenuAction(close)} disabled={!status.loaded || busy}>
           <span class="flex-1">Close</span>
@@ -1556,7 +1578,7 @@
               <div class="flex gap-0.5" class:opacity-40={!row.on}>
                 {#each row.steps as s}
                   <button type="button"
-                          class="rounded px-1.5 py-0.5 text-xs {s === row.step ? 'bg-amber-500/30 text-amber-100' : 'hover:bg-muted'}"
+                          class="rounded px-1.5 py-0.5 text-xs {s === row.step ? 'bg-amber-500/30 text-amber-900 dark:text-amber-100' : 'hover:bg-muted'}"
                           onclick={() => setSnapStep(row.ch, s)}
                           title="{row.label} step = {s}{row.suffix}">
                     {s}{row.suffix}
@@ -1610,6 +1632,14 @@
       {#if showMinimap}
         <Minimap {scene} {mapLoadGen} />
       {/if}
+      <!-- View-orbit gizmo: top-right of the viewport. Lives in the same
+           anchor container as the minimap (which sits bottom-right) and
+           reads its camera handle from the SceneAPI so it never depends on
+           window-globals. Only mounts when scene exists so the camera
+           handle is guaranteed non-null. -->
+      {#if scene}
+        <CameraOrbitGizmo camera={scene.getCamera()} />
+      {/if}
     </section>
 
     <Splitter direction="vertical"
@@ -1617,7 +1647,7 @@
               onDragEnd={onRightColWidthDragEnd} />
 
     <div class="flex min-h-0 flex-col bg-card" bind:this={rightColEl}>
-      <aside class="flex min-h-0 flex-none flex-col overflow-hidden border-b border-border"
+      <aside class="flex min-h-0 flex-none flex-col overflow-hidden"
              style="flex: 0 0 {rightExplorerPct}%;">
         <header class="panel-header">Explorer</header>
         <div class="panel-body">
@@ -1949,6 +1979,13 @@
     />
   {/if}
 
+  {#if showGameplayConstantsEditor}
+    <GameplayConstantsEditor
+      bind:open={showGameplayConstantsEditor}
+      onClose={closeGameplayConstantsEditor}
+    />
+  {/if}
+
   <!-- Unsaved-changes confirmation. Driven by the wc3-forge:close-requested
        event emitted from Go's OnBeforeClose when the user X-es a dirty
        session. interactOutsideBehavior=ignore so click-outside doesn't
@@ -1979,33 +2016,31 @@
 <style>
   :global(body) {
     margin: 0;
-    background: #121214;
-    color: #d4d4d8;
     font-size: 13px;
     overflow: hidden;
   }
   :global(html), :global(body), main { height: 100vh; }
 
-  .viewport { position: relative; min-width: 0; min-height: 0; border-right: 1px solid #2a2a30; }
+  .viewport { position: relative; min-width: 0; min-height: 0; }
   canvas { display: block; width: 100%; height: 100%; }
 
-  .error { background: #7f1d1d; color: #fecaca; padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; max-height: 200px; overflow: auto; }
+  .error { background: color-mix(in oklab, var(--destructive) 18%, transparent); color: var(--destructive); padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; max-height: 200px; overflow: auto; }
   .error pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 
   /* Explorer / Properties panel header strip: tight all-caps label above each
      panel body. Tailwind utilities on the parent <aside> handle the panel
      chrome; this just styles the inner title bar. */
   .panel-header {
-    padding: 3px 14px; font-size: 10px; font-weight: 600; color: #a1a1aa;
+    padding: 3px 14px; font-size: 10px; font-weight: 600; color: var(--muted-foreground);
     text-transform: uppercase; letter-spacing: 0.08em;
-    border-bottom: 1px solid #27272a; background: #1c1c1f;
+    border-bottom: 1px solid var(--border); background: var(--muted);
     flex: 0 0 auto;
   }
   .panel-body {
     flex: 1 1 auto; min-height: 0; overflow-y: auto;
     display: flex; flex-direction: column;
   }
-  .empty { padding: 30px 16px; text-align: center; color: #71717a; font-size: 12px; }
+  .empty { padding: 30px 16px; text-align: center; color: var(--muted-foreground); font-size: 12px; }
 
   /* Explorer rows (inside Accordion bodies) */
   .explorer-list { list-style: none; margin: 0; padding: 0; }
@@ -2014,8 +2049,8 @@
     padding: 4px 14px; cursor: pointer; font-size: 12px;
     min-width: 0;
   }
-  .explorer-list li:hover { background: #1f1f23; }
-  .explorer-list li.selected { background: #1e3a8a; color: #e4e4e7; }
+  .explorer-list li:hover { background: var(--accent); }
+  .explorer-list li.selected { background: var(--primary); color: var(--primary-foreground); }
 
   /* Row icon / placeholder slot. Reserves a fixed 18x18 box at the start
      of every row so the name column aligns whether the row has an icon,
@@ -2030,11 +2065,11 @@
   }
   .explorer-list li .icon-slot.row-icon {
     object-fit: cover;
-    background: #1c1c1f; /* shows briefly during decode */
+    background: var(--muted); /* shows briefly during decode */
   }
   .explorer-list li .icon-slot.placeholder {
-    background: #27272a;
-    border: 1px solid #3f3f46;
+    background: var(--muted);
+    border: 1px solid var(--border);
   }
   .explorer-list li .icon-slot.swatch {
     border: 1px solid rgba(255,255,255,0.15);
@@ -2042,7 +2077,7 @@
   }
 
   .explorer-list li .name {
-    color: #e4e4e7; font-weight: 500; flex: 0 1 auto; min-width: 0;
+    font-weight: 500; flex: 0 1 auto; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .explorer-list li .cat {
@@ -2052,14 +2087,14 @@
   }
   .explorer-list li .pan-btn {
     flex: 0 0 auto; margin-left: auto; display: none;
-    background: transparent; color: #a1a1aa;
-    border: 1px solid #3f3f46; border-radius: 3px;
+    background: transparent; color: var(--muted-foreground);
+    border: 1px solid var(--border); border-radius: 3px;
     padding: 1px 6px; font-size: 11px; line-height: 1;
     cursor: pointer;
   }
   .explorer-list li:hover .pan-btn { display: inline-flex; }
-  .explorer-list li .pan-btn:hover { background: #3f3f46; color: #e4e4e7; }
-  .dim { color: #71717a; }
+  .explorer-list li .pan-btn:hover { background: var(--accent); color: var(--accent-foreground); }
+  .dim { color: var(--muted-foreground); }
 
   /* Doodad sub-accordions are nested inside the Doodads accordion body.
      Slightly indent their accordion headers so the hierarchy reads. */
@@ -2076,11 +2111,11 @@
   }
   .identity-icon {
     width: 56px; height: 56px; border-radius: 4px;
-    background: #1c1c1f; object-fit: cover;
-    border: 1px solid #27272a;
+    background: var(--muted); object-fit: cover;
+    border: 1px solid var(--border);
   }
   .identity-icon.placeholder {
-    background: #27272a; border: 1px solid #3f3f46;
+    background: var(--muted); border: 1px solid var(--border);
   }
   .identity-icon.swatch {
     border: 1px solid rgba(255,255,255,0.18);
@@ -2096,22 +2131,22 @@
     gap: 4px 12px; padding: 10px 16px; margin: 0; font-size: 12px;
   }
   .props dt {
-    color: #71717a; font-size: 11px; padding-top: 2px;
+    color: var(--muted-foreground); font-size: 11px; padding-top: 2px;
     text-align: left; justify-self: start;
   }
-  .props dd { margin: 0; color: #e4e4e7; }
+  .props dd { margin: 0; color: var(--foreground); }
   .mono { font-family: 'Cascadia Mono', Consolas, monospace; }
   .mono.small { font-size: 10.5px; word-break: break-all; }
 
   .pos-edit { display: flex; gap: 4px; }
   .pos-edit input {
     width: 64px; padding: 2px 4px;
-    background: #18181b; color: #e4e4e7;
-    border: 1px solid #3f3f46; border-radius: 3px;
+    background: var(--background); color: var(--foreground);
+    border: 1px solid var(--border); border-radius: 3px;
     font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px;
   }
   .pos-edit input:focus {
-    outline: none; border-color: #2563eb;
+    outline: none; border-color: var(--ring);
   }
   .pos-edit input::-webkit-inner-spin-button,
   .pos-edit input::-webkit-outer-spin-button {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/miscdata"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/mpq"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/shd"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
@@ -121,6 +122,7 @@ type Session struct {
 	shadowMap        *shd.File      // war3map.shd
 	pathingMap       *wpm.File      // war3map.wpm
 	strings          wts.Strings    // war3map.wts, for TRIGSTR_<n> resolution
+	gameplay         *miscdata.File // war3mapMisc.txt — per-map gameplay-constants overrides
 
 	selection      SelectionState
 	listeners      []func(SelectionState)
@@ -140,6 +142,7 @@ type Session struct {
 	dirtyDoodads   bool
 	dirtyInfo      bool
 	dirtyTerrain   bool
+	dirtyGameplay  bool
 	dirtyListeners []func(bool)
 
 	// Entity-change bus — fired from any mutator (MoveUnit today; SetRotation,
@@ -168,6 +171,15 @@ type Session struct {
 	// already handles. Keeps the bridge layer App-free (no Wails imports in
 	// forge.*) while still letting bridge handlers reach UI state.
 	uiCommandListeners []func(string)
+
+	// Agent label — free-form short string set by a connected MCP client to
+	// describe what that agent is doing in this wc3-forge window. The App
+	// layer reads it when building the OS window title so users running
+	// multiple wc3-forge instances in parallel can tell them apart at a
+	// glance (taskbar + alt-tab list) without having to memorize PIDs.
+	// Persists across map opens — the label describes the agent, not the map.
+	agentLabel          string
+	agentLabelListeners []func(string)
 
 	// Undo/redo machinery (history.go). history stores applied commands
 	// oldest-first; redoStack holds commands that have been undone and are
@@ -352,6 +364,18 @@ func (s *Session) Open(path string) error {
 		return err
 	}
 
+	// war3mapMisc.txt — OPTIONAL per-map gameplay-constants overrides. Maps
+	// without this file inherit the stock MiscData.txt values; nothing to
+	// load. The editor exposes whatever overrides are present + lets the
+	// user add new ones.
+	gameplay, err := readOpt(src, "war3mapMisc.txt", miscdata.Parse)
+	if err != nil {
+		return err
+	}
+	if gameplay == nil {
+		gameplay = &miscdata.File{}
+	}
+
 	// Atomically swap state; close any previously-held source before stomping it.
 	s.mu.Lock()
 	prevSource := s.source
@@ -370,11 +394,13 @@ func (s *Session) Open(path string) error {
 	s.shadowMap = shadowMap
 	s.pathingMap = pathingMap
 	s.strings = wtsStrings
+	s.gameplay = gameplay
 	s.selection = SelectionState{Items: nil, Primary: -1}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyGameplay
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
 	s.dirtyInfo = false
+	s.dirtyGameplay = false
 	// Reset history — previous map's undo stack must not leak across opens
 	// (creation_numbers would dangle and Revert would error). Mutating the
 	// slices directly under the existing write-lock; ClearHistory's own lock
@@ -437,12 +463,14 @@ func (s *Session) Close() {
 	s.shadowMap = nil
 	s.pathingMap = nil
 	s.strings = nil
+	s.gameplay = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
 	s.dirtyInfo = false
 	s.dirtyTerrain = false
+	s.dirtyGameplay = false
 	hadHistory := len(s.history) > 0 || len(s.redoStack) > 0
 	s.history = nil
 	s.redoStack = nil
@@ -761,7 +789,7 @@ func (s *Session) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 	// 0→1 transition of the combined dirty flag (any per-file flag). If the
 	// session was already dirty for another reason (e.g. dirtyUnits), this
 	// edit doesn't re-fire the public dirty event.
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyGameplay
 	s.doodads.Doodads[found].Position = newPos
 	s.dirtyDoodads = true
 	s.recordCommand(&moveDoodadCmd{cn: creationNumber, oldPos: oldPos, newPos: newPos})
@@ -863,7 +891,7 @@ func (s *Session) RotateDoodad(creationNumber uint32, rotation float32) error {
 		return nil
 	}
 	oldRot := s.doodads.Doodads[found].Rotation
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyGameplay
 	s.doodads.Doodads[found].Rotation = rotation
 	s.dirtyDoodads = true
 	pos := s.doodads.Doodads[found].Position
@@ -986,7 +1014,7 @@ func (s *Session) ScaleDoodad(creationNumber uint32, sx, sy, sz float32) error {
 	}
 	oldScale := cur
 	newScale := [3]float32{sx, sy, sz}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyGameplay
 	s.doodads.Doodads[found].Scale = newScale
 	s.dirtyDoodads = true
 	pos := s.doodads.Doodads[found].Position
@@ -1040,7 +1068,7 @@ func (s *Session) MutateInfo(fn func(*w3i.Info)) error {
 		return fmt.Errorf("no map loaded")
 	}
 	fn(s.info)
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyGameplay
 	s.dirtyInfo = true
 	s.mu.Unlock()
 	if !wasDirty {
@@ -1192,7 +1220,7 @@ func (s *Session) SwapTileset(req SwapTilesetRequest) error {
 
 	applyTilesetSnapshot(s, cmd.newLetter, cmd.newGround, cmd.newCliff, cmd.newTileG, cmd.newTileC)
 
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay
 	s.dirtyTerrain = true
 	s.dirtyInfo = true
 	s.recordCommand(cmd)
@@ -1202,6 +1230,46 @@ func (s *Session) SwapTileset(req SwapTilesetRequest) error {
 	}
 	s.notifyEntityChanged(EntityChange{Kind: "terrain", ID: 0, Field: "tileset"})
 	s.notifyHistoryChanged()
+	return nil
+}
+
+// Gameplay returns the parsed war3mapMisc.txt (per-map gameplay constants),
+// or nil if no map is loaded. The returned pointer is shared — callers must
+// not mutate; use MutateGameplay for changes so dirty-tracking fires.
+func (s *Session) Gameplay() *miscdata.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.gameplay
+}
+
+// MutateGameplay applies fn to the in-memory war3mapMisc.txt file under the
+// session write lock, flips dirtyGameplay, and fires an entity-changed
+// event so subscribers (the Gameplay Constants Editor) repaint. Mirrors
+// MutateInfo's shape — single-document mutation, no creation_number.
+//
+// MUST be the only path that mutates Gameplay so dirty-tracking stays
+// honest. The editor calls this through the GameplayConstantsApply Wails
+// binding.
+func (s *Session) MutateGameplay(fn func(*miscdata.File)) error {
+	if fn == nil {
+		return fmt.Errorf("MutateGameplay: nil fn")
+	}
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	if s.gameplay == nil {
+		s.gameplay = &miscdata.File{}
+	}
+	fn(s.gameplay)
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay
+	s.dirtyGameplay = true
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	s.notifyEntityChanged(EntityChange{Kind: "gameplay", ID: 0, Field: "gameplay"})
 	return nil
 }
 
@@ -1227,7 +1295,7 @@ func applyTilesetSnapshot(s *Session, letter byte, ground, cliff []string, tileG
 func (s *Session) IsDirty() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain
+	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay
 }
 
 // Save flushes every dirty in-memory file back through the source's write
@@ -1246,7 +1314,7 @@ func (s *Session) Save() error {
 		s.mu.Unlock()
 		return fmt.Errorf("no map loaded")
 	}
-	if !s.dirtyUnits && !s.dirtyDoodads && !s.dirtyInfo && !s.dirtyTerrain {
+	if !s.dirtyUnits && !s.dirtyDoodads && !s.dirtyInfo && !s.dirtyTerrain && !s.dirtyGameplay {
 		s.mu.Unlock()
 		return nil // nothing to do
 	}
@@ -1255,10 +1323,12 @@ func (s *Session) Save() error {
 	doodads := s.doodads
 	info := s.info
 	terrain := s.terrain
+	gameplay := s.gameplay
 	saveUnits := s.dirtyUnits
 	saveDoodads := s.dirtyDoodads
 	saveInfo := s.dirtyInfo
 	saveTerrain := s.dirtyTerrain
+	saveGameplay := s.dirtyGameplay
 	s.mu.Unlock()
 
 	if src == nil {
@@ -1318,6 +1388,32 @@ func (s *Session) Save() error {
 		}
 		s.mu.Lock()
 		s.dirtyTerrain = false
+		s.mu.Unlock()
+	}
+	if saveGameplay {
+		// An empty gameplay file (no sections, or [Misc] with no entries)
+		// is still encoded — the user may have explicitly deleted every
+		// override, in which case we want war3mapMisc.txt to exist on
+		// disk as an empty [Misc] block rather than disappearing. WC3
+		// tolerates either, but the editor's mental model is "the file
+		// holds my overrides" and dropping the file silently would feel
+		// like data loss.
+		if gameplay == nil {
+			gameplay = &miscdata.File{}
+		}
+		// If no sections at all, prepend [Misc] so the file isn't empty.
+		if len(gameplay.Sections) == 0 {
+			gameplay.Sections = append(gameplay.Sections, &miscdata.Section{Name: "Misc"})
+		}
+		data, err := miscdata.Encode(gameplay)
+		if err != nil {
+			return fmt.Errorf("encode war3mapMisc.txt: %w", err)
+		}
+		if err := src.write("war3mapMisc.txt", data); err != nil {
+			return fmt.Errorf("write war3mapMisc.txt: %w", err)
+		}
+		s.mu.Lock()
+		s.dirtyGameplay = false
 		s.mu.Unlock()
 	}
 
@@ -1444,5 +1540,47 @@ func (s *Session) EmitUICommand(cmd string) {
 	s.mu.RUnlock()
 	for _, fn := range listeners {
 		fn(cmd)
+	}
+}
+
+// AgentLabel returns the free-form label most recently set by an MCP client.
+// Empty when no agent has labeled this window.
+func (s *Session) AgentLabel() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.agentLabel
+}
+
+// SetAgentLabel replaces the agent label and fires the change bus. No-op
+// (and no notification) when the value matches the current label, so
+// repeated SetAgentLabel("foo") calls don't churn the window title.
+func (s *Session) SetAgentLabel(label string) {
+	s.mu.Lock()
+	if s.agentLabel == label {
+		s.mu.Unlock()
+		return
+	}
+	s.agentLabel = label
+	s.mu.Unlock()
+	s.notifyAgentLabel(label)
+}
+
+// OnAgentLabelChanged subscribes to agent-label changes. Fires AFTER the
+// session lock is released, so listeners may call back into Session safely.
+// The App layer uses this to rebuild the OS window title when an agent
+// re-labels its instance.
+func (s *Session) OnAgentLabelChanged(fn func(string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.agentLabelListeners = append(s.agentLabelListeners, fn)
+}
+
+func (s *Session) notifyAgentLabel(label string) {
+	s.mu.RLock()
+	listeners := make([]func(string), len(s.agentLabelListeners))
+	copy(listeners, s.agentLabelListeners)
+	s.mu.RUnlock()
+	for _, fn := range listeners {
+		fn(label)
 	}
 }
