@@ -17,13 +17,14 @@
 // ourselves — a single request always succeeds when a file exists at
 // either extension.
 
-import parsersImport from 'mdx-m3-viewer/dist/cjs/parsers'
-// CJS default-import trap: Vite preserves the synthetic `default` wrapper
-// around CJS modules, so `parsersImport.blp.Image` is undefined at runtime
-// even though the type declaration says it exists. Unwrap to get the real
-// namespace object. Caused silent decode failures (blank Explorer icons,
-// "No minimap") before this fix landed elsewhere in the codebase.
-const parsers: any = (parsersImport as any)?.default ?? parsersImport
+// Vite's default-import interop for mdx-m3-viewer's CJS bundle is unreliable:
+// the build sometimes leaves the default export wrapped, so `parsersModule.blp`
+// is undefined while `parsersModule.default.blp` is the real thing. Same dance
+// mdx-parser-patch.ts has to do for animationmap. Without this, decodeBLP/DDS
+// throws "Cannot read properties of undefined (reading 'Image')" and the
+// minimap shows "No minimap" even though Go returned the BLP bytes.
+import parsersModule from 'mdx-m3-viewer/dist/cjs/parsers'
+const parsers: any = (parsersModule as any)?.default ?? parsersModule
 
 // path -> data URL ("" once we've confirmed a 404 or decode failure, so
 // repeated requests don't keep re-issuing the same XHR).

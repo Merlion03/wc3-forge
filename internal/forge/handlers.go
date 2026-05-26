@@ -77,6 +77,11 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("view.set_mode", handleViewSetMode)
 	reg("view.set_doodad_category_visible", handleViewSetDoodadCategoryVisible)
 	reg("camera.set_view", handleCameraSetView)
+	// window.set_title — connected agent labels its wc3-forge window so the
+	// user can tell parallel instances apart in the taskbar/alt-tab list.
+	// Free-form short string; the App layer composes it into the OS title as
+	// "[*] <map> — <label> — PID <n>".
+	reg("window.set_title", handleWindowSetTitle)
 	// Undo/redo + transactional grouping. AI clients can drive these the same
 	// way the UI does (Ctrl+Z is just a hotkey wrapper around history.undo);
 	// agents that batch multi-step edits should bracket them with
@@ -798,6 +803,32 @@ func handleCameraSetView(params json.RawMessage) (any, error) {
 	}
 	Current.EmitUICommand("camera.set " + spec)
 	return map[string]any{"ok": true, "spec": spec}, nil
+}
+
+// windowSetTitleParams carries the free-form agent label that gets composed
+// into the OS window title. Empty string clears the label (title falls back
+// to "<map> — PID <n>" or "wc3-forge — PID <n>").
+type windowSetTitleParams struct {
+	Label string `json:"label"`
+}
+
+type windowSetTitleResponse struct {
+	OK    bool   `json:"ok"`
+	Label string `json:"label"`
+}
+
+// handleWindowSetTitle updates the session's agent label. The App layer
+// listens on OnAgentLabelChanged and re-derives the OS-visible Wails title.
+// No truncation here: the App-side composer (and the OS taskbar) decide how
+// much of a long label to surface; agents can self-discipline by sending
+// short strings.
+func handleWindowSetTitle(params json.RawMessage) (any, error) {
+	var p windowSetTitleParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	Current.SetAgentLabel(p.Label)
+	return windowSetTitleResponse{OK: true, Label: p.Label}, nil
 }
 
 // handleHistoryUndo reverts the most recent mutation. Returns {ok, label}

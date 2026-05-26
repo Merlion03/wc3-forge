@@ -38,10 +38,11 @@
   // that into the `open` boolean so the public API stays a clean bindable.
   let value = $state<string>(open ? id : '')
 
-  // open → value
+  // open → value. Don't read `value` here — the guarded `if (value !== next)`
+  // version made this effect re-run on value-side changes and snap value back
+  // to id while `open` was still stale, blocking collapse on second click.
   $effect(() => {
-    const next = open ? id : ''
-    if (value !== next) value = next
+    value = open ? id : ''
   })
 
   // value → open + fire onToggle on a real change
@@ -57,11 +58,11 @@
 <Accordion.Root type="single" bind:value class="cn-accordion-wrapper">
   <Accordion.Item value={id} class="border-b-0">
     <Accordion.Trigger
-      class="flex w-full items-center gap-1.5 px-3 py-0.5 bg-[#1c1c1f] border-b border-[#27272a] text-[10px] font-semibold uppercase tracking-[0.06em] text-zinc-400 hover:bg-[#232328] hover:text-zinc-200 hover:no-underline rounded-none"
+      class="flex w-full items-center gap-1.5 px-3 py-0.5 bg-muted border-b border-border text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground hover:bg-accent hover:text-accent-foreground hover:no-underline rounded-none"
     >
       <span class="min-w-0 flex-none">{label}</span>
       {#if headerExtras}
-        <span class="ml-auto flex flex-1 justify-end gap-1.5 text-zinc-500 font-normal normal-case tracking-normal">
+        <span class="ml-auto flex flex-1 justify-end gap-1.5 text-muted-foreground font-normal normal-case tracking-normal">
           {@render headerExtras()}
         </span>
       {/if}

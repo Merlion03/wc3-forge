@@ -745,3 +745,198 @@ func mustRead(t *testing.T, path string) []byte {
 	}
 	return b
 }
+
+// TestSwapTileset_Save_RoundTrip exercises the tileset-swap save path: load a
+// real Reforged map, swap its palettes to a tiny synthetic 2-tile set,
+// remapping every old tile to one of the two new slots, save, reopen, and
+// confirm both .w3e and .w3i picked up the new tileset letter + palette and
+// every Tilepoint.GroundTexture is in the new range.
+func TestSwapTileset_Save_RoundTrip(t *testing.T) {
+	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("fixture %q not available: %v", src, err)
+	}
+	tmp := t.TempDir()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(src, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644); err != nil {
+			t.Fatalf("write %s: %v", e.Name(), err)
+		}
+	}
+
+	s := &Session{}
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	oldGroundN := len(s.Terrain().GroundTilesets)
+	oldCliffN := len(s.Terrain().CliffTilesets)
+	if oldGroundN == 0 {
+		t.Fatalf("fixture has no ground tilesets")
+	}
+
+	// Build a remap that flattens every old ground tile onto slot 0, every old
+	// cliff tile onto slot 0. Real UI would use a HiveWE-style picker; we
+	// just need a valid request shape here.
+	groundFromTo := make([]int, oldGroundN)
+	cliffFromTo := make([]int, oldCliffN)
+
+	newCliff := []string{}
+	if oldCliffN > 0 {
+		newCliff = []string{"CAa1"}
+	}
+	req := SwapTilesetRequest{
+		NewLetter:         'A',
+		NewGroundTilesets: []string{"Agrs", "Adrt"},
+		NewCliffTilesets:  newCliff,
+		GroundFromTo:      groundFromTo,
+		CliffFromTo:       cliffFromTo,
+	}
+	if err := s.SwapTileset(req); err != nil {
+		t.Fatalf("SwapTileset: %v", err)
+	}
+	if !s.IsDirty() {
+		t.Errorf("expected dirty after SwapTileset")
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if s.IsDirty() {
+		t.Errorf("expected clean after Save")
+	}
+
+	// Reopen and assert the swap persisted on both files.
+	s2 := &Session{}
+	if err := s2.Open(tmp); err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	if got, want := s2.Terrain().Tileset, byte('A'); got != want {
+		t.Errorf("Terrain().Tileset = %q, want %q", string(got), string(want))
+	}
+	if got := s2.Terrain().GroundTilesets; len(got) != 2 || got[0] != "Agrs" || got[1] != "Adrt" {
+		t.Errorf("Terrain().GroundTilesets = %v, want [Agrs Adrt]", got)
+	}
+	if got, want := s2.Info().Tileset, byte('A'); got != want {
+		t.Errorf("Info().Tileset = %q, want %q", string(got), string(want))
+	}
+	for i, tp := range s2.Terrain().Tiles {
+		if int(tp.GroundTexture) >= 2 {
+			t.Fatalf("Tiles[%d].GroundTexture = %d, want < 2", i, tp.GroundTexture)
+		}
+	}
+}
+
+// TestSwapTileset_UndoRedo exercises the history path for tileset swap: do
+// the swap, undo it, verify the original tileset letter + per-tile texture
+// indices come back, then redo and confirm the swap re-applies. Critically,
+// undo must preserve the per-tile values that were ALREADY using the old
+// palette (not "any tile pointing at slot 0 → slot 0" — actual originals).
+func TestSwapTileset_UndoRedo(t *testing.T) {
+	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("fixture %q not available: %v", src, err)
+	}
+	tmp := t.TempDir()
+	entries, _ := os.ReadDir(src)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
+		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
+	}
+	s := &Session{}
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	origLetter := s.Terrain().Tileset
+	origGround := append([]string(nil), s.Terrain().GroundTilesets...)
+	origCliff := append([]string(nil), s.Terrain().CliffTilesets...)
+	origTileG := make([]uint8, len(s.Terrain().Tiles))
+	origTileC := make([]uint8, len(s.Terrain().Tiles))
+	for i, tp := range s.Terrain().Tiles {
+		origTileG[i] = tp.GroundTexture
+		origTileC[i] = tp.CliffTexture
+	}
+
+	groundFromTo := make([]int, len(origGround))
+	cliffFromTo := make([]int, len(origCliff))
+	newCliff := []string{}
+	if len(origCliff) > 0 {
+		newCliff = []string{"CAa1"}
+	}
+	if err := s.SwapTileset(SwapTilesetRequest{
+		NewLetter:         'A',
+		NewGroundTilesets: []string{"Agrs", "Adrt"},
+		NewCliffTilesets:  newCliff,
+		GroundFromTo:      groundFromTo,
+		CliffFromTo:       cliffFromTo,
+	}); err != nil {
+		t.Fatalf("SwapTileset: %v", err)
+	}
+	if got, want := s.Terrain().Tileset, byte('A'); got != want {
+		t.Fatalf("post-swap Tileset = %q, want %q", string(got), string(want))
+	}
+	if !s.CanUndo() {
+		t.Fatalf("CanUndo = false after swap; want true (swap should be in history)")
+	}
+
+	if err := s.Undo(); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	if got, want := s.Terrain().Tileset, origLetter; got != want {
+		t.Errorf("post-undo Tileset = %q, want %q", string(got), string(want))
+	}
+	if got := s.Terrain().GroundTilesets; !equalStringsSlice(got, origGround) {
+		t.Errorf("post-undo GroundTilesets = %v, want %v", got, origGround)
+	}
+	if got := s.Info().Tileset; got != origLetter {
+		t.Errorf("post-undo Info().Tileset = %q, want %q", string(got), string(origLetter))
+	}
+	for i, tp := range s.Terrain().Tiles {
+		if tp.GroundTexture != origTileG[i] {
+			t.Fatalf("post-undo Tiles[%d].GroundTexture = %d, want %d", i, tp.GroundTexture, origTileG[i])
+		}
+		if tp.CliffTexture != origTileC[i] {
+			t.Fatalf("post-undo Tiles[%d].CliffTexture = %d, want %d", i, tp.CliffTexture, origTileC[i])
+		}
+	}
+
+	if err := s.Redo(); err != nil {
+		t.Fatalf("Redo: %v", err)
+	}
+	if got, want := s.Terrain().Tileset, byte('A'); got != want {
+		t.Errorf("post-redo Tileset = %q, want %q", string(got), string(want))
+	}
+	if got := s.Terrain().GroundTilesets; len(got) != 2 || got[0] != "Agrs" || got[1] != "Adrt" {
+		t.Errorf("post-redo GroundTilesets = %v, want [Agrs Adrt]", got)
+	}
+	for i, tp := range s.Terrain().Tiles {
+		if int(tp.GroundTexture) >= 2 {
+			t.Fatalf("post-redo Tiles[%d].GroundTexture = %d, want < 2", i, tp.GroundTexture)
+		}
+	}
+}
+
+func equalStringsSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
