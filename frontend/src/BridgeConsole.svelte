@@ -259,8 +259,15 @@
     style="height: {heightPx}px"
   >
     <!-- Drag handle: 4px-tall strip across the top of the panel. Visual
-         affordance is the slightly-lighter background + ns-resize cursor. -->
+         affordance is the slightly-lighter background + ns-resize cursor.
+         role="separator" + aria-orientation tell ATs this is a resizable
+         divider; the mousedown handler does the actual drag work. svelte-check
+         flags mouse listeners on non-interactive elements but draggable
+         separators are exactly the case where this is correct. -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
+      role="separator"
+      aria-orientation="horizontal"
       class="flex-none h-1 bg-border cursor-ns-resize transition-colors hover:bg-muted-foreground/40 {dragging
         ? 'bg-muted-foreground/40'
         : ''}"

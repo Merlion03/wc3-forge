@@ -618,6 +618,15 @@ export interface SceneAPI {
    * items have a live world position yet. Bound to the 'f' hotkey.
    */
   focusSelection(): boolean
+  /**
+   * Dev-only pick-correctness harness. Walks every visible instance, projects
+   * its center to canvas pixels, rayPicks at that pixel, and tallies whether
+   * the returned hit matches the queried instance. Triggered by Go's
+   * --pick-self-test startup flag (App.svelte routes the
+   * 'wc3-forge:pick-self-test' event here). Production code shouldn't call
+   * this — it exists for verification only.
+   */
+  __runPickSelfTest?(): { tested: number; matched: number; mismatched: number; skipped: number; nearMatchDist: number }
 }
 
 export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {

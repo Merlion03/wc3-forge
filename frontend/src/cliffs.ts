@@ -40,7 +40,11 @@
 // create lib instances, and the shader handles the rotation in-pipe.
 
 import { flog } from './debuglog'
-import type { ModelViewer } from 'mdx-m3-viewer'
+// Deep import: the top-level package exports a namespace bundle whose
+// `viewer.ModelViewer` is the class — there's no named `ModelViewer` re-export
+// at the package root. The path mirrors how icon-loader.ts reaches into
+// `mdx-m3-viewer/dist/cjs/parsers` for the same reason.
+import type ModelViewer from 'mdx-m3-viewer/dist/cjs/viewer/viewer'
 import {
   createCliffRenderer,
   uploadFinalHeights,

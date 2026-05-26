@@ -1,7 +1,7 @@
 <script lang="ts">
   import { run as run_1 } from 'svelte/legacy';
 
-  import { onMount, onDestroy } from 'svelte'
+  import { onMount, onDestroy, tick } from 'svelte'
   import {
     OpenMapDialog, OpenMapFileDialog, OpenMap, OpenMapInNewWindow, NewWindow, CloseMap, ListUnits, ListDoodads, Status,
     GetSelection, SetSelection, GetUnit,
@@ -547,6 +547,7 @@
         primaryDoodad = null
         try { primaryEntity = await GetUnit(primary.id) } catch { primaryEntity = null }
       }
+      void scrollExplorerToPrimary(items, s.primary)
     })
 
     const s = await Status()
@@ -831,12 +832,12 @@
   async function doUndo() {
     flog(`[history] doUndo called, canUndo=${canUndo}`)
     if (!canUndo) return
-    try { await Undo() } catch (e) { showToast('error', `Undo failed: ${e instanceof Error ? e.message : String(e)}`) }
+    try { await Undo() } catch (e) { showToast(`Undo failed: ${e instanceof Error ? e.message : String(e)}`, 'error') }
   }
   async function doRedo() {
     flog(`[history] doRedo called, canRedo=${canRedo}`)
     if (!canRedo) return
-    try { await Redo() } catch (e) { showToast('error', `Redo failed: ${e instanceof Error ? e.message : String(e)}`) }
+    try { await Redo() } catch (e) { showToast(`Redo failed: ${e instanceof Error ? e.message : String(e)}`, 'error') }
   }
 
   async function quitGuardSaveAndQuit() {
@@ -850,7 +851,7 @@
       quitGuardOpen = false
       await ForceQuit()
     } catch (e) {
-      showToast('error', `Save failed: ${e instanceof Error ? e.message : String(e)}`)
+      showToast(`Save failed: ${e instanceof Error ? e.message : String(e)}`, 'error')
     } finally {
       quitGuardSaving = false
     }
@@ -917,6 +918,45 @@
     selectedDoodadIds = d
     selectionItems = items
     scene?.setSelected(u, d)
+  }
+
+  // Scroll the Explorer panel to the primary (most-recent) selection so the
+  // user can see which row corresponds to the entity they just clicked in the
+  // viewport. Auto-opens the containing accordion section(s) when collapsed —
+  // bits-ui keeps closed Content out of layout so scrollIntoView is a no-op
+  // until the section is expanded.
+  async function scrollExplorerToPrimary(items: main.SelectionItemDTO[], primaryIdx: number) {
+    if (!items.length) return
+    const idx = Math.max(0, Math.min(primaryIdx, items.length - 1))
+    const primary = items[idx]
+    if (!primary) return
+    if (primary.kind === 'doodad') {
+      const d = doodads.find(x => x.creation_number === primary.id)
+      if (!d) return
+      const cat = doodadCategoryFor(d) || 'Uncategorized'
+      sectionOpen = { ...sectionOpen, doodads: true, [`d:${cat}`]: true }
+    } else {
+      const u = units.find(x => x.creation_number === primary.id)
+      if (!u) return
+      let groupId = 'units'
+      if (u.type_id === 'sloc') {
+        groupId = 'markers'
+      } else {
+        const info = unitTypes[u.type_id]
+        const isH = info ? /Hero/i.test(info.category)
+          : u.type_id.length > 0 && u.type_id[0] >= 'A' && u.type_id[0] <= 'Z'
+        if (isH) groupId = 'heroes'
+      }
+      sectionOpen = { ...sectionOpen, [groupId]: true }
+    }
+    await tick()
+    // Wait one more frame so the bits-ui Accordion.Content height-expand
+    // transition has measured layout before we scroll.
+    requestAnimationFrame(() => {
+      const key = `${primary.kind}:${primary.id}`
+      const el = document.querySelector(`[data-row-key="${key}"]`) as HTMLElement | null
+      if (el) el.scrollIntoView({ block: 'nearest' })
+    })
   }
 
   async function handlePick(hits: PickHit[], mode: SelectMode) {
@@ -1758,6 +1798,7 @@
                 <ul class="explorer-list">
                   {#each g.entries as u (u.creation_number)}
                     <li class:selected={selectedIds.has(u.creation_number)}
+                        data-row-key="unit:{u.creation_number}"
                         onclick={(e) => clickRow(e, 'unit', u.creation_number)}
                         title="{u.type_id} #{u.creation_number}">
                       {#if u.type_id === 'sloc'}
@@ -1798,6 +1839,7 @@
                       <ul class="explorer-list">
                         {#each dg.entries as d (d.creation_number)}
                           <li class:selected={selectedDoodadIds.has(d.creation_number)}
+                              data-row-key="doodad:{d.creation_number}"
                               onclick={(e) => clickRow(e, 'doodad', d.creation_number)}
                               title="{d.type_id} #{d.creation_number}">
                             {#await loadIconURL(doodadIconPath(d)) then iconURL}
