@@ -106,6 +106,10 @@ export function ListDoodads() {
   return window['go']['main']['App']['ListDoodads']();
 }
 
+export function ListTilesets() {
+  return window['go']['main']['App']['ListTilesets']();
+}
+
 export function ListUnitObjects() {
   return window['go']['main']['App']['ListUnitObjects']();
 }
@@ -186,14 +190,10 @@ export function Status() {
   return window['go']['main']['App']['Status']();
 }
 
-export function Undo() {
-  return window['go']['main']['App']['Undo']();
-}
-
-export function ListTilesets() {
-  return window['go']['main']['App']['ListTilesets']();
-}
-
 export function SwapTileset(arg1) {
   return window['go']['main']['App']['SwapTileset'](arg1);
+}
+
+export function Undo() {
+  return window['go']['main']['App']['Undo']();
 }
