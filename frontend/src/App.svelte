@@ -239,19 +239,19 @@
   // Visibility persists in localStorage so the user's preference survives
   // app restarts. Hotkey 'M' toggles. Click on the image pans the 3D camera.
   const MINIMAP_LS_KEY = 'wc3-forge:showMinimap'
-  let showMinimap: boolean = (() => {
+  let showMinimap: boolean = $state((() => {
     try {
       const raw = localStorage.getItem(MINIMAP_LS_KEY)
       // Default to ON for new users — the panel is small and not in the way,
       // and being visible by default mirrors HiveWE's default.
       return raw === null ? true : raw === '1'
     } catch { return true }
-  })()
+  })())
   // Generation counter bumped whenever the loaded map changes (Open / Close /
   // map-changed event). The Minimap component watches this prop and reloads
   // its image + cached terrain coords on every bump. Avoids the component
   // having to subscribe to its own MAP_EVENT — single source of truth here.
-  let mapLoadGen: number = 0
+  let mapLoadGen: number = $state(0)
   function toggleMinimap() {
     showMinimap = !showMinimap
     try { localStorage.setItem(MINIMAP_LS_KEY, showMinimap ? '1' : '0') } catch {}
