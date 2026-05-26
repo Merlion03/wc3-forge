@@ -23,6 +23,7 @@
   import ViewMenu from './ViewMenu.svelte'
   import AssetPreview from './AssetPreview.svelte'
   import MapInfoEditor from './MapInfoEditor.svelte'
+  import ObjectEditor from './ObjectEditor.svelte'
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
   import { showToast } from './toast'
@@ -181,6 +182,22 @@
   }
   function closeMapInfoEditor() {
     showMapInfoEditor = false
+  }
+
+  // ----- Object Editor modal (Phase 1a: units only, read-only) -----
+  // Same conditional-mount pattern as MapInfoEditor so the dialog
+  // component fully unmounts on close — keeps the rather large
+  // tree+field-table render off the DOM until it's actually wanted.
+  let showObjectEditor: boolean = $state(false)
+  let objectEditorInitialId: string | null = $state(null)
+  function openObjectEditor(id: string | null = null) {
+    if (!status.loaded) return
+    objectEditorInitialId = id
+    showObjectEditor = true
+  }
+  function closeObjectEditor() {
+    showObjectEditor = false
+    objectEditorInitialId = null
   }
 
   // ----- Minimap overlay (bottom-right of viewport) -----
@@ -583,6 +600,14 @@
           break
         case 'mapinfo.close':
           closeMapInfoEditor()
+          break
+        case 'objecteditor.open':
+          // Optional arg: a unit FourCC to preselect (e.g. 'objecteditor.open E000').
+          // Used by automated screenshots and agent-driven inspection.
+          openObjectEditor(args[0] || null)
+          break
+        case 'objecteditor.close':
+          closeObjectEditor()
           break
         case 'bridge_console.toggle':
           toggleBridgeConsole()
@@ -1439,6 +1464,30 @@
       </DropdownMenu.Content>
     </DropdownMenu.Root>
 
+    <!-- Module menu — hosts the WC3-style sub-editors (Object Editor today,
+         future: Trigger Editor, Sound Editor, etc). Mirrors HiveWE's
+         "Module" / WorldEdit's "Window" menu by convention. -->
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger>
+        {#snippet child({ props })}
+          <Button {...props} variant="ghost" size="sm" title="Module menu">
+            Module
+            <ChevronDownIcon class="text-muted-foreground" />
+          </Button>
+        {/snippet}
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content class="min-w-[220px]" align="start">
+        <DropdownMenu.Item
+          onSelect={runMenuAction(openObjectEditor)}
+          disabled={!status.loaded}
+          title="Browse units (Phase 1a: read-only)."
+        >
+          <span class="flex-1">Object Editor…</span>
+          <DropdownMenu.Shortcut>F6</DropdownMenu.Shortcut>
+        </DropdownMenu.Item>
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
+
     <ViewMenu categories={doodadCategoriesPresent}
               visibility={doodadVisibility}
               overlays={{ pathing: pathingVisible }}
@@ -1910,6 +1959,10 @@
 
   {#if showMapInfoEditor}
     <MapInfoEditor bind:open={showMapInfoEditor} onClose={closeMapInfoEditor} />
+  {/if}
+
+  {#if showObjectEditor}
+    <ObjectEditor bind:open={showObjectEditor} initialId={objectEditorInitialId} {reforged} onClose={closeObjectEditor} />
   {/if}
 
   <!-- Unsaved-changes confirmation. Driven by the wc3-forge:close-requested

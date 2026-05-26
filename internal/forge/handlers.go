@@ -92,6 +92,14 @@ func RegisterAll(b *bridge.Bridge) {
 	// Prefixed with underscore to flag it as a non-stable surface; agents
 	// should use the specific handlers (view.set_mode etc.) where available.
 	reg("_ui.send_command", handleUISendCommand)
+	// Object Editor — units (Phase 1a: read-only, units kind only). The
+	// "objects.*" namespace is distinct from the "units.*" namespace, which
+	// is reserved for *placed* unit entities (war3mapUnits.doo). Items,
+	// abilities, doodads, etc. will land under "objects.<kind>.*" the same
+	// way.
+	reg("objects.units.list", handleObjectsUnitsList)
+	reg("objects.units.get", handleObjectsUnitsGet)
+	reg("objects.units.fields_meta", handleObjectsUnitsFieldsMeta)
 }
 
 // handleUISendCommand forwards a raw test-driver command string. Used by

@@ -51,6 +51,11 @@
   let disposed = false
   let loadToken = 0
   let error = $state('')
+  // Sequences (animations) on the currently-loaded model. Populated by
+  // loadModel after the model parse succeeds; reset on every model swap so
+  // the picker doesn't show stale entries from the previous unit.
+  let sequences: Array<{ name: string }> = $state([])
+  let currentSequenceIdx: number = $state(-1)
   // Tracks the `reforged` value the viewer was last (re)built with. Not a
   // rune — pure internal bookkeeping, only read/written inside effects and
   // init/teardown. Keeping it as a plain `let` (vs `$state(reforged)`) avoids
@@ -147,6 +152,18 @@
       instance = null
     }
     model = null
+    sequences = []
+    currentSequenceIdx = -1
+  }
+
+  // Pick a different animation. Called from the overlay <select> change
+  // handler. Silently no-ops when no instance exists yet — the picker
+  // is hidden in that case but a stale event from a torn-down model
+  // could theoretically still fire during a quick selection swap.
+  function setSequence(idx: number) {
+    if (!instance || idx < 0 || idx >= sequences.length) return
+    try { instance.setSequence(idx) } catch { /* lib quirk; ignore */ }
+    currentSequenceIdx = idx
   }
 
   async function tryLoadOne(path: string): Promise<any | null> {
@@ -191,6 +208,15 @@
     inst.move([0, 0, 0])
     inst.uniformScale(1)
     inst.setTeamColor(teamColor)
+    // Force-loop every sequence regardless of the source MDX's `nonLooping`
+    // flag. Without this, picking Death / Decay / a one-shot Attack plays
+    // the animation once and then freezes the model on the last frame — the
+    // user has no way to re-trigger short of switching sequences. HiveWE's
+    // Object Editor preview behaves the same way (always-loop). The lib
+    // checks this in modelinstance.js::update — mode=2 short-circuits the
+    // nonLooping check and rolls back to the sequence's interval[0] every
+    // time `frame > interval[1]`.
+    try { inst.setSequenceLoopMode?.(2) } catch { /* lib quirk; ignore */ }
     // Stand pose for the preview; pick the first 'stand' if present, else
     // sequence 0. Animation plays on its own via viewer.updateAndRender.
     const seqs: Array<{ name: string }> = m.sequences || []
@@ -198,6 +224,11 @@
     if (idx < 0 && seqs.length > 0) idx = 0
     if (idx >= 0) inst.setSequence(idx)
     instance = inst
+    // Expose the sequence list to the picker overlay. State updates here
+    // trigger the <select> render below — Svelte 5 picks up the $state
+    // assignment without extra plumbing.
+    sequences = seqs
+    currentSequenceIdx = idx
     // Bounds come from the lib's MdxModel; some models have r=0 (e.g. pure
     // particle-emitter dummies) — fall back to a sensible default so the
     // camera doesn't end up inside the model.
@@ -274,6 +305,10 @@
   const PITCH_MIN = -Math.PI / 2 + 0.05
   const PITCH_MAX = Math.PI / 2 - 0.05
 
+  // Captured element + pointerId, retained between onDown and onUp so the
+  // up handler can release the same capture even if onMove never fires.
+  let dragTarget: Element | null = null
+  let dragPointerId = -1
   function onDown(e: PointerEvent) {
     dragging = true
     lastX = e.clientX; lastY = e.clientY
@@ -281,22 +316,45 @@
     // CRITICAL for WebView2/Wails: setPointerCapture ensures move/up events
     // continue to fire even when the cursor leaves the canvas bounds. Without
     // it, dragging "stalls" the moment the pointer exits the small preview.
-    try { (e.target as Element)?.setPointerCapture?.(e.pointerId) } catch { /* non-fatal */ }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
+    const target = e.target as Element
+    try { target?.setPointerCapture?.(e.pointerId) } catch { /* non-fatal */ }
+    dragTarget = target
+    dragPointerId = e.pointerId
+    // Listen for POINTER events, not the legacy compat mouse events.
+    // preventDefault() on the pointerdown above causes the user agent to
+    // SUPPRESS the compatibility `mousemove`/`mouseup` pair — so listening
+    // for those produced the "freeze during drag, snap on release" symptom
+    // we saw in both the Properties pane and Object Editor previews. The
+    // single final compat mousemove that fires on pointerup explains the
+    // one-shot orbit-on-release: yaw/pitch jumped by the total accumulated
+    // delta in one frame. Pointer events fire on the captured element
+    // throughout the drag, so attach there instead of on window.
+    target?.addEventListener('pointermove', onMove)
+    target?.addEventListener('pointerup', onUp)
+    target?.addEventListener('pointercancel', onUp)
   }
-  function onMove(e: MouseEvent) {
+  function onMove(e: PointerEvent) {
     if (!dragging) return
     const dx = e.clientX - lastX
     const dy = e.clientY - lastY
     lastX = e.clientX; lastY = e.clientY
-    yaw -= dx * YAW_SENS
+    // dx is positive when the cursor moves right; we want the model to rotate
+    // the SAME direction the cursor moves (grab-and-spin), so add — not
+    // subtract — the delta. Vertical pitch keeps the standard tilt-down-as-
+    // you-drag-down convention.
+    yaw += dx * YAW_SENS
     pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, pitch + dy * PITCH_SENS))
   }
   function onUp() {
     dragging = false
-    window.removeEventListener('mousemove', onMove)
-    window.removeEventListener('mouseup', onUp)
+    if (dragTarget) {
+      dragTarget.removeEventListener('pointermove', onMove as EventListener)
+      dragTarget.removeEventListener('pointerup', onUp)
+      dragTarget.removeEventListener('pointercancel', onUp)
+      try { dragTarget.releasePointerCapture?.(dragPointerId) } catch { /* non-fatal */ }
+    }
+    dragTarget = null
+    dragPointerId = -1
   }
   function onWheel(e: WheelEvent) {
     e.preventDefault()
@@ -328,8 +386,10 @@
   onDestroy(() => {
     disposed = true
     canvas?.removeEventListener('wheel', onWheel)
-    window.removeEventListener('mousemove', onMove)
-    window.removeEventListener('mouseup', onUp)
+    // If a drag is in-flight when the component unmounts (closing the dialog
+    // mid-drag, say), tear down the pointer-event listeners + capture too.
+    // onUp is idempotent: no-ops when dragTarget is already null.
+    onUp()
     teardownViewer()
   })
 
@@ -367,6 +427,22 @@
     title="Reset view"
     class="absolute top-1.5 right-1.5 rounded-sm border border-border bg-background/85 px-2 py-0.5 text-[11px] text-foreground hover:bg-muted hover:text-foreground cursor-pointer"
   >Reset</button>
+  {#if sequences.length > 1}
+    <!-- Animation picker. Hidden when the model has 0 or 1 sequence (no
+         meaningful choice). Native <select> rather than shadcn so the
+         control stays narrow inside the small preview overlay and doesn't
+         drag in a portal/popover that would float OUTSIDE the dialog. -->
+    <select
+      class="absolute top-1.5 left-1.5 rounded-sm border border-border bg-background/85 px-1.5 py-0.5 text-[11px] text-foreground hover:bg-muted cursor-pointer max-w-[55%] truncate"
+      title="Animation"
+      value={currentSequenceIdx}
+      onchange={(e) => setSequence(parseInt((e.target as HTMLSelectElement).value, 10))}
+    >
+      {#each sequences as seq, i (i)}
+        <option value={i}>{seq.name || `Sequence ${i}`}</option>
+      {/each}
+    </select>
+  {/if}
   {#if error}
     <div class="absolute bottom-1.5 left-1.5 right-1.5 rounded-sm bg-destructive/90 text-destructive-foreground px-1.5 py-0.5 text-[11px] font-mono">
       {error}

@@ -1279,3 +1279,105 @@ func (a *App) MapInfoApply(updates map[string]any) error {
 		forge.ApplyInfoUpdates(info, updates)
 	})
 }
+
+// --- Object Editor (units) ---
+//
+// Phase 1a: read-only. The JS Object Editor calls these to populate its
+// tree and field table. They delegate to forge.MergedUnits / the underlying
+// metadata so the Wails surface and the MCP bridge stay in lockstep — both
+// see the same merged base+shadow view.
+
+// UnitObjectListEntity mirrors handlers_objects.go's objectsUnitsListEntity.
+// Re-declared here because the bridge type is package-private; we don't
+// want a cross-package Wails-binding dependency on internal/forge's
+// JSON-shaped DTOs.
+type UnitObjectListEntity struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Race      string `json:"race"`
+	RaceLabel string `json:"race_label"`
+	Kind      string `json:"kind"`
+	Category  string `json:"category"`
+	IsCustom  bool   `json:"is_custom"`
+	IsEdited  bool   `json:"is_edited"`
+	BaseID    string `json:"base_id,omitempty"`
+	Campaign  bool   `json:"campaign"`
+	IconArt   string `json:"icon_art"`
+}
+
+// ListUnitObjects returns the merged-units tree for the Object Editor.
+// Empty slice (not error) when no map is loaded or CASC isn't reachable —
+// the UI shows an empty-state instead of an error toast.
+func (a *App) ListUnitObjects() []UnitObjectListEntity {
+	out, err := forge.ListUnitObjects()
+	if err != nil {
+		return []UnitObjectListEntity{}
+	}
+	dtos := make([]UnitObjectListEntity, 0, len(out))
+	for _, r := range out {
+		dtos = append(dtos, UnitObjectListEntity{
+			ID:        r.ID,
+			Name:      r.Name,
+			Race:      r.Race,
+			RaceLabel: r.RaceLabel,
+			Kind:      r.Kind,
+			Category:  r.Category,
+			IsCustom:  r.IsCustom,
+			IsEdited:  r.IsEdited,
+			BaseID:    r.BaseID,
+			Campaign:  r.Campaign,
+			IconArt:   r.IconArt,
+		})
+	}
+	return dtos
+}
+
+// UnitObjectField mirrors handlers_objects.go's objectsUnitsField.
+type UnitObjectField struct {
+	ID          string `json:"id"`
+	Field       string `json:"field"`
+	DisplayName string `json:"display_name"`
+	Category    string `json:"category"`
+	Type        string `json:"type"`
+	Value       string `json:"value"`
+	Display     string `json:"display"`
+	Overridden  bool   `json:"overridden"`
+}
+
+// UnitObjectDetail mirrors handlers_objects.go's objectsUnitsGetResult.
+type UnitObjectDetail struct {
+	ID             string            `json:"id"`
+	Name           string            `json:"name"`
+	BaseID         string            `json:"base_id,omitempty"`
+	IsCustom       bool              `json:"is_custom"`
+	IsEdited       bool              `json:"is_edited"`
+	Race           string            `json:"race"`
+	Kind           string            `json:"kind"`
+	IconArt        string            `json:"icon_art"`
+	ModelPath      string            `json:"model_path"`
+	ModelFallbacks []string          `json:"model_fallbacks"`
+	Fields         []UnitObjectField `json:"fields"`
+}
+
+// GetUnitObject returns the full field table for one unit. Returns nil
+// (not error) when the id is missing or no map loaded — the UI shows an
+// inline empty state in that case.
+func (a *App) GetUnitObject(id string) *UnitObjectDetail {
+	if id == "" {
+		return nil
+	}
+	d, err := forge.GetUnitObject(id)
+	if err != nil || d == nil {
+		return nil
+	}
+	fields := make([]UnitObjectField, 0, len(d.Fields))
+	for _, f := range d.Fields {
+		fields = append(fields, UnitObjectField(f))
+	}
+	return &UnitObjectDetail{
+		ID: d.ID, Name: d.Name, BaseID: d.BaseID, IsCustom: d.IsCustom,
+		IsEdited: d.IsEdited, Race: d.Race, Kind: d.Kind, IconArt: d.IconArt,
+		ModelPath: d.ModelPath, ModelFallbacks: d.ModelFallbacks,
+		Fields: fields,
+	}
+}

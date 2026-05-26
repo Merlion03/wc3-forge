@@ -42,6 +42,8 @@ export function GetTerrain():Promise<main.TerrainDTO>;
 
 export function GetUnit(arg1:number):Promise<unitsdoo.Entity>;
 
+export function GetUnitObject(arg1:string):Promise<main.UnitObjectDetail>;
+
 export function GetUnitTypeIndex():Promise<Record<string, main.UnitTypeInfo>>;
 
 export function HistoryList():Promise<forge.HistoryState>;
@@ -51,6 +53,8 @@ export function IsDirty():Promise<boolean>;
 export function LaunchInWC3():Promise<void>;
 
 export function ListDoodads():Promise<Array<main.DoodadDTO>>;
+
+export function ListUnitObjects():Promise<Array<main.UnitObjectListEntity>>;
 
 export function ListUnits():Promise<Array<main.UnitDTO>>;
 

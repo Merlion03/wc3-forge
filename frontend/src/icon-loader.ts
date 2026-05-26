@@ -17,7 +17,13 @@
 // ourselves — a single request always succeeds when a file exists at
 // either extension.
 
-import parsers from 'mdx-m3-viewer/dist/cjs/parsers'
+import parsersImport from 'mdx-m3-viewer/dist/cjs/parsers'
+// CJS default-import trap: Vite preserves the synthetic `default` wrapper
+// around CJS modules, so `parsersImport.blp.Image` is undefined at runtime
+// even though the type declaration says it exists. Unwrap to get the real
+// namespace object. Caused silent decode failures (blank Explorer icons,
+// "No minimap") before this fix landed elsewhere in the codebase.
+const parsers: any = (parsersImport as any)?.default ?? parsersImport
 
 // path -> data URL ("" once we've confirmed a 404 or decode failure, so
 // repeated requests don't keep re-issuing the same XHR).

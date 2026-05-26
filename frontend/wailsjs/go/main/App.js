@@ -74,6 +74,10 @@ export function GetUnit(arg1) {
   return window['go']['main']['App']['GetUnit'](arg1);
 }
 
+export function GetUnitObject(arg1) {
+  return window['go']['main']['App']['GetUnitObject'](arg1);
+}
+
 export function GetUnitTypeIndex() {
   return window['go']['main']['App']['GetUnitTypeIndex']();
 }
@@ -92,6 +96,10 @@ export function LaunchInWC3() {
 
 export function ListDoodads() {
   return window['go']['main']['App']['ListDoodads']();
+}
+
+export function ListUnitObjects() {
+  return window['go']['main']['App']['ListUnitObjects']();
 }
 
 export function ListUnits() {
