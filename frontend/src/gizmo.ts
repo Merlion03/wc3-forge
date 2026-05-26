@@ -126,6 +126,31 @@ const BOX_R = 0.08
 const BOX_BASE_Z = CYL_TOP
 const BOX_TIP_Z = CYL_TOP + 2 * BOX_R
 
+// Face-handle (Roblox-style scale) geometry — a small unit cube CENTERED
+// at the origin. Drawn 6 times per face, positioned at the entity's
+// bounding-sphere face centers in world space. Uses the same handleScale
+// uniform as everything else, so visually it stays a fixed screen size.
+const FACE_BOX_LOCAL_R = 0.07
+function buildFaceBox(): Float32Array {
+  const verts: number[] = []
+  const v = (x: number, y: number, z: number) => verts.push(x, y, z)
+  const a = FACE_BOX_LOCAL_R
+  v(-a, -a,  a); v( a, -a,  a); v( a,  a,  a)
+  v(-a, -a,  a); v( a,  a,  a); v(-a,  a,  a)
+  v(-a, -a, -a); v( a,  a, -a); v( a, -a, -a)
+  v(-a, -a, -a); v(-a,  a, -a); v( a,  a, -a)
+  v( a, -a, -a); v( a,  a, -a); v( a,  a,  a)
+  v( a, -a, -a); v( a,  a,  a); v( a, -a,  a)
+  v(-a, -a, -a); v(-a,  a,  a); v(-a,  a, -a)
+  v(-a, -a, -a); v(-a, -a,  a); v(-a,  a,  a)
+  v(-a,  a, -a); v(-a,  a,  a); v( a,  a,  a)
+  v(-a,  a, -a); v( a,  a,  a); v( a,  a, -a)
+  v(-a, -a, -a); v( a, -a,  a); v(-a, -a,  a)
+  v(-a, -a, -a); v( a, -a, -a); v( a, -a,  a)
+  return new Float32Array(verts)
+}
+const FACE_BOX_VERTS = buildFaceBox()
+
 function buildCube(): Float32Array {
   const verts: number[] = []
   const v = (x:number, y:number, z:number) => verts.push(x, y, z)
@@ -264,8 +289,13 @@ const PLANE_COLOR: Record<'xy' | 'xz' | 'yz', [number, number, number]> = {
 }
 
 export interface GizmoPickResult {
-  axis: GizmoAxis
+  axis: GizmoAxis | 'centroid'
   mode: GizmoMode
+  // Scale mode only: which face of the bounding box was grabbed (+1 = +axis
+  // face, -1 = -axis face). Undefined for centroid-fallback drag (multi-
+  // select) and for non-scale modes. Used by the drag math to decide which
+  // direction along the axis line means "grow."
+  faceSign?: 1 | -1
 }
 
 // Single-axis records (no plane entries — plane handles use their own
@@ -320,20 +350,29 @@ interface RotateDrag {
 }
 interface ScaleDrag {
   mode: 'scale'
-  axis: GizmoAxis
+  // 'x' | 'y' | 'z': which single axis the dragged face is on.
+  // 'centroid': fallback for multi-select — uniform scale around centroid.
+  axis: GizmoAxis | 'centroid'
+  // Which face on that axis was grabbed: +1 = positive face, -1 = negative.
+  // Both faces scale symmetrically around center; faceSign just decides which
+  // direction "outward" is for the drag projection.
+  faceSign: 1 | -1
+  // Entity center (world coords) — projection target for the drag.
   origin: [number, number, number]
   entities: EntityOrig[]
-  // Cursor position (canvas pixels) at mousedown.
+  // |center → handle| at mousedown. Local (model-space) radius for single-
+  // select Roblox-style handles, or centroid-distance for the multi-select
+  // fallback. factor = currentHandleDist / origHandleDist.
+  origHandleDist: number
+  // Multi-select fallback only: 2D anchor for the cursor-delta math.
   anchorPx: number
   anchorPy: number
-  // Screen-space direction of the dragged axis at mousedown, normalized.
-  // factor = 2^(((px - anchorPx) * sax + (py - anchorPy) * say) / SCALE_DRAG_PIXELS).
-  // Sign-aware: dragging in the axis-arrow direction grows; opposite shrinks;
-  // perpendicular = no change. Click position no longer affects sensitivity
-  // (every drag of the same screen-distance gives the same factor change).
   screenAxisX: number
   screenAxisY: number
-  currentFactor: number
+  // Per-axis live-preview scale factors. For single-axis face drag, only the
+  // dragged axis changes; the others stay 1. For multi-select centroid drag,
+  // all three change together (uniform).
+  perAxisFactor: [number, number, number]
 }
 
 export type GizmoDragState = MoveDrag | RotateDrag | ScaleDrag
@@ -536,6 +575,28 @@ function rayCylinder(
   return t
 }
 
+/**
+ * Ray vs sphere. Returns the nearest positive t (front-face hit) or null
+ * if no intersection. Used by face-handle picking.
+ */
+function raySphere(
+  rox: number, roy: number, roz: number,
+  rdx: number, rdy: number, rdz: number,
+  cx: number, cy: number, cz: number,
+  radius: number,
+): number | null {
+  const ox = rox - cx, oy = roy - cy, oz = roz - cz
+  const b = ox*rdx + oy*rdy + oz*rdz
+  const c = ox*ox + oy*oy + oz*oz - radius*radius
+  const disc = b*b - c
+  if (disc < 0) return null
+  const sq = Math.sqrt(disc)
+  let t = -b - sq
+  if (t < 0) t = -b + sq
+  if (t < 0) return null
+  return t
+}
+
 /** Build a unit-axis Z-rotation quaternion [x, y, z, w]. */
 function quatZ(angle: number): [number, number, number, number] {
   const h = angle / 2
@@ -553,6 +614,31 @@ function wrapAngle(a: number): number {
 function snap(v: number, step: number): number {
   if (!isFinite(step) || step <= 0) return v
   return Math.round(v / step) * step
+}
+
+/**
+ * World-space bounds of one entity instance. Returns the world-space center
+ * of the model's bounding sphere + the LOCAL (unscaled) sphere radius and
+ * the current per-axis scales — the gizmo's face-handle code needs these
+ * separately so it can position each handle at center + axis_unit * r_local
+ * * scale[axis] (i.e. honoring per-axis stretching).
+ *
+ * Returns null when the instance has no MDX bounds (e.g. sloc pillars,
+ * doodads whose model failed to load) — caller should fall back to the
+ * centroid+arrow-cube path used by multi-select.
+ */
+function instanceBounds(inst: any): { cx: number; cy: number; cz: number; r: number; sx: number; sy: number; sz: number } | null {
+  const b = inst?.getBounds?.()
+  if (!b || b.r <= 0) return null
+  const sx = inst.worldScale?.[0] ?? 1
+  const sy = inst.worldScale?.[1] ?? 1
+  const sz = inst.worldScale?.[2] ?? 1
+  return {
+    cx: inst.worldLocation[0] + b.x,
+    cy: inst.worldLocation[1] + b.y,
+    cz: inst.worldLocation[2] + b.z,
+    r: b.r, sx, sy, sz,
+  }
 }
 
 /**
@@ -614,6 +700,12 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
   gl.bindBuffer(gl.ARRAY_BUFFER, planeYZVBO)
   gl.bufferData(gl.ARRAY_BUFFER, PLANE_YZ_VERTS, gl.STATIC_DRAW)
 
+  // Face-handle cube (Phase: roblox-scale). Centered at origin in local
+  // space; drawn 6 times per entity at the bounding-sphere face centers.
+  const faceBoxVBO = gl.createBuffer()!
+  gl.bindBuffer(gl.ARRAY_BUFFER, faceBoxVBO)
+  gl.bufferData(gl.ARRAY_BUFFER, FACE_BOX_VERTS, gl.STATIC_DRAW)
+
   gl.bindBuffer(gl.ARRAY_BUFFER, null)
   const PLANE_VBO: Record<'xy' | 'xz' | 'yz', WebGLBuffer> = {
     xy: planeXYVBO, xz: planeXZVBO, yz: planeYZVBO,
@@ -633,6 +725,23 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
   let lastVisible: boolean = false
   let hoverAxis: GizmoAxis | null = null
   let dragState: GizmoDragState | null = null
+  // Face-handle positions for single-select scale mode. Cached by draw,
+  // read by pick. Null when not in scale mode or the entity has no bounds
+  // (e.g. sloc), in which case the centroid+arrow-cube fallback applies.
+  let lastFacePositions: {
+    xp: [number, number, number]
+    xn: [number, number, number]
+    yp: [number, number, number]
+    yn: [number, number, number]
+    zp: [number, number, number]
+    zn: [number, number, number]
+  } | null = null
+  // Local (unscaled) bounding-sphere radius captured by draw for use in
+  // pick + drag math. Null when no single-select bounds available.
+  let lastFaceRadius: number = 0
+  // Center of the single-selected entity's bounding sphere (world coords)
+  // captured by draw, used for the drag-axis projection.
+  let lastFaceCenter: [number, number, number] = [0, 0, 0]
 
   function computeOrigin(
     selectionItems: SelectionItem[],
@@ -709,6 +818,20 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
     bindVBO(ringVBO); gl.drawArrays(gl.TRIANGLES, 0, RING_VERTS.length / 3)
   }
 
+  function drawFaceHandle(
+    viewProj: Float32Array,
+    facePos: [number, number, number], scale: number,
+    axisColor: [number, number, number], hovered: boolean,
+  ) {
+    // Face-handle cube — centered at the face position, identity rotation
+    // since the geometry is symmetric. Sized via handleScale for fixed
+    // screen size like every other gizmo handle.
+    const [r0, r1, r2] = AXIS_ROT['z']
+    setAxisUniforms(facePos, scale, r0, r1, r2, axisColor, hovered, viewProj)
+    bindVBO(faceBoxVBO)
+    gl.drawArrays(gl.TRIANGLES, 0, FACE_BOX_VERTS.length / 3)
+  }
+
   function drawPlaneHandle(
     viewProj: Float32Array,
     origin: [number, number, number], scale: number,
@@ -780,10 +903,35 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
   function pickScale(
     rox: number, roy: number, roz: number, rdx: number, rdy: number, rdz: number,
     origin: [number, number, number], scale: number,
-  ): GizmoAxis | null {
+  ): { axis: 'x' | 'y' | 'z' | 'centroid'; faceSign?: 1 | -1 } | null {
+    // Face-handle pick when single-select gave us bounds. Direct-manipulation
+    // mode: pick the closest face cube. Falls through to the centroid+arrow
+    // pick when no face positions were cached (multi-select or bounds-less
+    // entity like a sloc).
+    if (lastFacePositions) {
+      const pickR = FACE_BOX_LOCAL_R * scale * PICK_RADIUS_INFLATE * 1.5
+      let bestT = Infinity
+      let bestAxis: 'x' | 'y' | 'z' | null = null
+      let bestSign: 1 | -1 = 1
+      const tryFace = (axis: 'x' | 'y' | 'z', sign: 1 | -1, pos: [number, number, number]) => {
+        const t = raySphere(rox, roy, roz, rdx, rdy, rdz, pos[0], pos[1], pos[2], pickR)
+        if (t !== null && t > 0 && t < bestT) { bestT = t; bestAxis = axis; bestSign = sign }
+      }
+      tryFace('x', +1, lastFacePositions.xp)
+      tryFace('x', -1, lastFacePositions.xn)
+      tryFace('y', +1, lastFacePositions.yp)
+      tryFace('y', -1, lastFacePositions.yn)
+      tryFace('z', +1, lastFacePositions.zp)
+      tryFace('z', -1, lastFacePositions.zn)
+      if (bestAxis !== null) return { axis: bestAxis, faceSign: bestSign }
+      return null
+    }
+    // Centroid fallback (multi-select etc.): the old per-axis cubes at the
+    // gizmo origin. faceSign omitted — outer dispatch treats this as the
+    // uniform-around-centroid drag.
     let bestT = Infinity
-    let bestAxis: GizmoAxis | null = null
-    for (const axis of ['x', 'y', 'z'] as GizmoAxis[]) {
+    let bestAxis: 'x' | 'y' | 'z' | null = null
+    for (const axis of ['x', 'y', 'z'] as Array<'x' | 'y' | 'z'>) {
       const [adx, ady, adz] = AXIS_DIRS[axis]
       const cylR = CYL_RADIUS * scale * PICK_RADIUS_INFLATE
       const cylT = rayCylinder(
@@ -792,7 +940,6 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
         adx, ady, adz, cylR, 0, CYL_TOP * scale,
       )
       if (cylT !== null && cylT > 0 && cylT < bestT) { bestT = cylT; bestAxis = axis }
-      // Cube approximated as a fat cylinder around its center for forgiving pick.
       const cubeCenterT = (BOX_BASE_Z + BOX_TIP_Z) / 2
       const cubeBaseX = origin[0] + adx * (cubeCenterT - (BOX_TIP_Z - BOX_BASE_Z)/2) * scale
       const cubeBaseY = origin[1] + ady * (cubeCenterT - (BOX_TIP_Z - BOX_BASE_Z)/2) * scale
@@ -806,7 +953,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
       )
       if (cubeT !== null && cubeT > 0 && cubeT < bestT) { bestT = cubeT; bestAxis = axis }
     }
-    return bestAxis
+    return bestAxis !== null ? { axis: bestAxis } : null
   }
 
   function pickRotate(
@@ -918,9 +1065,48 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           drawPlaneHandle(vp, origin, handleScale, 'xz', activeAxis === 'xz')
           drawPlaneHandle(vp, origin, handleScale, 'yz', activeAxis === 'yz')
         } else if (mode === 'scale') {
-          drawScaleHandle(vp, origin, handleScale, 'x', activeAxis === 'x')
-          drawScaleHandle(vp, origin, handleScale, 'y', activeAxis === 'y')
-          drawScaleHandle(vp, origin, handleScale, 'z', activeAxis === 'z')
+          // Roblox-style: 6 face handles around the entity's bounding sphere,
+          // each tracking the current per-axis scale so the handle follows
+          // the cursor as the model grows. Single-select only — multi-select
+          // falls back to the centroid+arrow-cube path below.
+          let usedFaceHandles = false
+          if (selectionItems.length === 1) {
+            const item = selectionItems[0]
+            const inst = item.kind === 'unit' ? unitInstances.get(item.id) : doodadInstances.get(item.id)
+            const wb = inst ? instanceBounds(inst) : null
+            if (wb) {
+              const rx = wb.r * wb.sx
+              const ry = wb.r * wb.sy
+              const rz = wb.r * wb.sz
+              lastFaceCenter = [wb.cx, wb.cy, wb.cz]
+              lastFaceRadius = wb.r
+              lastFacePositions = {
+                xp: [wb.cx + rx, wb.cy, wb.cz],
+                xn: [wb.cx - rx, wb.cy, wb.cz],
+                yp: [wb.cx, wb.cy + ry, wb.cz],
+                yn: [wb.cx, wb.cy - ry, wb.cz],
+                zp: [wb.cx, wb.cy, wb.cz + rz],
+                zn: [wb.cx, wb.cy, wb.cz - rz],
+              }
+              const hov = activeAxis  // 'x'|'y'|'z' lights both faces on that axis
+              drawFaceHandle(vp, lastFacePositions.xp, handleScale, AXIS_COLOR.x, hov === 'x')
+              drawFaceHandle(vp, lastFacePositions.xn, handleScale, AXIS_COLOR.x, hov === 'x')
+              drawFaceHandle(vp, lastFacePositions.yp, handleScale, AXIS_COLOR.y, hov === 'y')
+              drawFaceHandle(vp, lastFacePositions.yn, handleScale, AXIS_COLOR.y, hov === 'y')
+              drawFaceHandle(vp, lastFacePositions.zp, handleScale, AXIS_COLOR.z, hov === 'z')
+              drawFaceHandle(vp, lastFacePositions.zn, handleScale, AXIS_COLOR.z, hov === 'z')
+              usedFaceHandles = true
+            }
+          }
+          if (!usedFaceHandles) {
+            // Multi-select OR entity without bounds (sloc, broken model) —
+            // fall back to the centroid+arrow-cubes UX so the user always
+            // has SOME scale gizmo to interact with.
+            lastFacePositions = null
+            drawScaleHandle(vp, origin, handleScale, 'x', activeAxis === 'x')
+            drawScaleHandle(vp, origin, handleScale, 'y', activeAxis === 'y')
+            drawScaleHandle(vp, origin, handleScale, 'z', activeAxis === 'z')
+          }
         } else if (mode === 'rotate') {
           // Z-axis ring only (design §5 #9: X/Y rotations have no on-disk storage).
           drawRotateRing(vp, origin, handleScale, 'z', activeAxis === 'z')
@@ -942,14 +1128,26 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
       if (!ray) return null
       const [rox, roy, roz, rdx, rdy, rdz] = ray
 
-      let axis: GizmoAxis | null = null
-      if (mode === 'move')        axis = pickMove(rox, roy, roz, rdx, rdy, rdz, lastOrigin, lastHandleScale)
-      else if (mode === 'scale')  axis = pickScale(rox, roy, roz, rdx, rdy, rdz, lastOrigin, lastHandleScale)
-      else if (mode === 'rotate') axis = pickRotate(rox, roy, roz, rdx, rdy, rdz, lastOrigin, lastHandleScale)
-
-      if (axis === null) { hoverAxis = null; return null }
-      hoverAxis = axis
-      return { axis, mode }
+      if (mode === 'move') {
+        const axis = pickMove(rox, roy, roz, rdx, rdy, rdz, lastOrigin, lastHandleScale)
+        if (axis === null) { hoverAxis = null; return null }
+        hoverAxis = axis
+        return { axis, mode }
+      } else if (mode === 'scale') {
+        const hit = pickScale(rox, roy, roz, rdx, rdy, rdz, lastOrigin, lastHandleScale)
+        if (!hit) { hoverAxis = null; return null }
+        // hoverAxis is the single-axis label ('x'|'y'|'z' or 'centroid'); the
+        // draw block uses it to light both faces on the hovered axis.
+        hoverAxis = hit.axis === 'centroid' ? null : hit.axis
+        return { axis: hit.axis, mode, faceSign: hit.faceSign }
+      } else if (mode === 'rotate') {
+        const axis = pickRotate(rox, roy, roz, rdx, rdy, rdz, lastOrigin, lastHandleScale)
+        if (axis === null) { hoverAxis = null; return null }
+        hoverAxis = axis
+        return { axis, mode }
+      }
+      hoverAxis = null
+      return null
     },
 
     beginDrag(pick, px, py, scene, canvas, selectionItems, unitInstances, doodadInstances, unitTypeIndexCache) {
@@ -1019,17 +1217,35 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           }
         }
       } else if (pick.mode === 'scale') {
-        // Maya/Unity-style: signed projection of cursor delta onto the
-        // axis direction in SCREEN space. Sign-aware (reversing the drag
-        // direction actually reverses the scale change); click position
-        // doesn't affect sensitivity; perpendicular drags do nothing.
-        // The 2D-only math avoids axis-vs-view-angle whipsaws.
-        const sp0 = worldToScreen(scene, canvas, origin)
-        if (!sp0) return
-        if (!isPlaneAxis(pick.axis)) {
+        if (pick.faceSign !== undefined && (pick.axis === 'x' || pick.axis === 'y' || pick.axis === 'z')) {
+          // Roblox-style direct manipulation. The handle follows the cursor
+          // along the axis through the entity center; the face position IS
+          // the new scale edge.
+          if (!lastFacePositions || lastFaceRadius <= 0) return
+          const center = lastFaceCenter
+          const ent0 = entities[0]
+          if (!ent0) return
+          const axisIdx = pick.axis === 'x' ? 0 : pick.axis === 'y' ? 1 : 2
+          // World-space distance from center to face at mousedown. This is
+          // what the cursor-projected distance is divided by to get the
+          // per-axis factor — natural 1:1 mapping (face at orig distance →
+          // factor=1; face at 2× orig distance → factor=2; face at 0.5× →
+          // factor=0.5).
+          const origHandleDist = lastFaceRadius * ent0.scaleOrig[axisIdx] * ent0.modelScale
+          if (origHandleDist <= 1e-3) return
+          dragState = {
+            mode: 'scale', axis: pick.axis, faceSign: pick.faceSign,
+            origin: [center[0], center[1], center[2]], entities,
+            origHandleDist,
+            anchorPx: 0, anchorPy: 0, screenAxisX: 0, screenAxisY: 0,
+            perAxisFactor: [1, 1, 1],
+          }
+        } else if (pick.axis === 'x' || pick.axis === 'y' || pick.axis === 'z') {
+          // Centroid fallback (multi-select). Keep the previous signed-axis
+          // cursor-delta math — there's no single bounding box to anchor on.
+          const sp0 = worldToScreen(scene, canvas, origin)
+          if (!sp0) return
           const [adx, ady, adz] = AXIS_DIRS[pick.axis]
-          // Pick a point along the axis at the gizmo's visible width so the
-          // screen projection is large enough to normalize stably.
           const ref = lastHandleScale > 0 ? lastHandleScale : 100
           const sp1 = worldToScreen(scene, canvas, [
             origin[0] + adx * ref,
@@ -1043,14 +1259,14 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           if (len < 1e-3) return
           sax /= len; say /= len
           dragState = {
-            mode: 'scale', axis: pick.axis, origin, entities,
+            mode: 'scale', axis: 'centroid', faceSign: 1,
+            origin, entities,
+            origHandleDist: 1,
             anchorPx: px, anchorPy: py,
             screenAxisX: sax, screenAxisY: say,
-            currentFactor: 1,
+            perAxisFactor: [1, 1, 1],
           }
         } else {
-          // Plane-axis scale is not currently surfaced in the UI (planes
-          // are move-only). Defensive fallback: refuse the drag.
           return
         }
       } else if (pick.mode === 'rotate') {
@@ -1119,39 +1335,69 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           }
         }
       } else if (ds.mode === 'scale') {
-        // Signed cursor-delta projection onto the screen-space axis
-        // direction. K=400 means dragging 400 px in the axis direction = 2×;
-        // 400 px against the axis direction = 0.5×; perpendicular = no
-        // change. Reversing the drag actually shrinks (unlike the screen-
-        // distance ratio which was unsigned and bounced when crossing the
-        // gizmo). Click position no longer affects sensitivity.
-        const SCALE_DRAG_PIXELS = 400
-        const dpx = px - ds.anchorPx
-        const dpy = py - ds.anchorPy
-        const signed = dpx * ds.screenAxisX + dpy * ds.screenAxisY
-        let factor = Math.pow(2, signed / SCALE_DRAG_PIXELS)
-        if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
-        // Tighter clamp [0.1, 10] than the prior [0.01, 100] — typical
-        // doodad use is well within that range and the looser clamp made
-        // accidental runaways recoverable but visible. Undo still covers
-        // anything legitimate.
-        if (factor < 0.1) factor = 0.1
-        if (factor > 10) factor = 10
-        ds.currentFactor = factor
-        for (const ent of ds.entities) {
-          const newScale = ent.scaleOrig[0] * factor
-          if (typeof (ent.inst as any).uniformScale === 'function') {
-            ;(ent.inst as any).uniformScale(newScale * ent.modelScale)
+        if (ds.axis === 'centroid') {
+          // Multi-select fallback: signed cursor-delta projection onto the
+          // screen-space axis direction. Same as before; uniform across all
+          // entities since there's no single bounding box to anchor on.
+          const SCALE_DRAG_PIXELS = 400
+          const dpx = px - ds.anchorPx
+          const dpy = py - ds.anchorPy
+          const signed = dpx * ds.screenAxisX + dpy * ds.screenAxisY
+          let factor = Math.pow(2, signed / SCALE_DRAG_PIXELS)
+          if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
+          if (factor < 0.1) factor = 0.1
+          if (factor > 10) factor = 10
+          ds.perAxisFactor = [factor, factor, factor]
+          for (const ent of ds.entities) {
+            const newScale = ent.scaleOrig[0] * factor
+            if (typeof (ent.inst as any).uniformScale === 'function') {
+              ;(ent.inst as any).uniformScale(newScale * ent.modelScale)
+            }
           }
-          // Multi-select: entity distance to centroid scales along the dragged axis.
-          // For single-select (centroid == orig.pos) this is a no-op (delta=0).
-          const dx = ent.posOrig[0] - origin[0]
-          const dy = ent.posOrig[1] - origin[1]
-          const dz = ent.posOrig[2] - origin[2]
-          const nx = ent.posOrig[0] + (ds.axis === 'x' ? dx * (factor - 1) : 0)
-          const ny = ent.posOrig[1] + (ds.axis === 'y' ? dy * (factor - 1) : 0)
-          const nz = ent.posOrig[2] + (ds.axis === 'z' ? dz * (factor - 1) : 0)
-          ;(ent.inst as any).setLocation([nx, ny, nz])
+        } else {
+          // Single-select Roblox-style: direct manipulation. Project cursor
+          // ray onto the world-space axis line through the entity center.
+          // The signed projection distance from center, scaled by faceSign,
+          // divided by the orig handle distance, IS the new per-axis factor.
+          const axisIdx = ds.axis === 'x' ? 0 : ds.axis === 'y' ? 1 : 2
+          const axisUnit: [number, number, number] = ds.axis === 'x' ? [1, 0, 0]
+            : ds.axis === 'y' ? [0, 1, 0] : [0, 0, 1]
+          // Note: AXIS_DIRS.y is -Y (the flipped Y arrow lives in the move/
+          // rotate UI), but scale is symmetric per-axis and bounding-box-
+          // aligned, so we use the conventional +Y axis here without flip.
+          const nearest = rayLineNearest(
+            rox, roy, roz, rdx, rdy, rdz,
+            origin[0], origin[1], origin[2],
+            axisUnit[0], axisUnit[1], axisUnit[2],
+          )
+          if (!nearest) return
+          // Signed distance from center along the axis (positive in +axis,
+          // negative in -axis). faceSign decides which direction means "grow."
+          const signedDist = nearest.s * ds.faceSign
+          let factor = signedDist / ds.origHandleDist
+          if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
+          if (factor < 0.1) factor = 0.1
+          if (factor > 10) factor = 10
+          // Only the dragged axis's factor changes; others stay 1.
+          const f: [number, number, number] = [
+            ds.perAxisFactor[0], ds.perAxisFactor[1], ds.perAxisFactor[2],
+          ]
+          f[axisIdx] = factor
+          ds.perAxisFactor = f
+          for (const ent of ds.entities) {
+            const inst = ent.inst as any
+            const sx = ent.scaleOrig[0] * f[0]
+            const sy = ent.scaleOrig[1] * f[1]
+            const sz = ent.scaleOrig[2] * f[2]
+            const ms = ent.modelScale
+            if (typeof inst.setScale === 'function') {
+              inst.setScale([sx * ms, sy * ms, sz * ms])
+            } else if (typeof inst.uniformScale === 'function') {
+              // Fall back to uniform; will be visually wrong for non-uniform
+              // scaling but the on-disk commit still writes per-axis.
+              inst.uniformScale(sx * ms)
+            }
+          }
         }
       } else if (ds.mode === 'rotate') {
         const hit = rayPlane(
@@ -1303,38 +1549,55 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           }
         })()
       } else if (ds.mode === 'scale') {
-        let factor = ds.currentFactor
-        if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
-        if (factor < 0.1) factor = 0.1
-        if (factor > 10) factor = 10
+        const f: [number, number, number] = [
+          ds.perAxisFactor[0], ds.perAxisFactor[1], ds.perAxisFactor[2],
+        ]
+        // Apply scale-snap to whichever axes changed.
+        if (snapSettings.scaleOn !== shift) {
+          for (let i = 0; i < 3; i++) {
+            if (Math.abs(f[i] - 1) > 1e-6) f[i] = snap(f[i], snapSettings.scaleStep)
+          }
+        }
+        // Final clamp guards.
+        for (let i = 0; i < 3; i++) {
+          if (f[i] < 0.1) f[i] = 0.1
+          if (f[i] > 10) f[i] = 10
+        }
         const origin = ds.origin
-        const axis = ds.axis
         const ents = ds.entities
+        const isCentroid = ds.axis === 'centroid'
         const scaleLabel = ents.length > 1 ? `Scale ${ents.length} entities` : ''
         ;(async () => {
           await BeginUndoGroup(scaleLabel)
           try {
             for (const ent of ents) {
-              const newS = ent.scaleOrig[0] * factor
-              const dx = ent.posOrig[0] - origin[0]
-              const dy = ent.posOrig[1] - origin[1]
-              const dz = ent.posOrig[2] - origin[2]
-              const nx = ent.posOrig[0] + (axis === 'x' ? dx * (factor - 1) : 0)
-              const ny = ent.posOrig[1] + (axis === 'y' ? dy * (factor - 1) : 0)
-              const nz = ent.posOrig[2] + (axis === 'z' ? dz * (factor - 1) : 0)
+              const newSx = ent.scaleOrig[0] * f[0]
+              const newSy = ent.scaleOrig[1] * f[1]
+              const newSz = ent.scaleOrig[2] * f[2]
+              // Position update only for the centroid (multi-select) path —
+              // single-select Roblox-style scales symmetrically around the
+              // entity's pivot, no position change. For centroid we keep the
+              // existing orbit-distance math but only on the dragged axis.
+              let nx = ent.posOrig[0], ny = ent.posOrig[1], nz = ent.posOrig[2]
+              if (isCentroid) {
+                const factor = f[0]   // uniform for centroid
+                const dx = ent.posOrig[0] - origin[0]
+                const dy = ent.posOrig[1] - origin[1]
+                const dz = ent.posOrig[2] - origin[2]
+                nx = ent.posOrig[0] + dx * (factor - 1)
+                ny = ent.posOrig[1] + dy * (factor - 1)
+                nz = ent.posOrig[2] + dz * (factor - 1)
+              }
               const positionChanged = (Math.abs(nx - ent.posOrig[0]) > 1e-3
                                     || Math.abs(ny - ent.posOrig[1]) > 1e-3
                                     || Math.abs(nz - ent.posOrig[2]) > 1e-3)
               const gameZ = nz - ent.moveHeight
               try {
-                // Visual is uniform via scale[0]; we write uniform on-disk too
-                // so the saved file matches what the user sees. Per-axis editing
-                // belongs in Properties, not the gizmo.
                 if (ent.kind === 'unit') {
-                  await ScaleUnit(ent.cn, newS, newS, newS)
+                  await ScaleUnit(ent.cn, newSx, newSy, newSz)
                   if (positionChanged) await MoveUnit(ent.cn, nx, ny, gameZ)
                 } else {
-                  await ScaleDoodad(ent.cn, newS, newS, newS)
+                  await ScaleDoodad(ent.cn, newSx, newSy, newSz)
                   if (positionChanged) await MoveDoodad(ent.cn, nx, ny, gameZ)
                 }
               } catch (err) {
