@@ -163,9 +163,9 @@
   // owned here so the header toggle button + Ctrl+` hotkey can drive it.
   // Persisted to localStorage so reload preserves open/closed state.
   const LS_BRIDGE_CONSOLE_OPEN = 'wc3forge.bridge-console.open'
-  let bridgeConsoleOpen: boolean = (() => {
+  let bridgeConsoleOpen: boolean = $state((() => {
     try { return localStorage.getItem(LS_BRIDGE_CONSOLE_OPEN) === '1' } catch { return false }
-  })()
+  })())
   function toggleBridgeConsole() {
     bridgeConsoleOpen = !bridgeConsoleOpen
   }
@@ -1587,7 +1587,7 @@
               onDragEnd={onRightColWidthDragEnd} />
 
     <div class="flex min-h-0 flex-col bg-card" bind:this={rightColEl}>
-      <aside class="flex min-h-0 flex-none flex-col overflow-hidden border-b border-border"
+      <aside class="flex min-h-0 flex-none flex-col overflow-hidden"
              style="flex: 0 0 {rightExplorerPct}%;">
         <header class="panel-header">Explorer</header>
         <div class="panel-body">
@@ -1949,7 +1949,7 @@
   }
   :global(html), :global(body), main { height: 100vh; }
 
-  .viewport { position: relative; min-width: 0; min-height: 0; border-right: 1px solid #2a2a30; }
+  .viewport { position: relative; min-width: 0; min-height: 0; }
   canvas { display: block; width: 100%; height: 100%; }
 
   .error { background: #7f1d1d; color: #fecaca; padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; max-height: 200px; overflow: auto; }
