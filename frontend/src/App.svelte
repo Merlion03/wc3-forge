@@ -1428,9 +1428,13 @@
     </div>
 
     <div class="flex items-center gap-1.5">
+      {#if !terrainPickModeOn}
       <!-- Gizmo mode toggle (Phase C): Move / Rotate / Scale.
            Bare hotkeys W / E / R. Active mode is highlighted; inactive modes
-           sit in muted-secondary so the active one reads at a glance. -->
+           sit in muted-secondary so the active one reads at a glance.
+           Hidden in terrain pick mode — the gizmo only acts on entities, so
+           the controls would be dead weight when the click pipeline is
+           routed to terrain instead. -->
       <div class="flex items-center" role="group" aria-label="Gizmo mode">
         <Button
           size="sm"
@@ -1500,6 +1504,7 @@
         </DropdownMenu.Content>
       </DropdownMenu.Root>
       <span class="mx-1 inline-block h-5 w-px bg-border" aria-hidden="true"></span>
+      {/if}
       <Button
         size="sm"
         variant={terrainPickModeOn ? 'default' : 'secondary'}
