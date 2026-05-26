@@ -591,13 +591,44 @@ func handleMapSave(_ json.RawMessage) (any, error) {
 	return map[string]any{"ok": true}, nil
 }
 
-func handleUnitsList(_ json.RawMessage) (any, error) {
+// unitsListParams supports an optional filter on the units.list response so
+// agents driving busy maps don't have to swallow the full 200+ entity payload
+// every call. Both filter fields are pointers so "absent" is distinguishable
+// from a meaningful zero (Player=0 is a real slot; TypeID="" is the absent
+// marker but kept symmetric for cleanliness).
+//
+// Wire shape mirrors HiveWE's `{filter: {type_id, player}}` so agent scripts
+// written for either editor work against the other. `include_items` from the
+// HiveWE shape is intentionally omitted — wc3-forge's units_list never mixes
+// item entities in to begin with (items live as inventory slots on units).
+type unitsListParams struct {
+	Filter *struct {
+		TypeID *string `json:"type_id"`
+		Player *uint32 `json:"player"`
+	} `json:"filter"`
+}
+
+func handleUnitsList(params json.RawMessage) (any, error) {
 	units := Current.Units()
 	if units == nil {
 		return nil, errors.New("no map loaded")
 	}
+	var p unitsListParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+	}
 	out := make([]unitsListEntity, 0, len(units.Entities))
 	for _, e := range units.Entities {
+		if p.Filter != nil {
+			if p.Filter.TypeID != nil && e.TypeID != *p.Filter.TypeID {
+				continue
+			}
+			if p.Filter.Player != nil && e.Player != *p.Filter.Player {
+				continue
+			}
+		}
 		inv := make([]invItem, 0, len(e.Inventory))
 		for _, slot := range e.Inventory {
 			inv = append(inv, invItem{Slot: slot.Slot, ItemID: slot.ItemID})
