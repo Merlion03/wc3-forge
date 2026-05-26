@@ -373,6 +373,13 @@ interface ScaleDrag {
   // dragged axis changes; the others stay 1. For multi-select centroid drag,
   // all three change together (uniform).
   perAxisFactor: [number, number, number]
+  // Local axis direction transformed to world space, captured at mousedown.
+  // Face handles align with the entity's local frame, so dragging the +X
+  // handle on a rotated entity scales the entity's LOCAL X (which renders
+  // in whatever world direction the rotation pointed it). Drag projection
+  // uses this direction so the cursor → factor math agrees with the visible
+  // handle position regardless of entity rotation.
+  axisWorldDir: [number, number, number]
 }
 
 export type GizmoDragState = MoveDrag | RotateDrag | ScaleDrag
@@ -601,6 +608,30 @@ function raySphere(
 function quatZ(angle: number): [number, number, number, number] {
   const h = angle / 2
   return [0, 0, Math.sin(h), Math.cos(h)]
+}
+
+/**
+ * Rotate vec3 v by quaternion q ([x, y, z, w]). Used to transform an
+ * entity's local axes into world space so the Roblox-style scale face
+ * handles sit on the entity's actual faces (not on world axes), and so
+ * the drag math projects the cursor onto the LOCAL axis direction in
+ * world space — matching how inst.setScale operates in local space.
+ *
+ * Formula: vr = v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v)
+ */
+function rotateVecByQuat(v: [number, number, number], q: ArrayLike<number>): [number, number, number] {
+  const vx = v[0], vy = v[1], vz = v[2]
+  const qx = q[0], qy = q[1], qz = q[2], qw = q[3]
+  // t = 2 * cross(q.xyz, v)
+  const tx = 2 * (qy * vz - qz * vy)
+  const ty = 2 * (qz * vx - qx * vz)
+  const tz = 2 * (qx * vy - qy * vx)
+  // v + qw * t + cross(q.xyz, t)
+  return [
+    vx + qw * tx + (qy * tz - qz * ty),
+    vy + qw * ty + (qz * tx - qx * tz),
+    vz + qw * tz + (qx * ty - qy * tx),
+  ]
 }
 
 /** Normalize an angle to (-π, π]. */
@@ -1086,18 +1117,32 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
             const inst = item.kind === 'unit' ? unitInstances.get(item.id) : doodadInstances.get(item.id)
             const wb = inst ? instanceBounds(inst) : null
             if (wb) {
+              // Transform the entity's local axes into world space so face
+              // handles align with the entity's own frame (Roblox style).
+              // Without this, a 90°-rotated doodad shows red on world +X
+              // but dragging scales LOCAL +X which renders as world +Y —
+              // the "scaled on opposite axis" bug.
+              // Prefer the lib's worldRotation when present (includes any
+              // composed pitch/roll for doodads); fall back to the stashed
+              // yaw-only rotation when not.
+              const instAny = inst as any
+              const wr: ArrayLike<number> = instAny.worldRotation
+                ?? quatZ(instAny.__wc3ForgeRotation ?? 0)
+              const lxw = rotateVecByQuat([1, 0, 0], wr)
+              const lyw = rotateVecByQuat([0, 1, 0], wr)
+              const lzw = rotateVecByQuat([0, 0, 1], wr)
               const rx = wb.r * wb.sx
               const ry = wb.r * wb.sy
               const rz = wb.r * wb.sz
               lastFaceCenter = [wb.cx, wb.cy, wb.cz]
               lastFaceRadius = wb.r
               lastFacePositions = {
-                xp: [wb.cx + rx, wb.cy, wb.cz],
-                xn: [wb.cx - rx, wb.cy, wb.cz],
-                yp: [wb.cx, wb.cy + ry, wb.cz],
-                yn: [wb.cx, wb.cy - ry, wb.cz],
-                zp: [wb.cx, wb.cy, wb.cz + rz],
-                zn: [wb.cx, wb.cy, wb.cz - rz],
+                xp: [wb.cx + lxw[0]*rx, wb.cy + lxw[1]*rx, wb.cz + lxw[2]*rx],
+                xn: [wb.cx - lxw[0]*rx, wb.cy - lxw[1]*rx, wb.cz - lxw[2]*rx],
+                yp: [wb.cx + lyw[0]*ry, wb.cy + lyw[1]*ry, wb.cz + lyw[2]*ry],
+                yn: [wb.cx - lyw[0]*ry, wb.cy - lyw[1]*ry, wb.cz - lyw[2]*ry],
+                zp: [wb.cx + lzw[0]*rz, wb.cy + lzw[1]*rz, wb.cz + lzw[2]*rz],
+                zn: [wb.cx - lzw[0]*rz, wb.cy - lzw[1]*rz, wb.cz - lzw[2]*rz],
               }
               const hov = activeAxis  // 'x'|'y'|'z' lights both faces on that axis
               drawFaceHandle(vp, lastFacePositions.xp, handleScale, AXIS_COLOR.x, hov === 'x')
@@ -1244,12 +1289,23 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           // factor=0.5).
           const origHandleDist = lastFaceRadius * ent0.scaleOrig[axisIdx] * ent0.modelScale
           if (origHandleDist <= 1e-3) return
+          // Compute the entity's local axis direction in world space —
+          // the drag projection line. setScale operates in LOCAL space, so
+          // we measure the cursor's movement along that same local axis
+          // (transformed to world for ray-line intersection).
+          const instAny = ent0.inst as any
+          const wr: ArrayLike<number> = instAny.worldRotation
+            ?? quatZ(instAny.__wc3ForgeRotation ?? 0)
+          const localAxis: [number, number, number] =
+            pick.axis === 'x' ? [1, 0, 0] : pick.axis === 'y' ? [0, 1, 0] : [0, 0, 1]
+          const axisWorldDir = rotateVecByQuat(localAxis, wr)
           dragState = {
             mode: 'scale', axis: pick.axis, faceSign: pick.faceSign,
             origin: [center[0], center[1], center[2]], entities,
             origHandleDist,
             anchorPx: 0, anchorPy: 0, screenAxisX: 0, screenAxisY: 0,
             perAxisFactor: [1, 1, 1],
+            axisWorldDir,
           }
         } else if (pick.axis === 'x' || pick.axis === 'y' || pick.axis === 'z') {
           // Centroid fallback (multi-select). Keep the previous signed-axis
@@ -1276,6 +1332,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
             anchorPx: px, anchorPy: py,
             screenAxisX: sax, screenAxisY: say,
             perAxisFactor: [1, 1, 1],
+            axisWorldDir: [1, 0, 0],  // unused for centroid path
           }
         } else {
           return
@@ -1371,11 +1428,14 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           // The signed projection distance from center, scaled by faceSign,
           // divided by the orig handle distance, IS the new per-axis factor.
           const axisIdx = ds.axis === 'x' ? 0 : ds.axis === 'y' ? 1 : 2
-          const axisUnit: [number, number, number] = ds.axis === 'x' ? [1, 0, 0]
-            : ds.axis === 'y' ? [0, 1, 0] : [0, 0, 1]
-          // Note: AXIS_DIRS.y is -Y (the flipped Y arrow lives in the move/
-          // rotate UI), but scale is symmetric per-axis and bounding-box-
-          // aligned, so we use the conventional +Y axis here without flip.
+          // Use the LOCAL axis direction transformed to world (captured at
+          // mousedown). This is what the visible face handle aligns with,
+          // so the cursor projection direction matches what the user sees.
+          // Falls back to world axes if axisWorldDir wasn't captured (legacy
+          // dragState shapes — shouldn't happen with current beginDrag).
+          const axisUnit: [number, number, number] = (ds.axisWorldDir && ds.axisWorldDir.length === 3)
+            ? ds.axisWorldDir
+            : (ds.axis === 'x' ? [1, 0, 0] : ds.axis === 'y' ? [0, 1, 0] : [0, 0, 1])
           const nearest = rayLineNearest(
             rox, roy, roz, rdx, rdy, rdz,
             origin[0], origin[1], origin[2],
