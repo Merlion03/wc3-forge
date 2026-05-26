@@ -756,12 +756,25 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // just waste an iteration per RAF tick.
   const doodadInstancesToReroll = new Set<any>()
 
-  // Sloc-marker renderer. Owns its own shader + box geometry. Failure to
-  // build is non-fatal: we just won't have visible markers. Built here
-  // (after `let slocRenderer = null` above) rather than earlier, because
-  // assigning to a `let` before its declaration is a TDZ violation in JS.
+  // Sloc-marker renderer. Renders start locations as CircleOfPower MDX
+  // instances when the viewer/scene + CASC are available, with a primitive
+  // pillar fallback if the MDX fails to load. Passing unitInstances lets
+  // sloc-markers register its MDX instances in the scene's master cn map
+  // so the gizmo / drag-to-move / entity-changed flows below treat slocs
+  // identically to real units — slocs ARE units in WC3 (type_id "sloc"
+  // in war3mapUnits.doo with full position/rotation/scale fields), so any
+  // mutation API that works on units should work on them. Failure to
+  // build the fallback shader is non-fatal: we just won't have visible
+  // markers. Built here (after `let slocRenderer = null` above) rather
+  // than earlier, because assigning to a `let` before its declaration is
+  // a TDZ violation in JS.
   try {
-    slocRenderer = buildSlocRenderer((viewer as any).gl as WebGLRenderingContext)
+    slocRenderer = buildSlocRenderer(
+      (viewer as any).gl as WebGLRenderingContext,
+      viewer,
+      scene,
+      unitInstances,
+    )
   } catch (e) {
     flog('[slocs] init failed:', e instanceof Error ? e.message : String(e))
   }
@@ -1630,8 +1643,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
 
     // ── GIZMO PRIORITY PICK (design §1.3) ─────────────────────────────
     // Check gizmo handle BEFORE entity selection / drag-to-move logic.
-    // Only when no modifier key is held (modifier = selection semantics).
-    if (!shift && !ctrl && gizmo && gizmoSelectionItems.length > 0) {
+    // Shift is allowed through because it's a gizmo-side modifier (e.g.
+    // uniform scale during a per-axis scale drag) — without this, a
+    // shift-held click on a handle would fall through to rubber-band.
+    // Ctrl stays gated as a selection-only modifier (ctrl+click an entity
+    // under a handle toggles selection rather than grabbing the handle).
+    if (!ctrl && gizmo && gizmoSelectionItems.length > 0) {
       const gizmoHit = gizmo.rayPick(px, py, scene, canvas)
       if (gizmoHit) {
         gizmo.beginDrag(
@@ -1989,7 +2006,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   function updateUnitPositionImpl(cn: number, x: number, y: number, z: number): void {
     const inst = unitInstances.get(cn)
     // Defense-in-depth: silently skip if the cn isn't a placed unit. Slocs
-    // (rendered via slocRenderer, not unitInstances), doodads, and stale
+    // are also in this map (registered by slocRenderer); doodads and stale
     // creation_numbers from a race with map-changed all silently return.
     if (!inst) return
     const typeId = (inst as any).__wc3ForgeTypeId as string | undefined
@@ -2000,6 +2017,27 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // instance was fresh with localLocation=[0,0,0]. Here localLocation is
     // already non-zero, so we need an absolute set.
     ;(inst as any).setLocation([x, y, z + moveHeight])
+    nudgeSkeletonRefresh(inst)
+  }
+
+  // Workaround for an mdx-m3-viewer quirk: setLocation/setRotation/setScale
+  // on the root MdxModelInstance correctly updates the root's worldLocation
+  // and walks immediate children via Node.recalculateTransformation, but the
+  // skeletal bones only refresh inside MdxModelInstance.updateAnimations when
+  // their `wasDirty` flag is set — and a manual transform on the root doesn't
+  // propagate wasDirty downward. Re-applying the current sequence flips
+  // MdxModelInstance.forced (see MdxModelInstance.setSequence), which makes
+  // the next updateAnimations pass do a full skeletal recalc.
+  //
+  // Without this, models with skeletal sub-geometry (CircleOfPower's rune
+  // ring, units with attached weapons / particle emitters) visibly lag behind
+  // a manual transform until the next animation event happens to flip
+  // wasDirty organically — looks like "the center moved but the rest didn't."
+  function nudgeSkeletonRefresh(inst: any): void {
+    const seq = inst?.sequence
+    if (typeof seq === 'number' && seq >= 0 && typeof inst.setSequence === 'function') {
+      inst.setSequence(seq)
+    }
   }
 
   // Internal helper for re-positioning a placed doodad instance. Parallel
@@ -2041,6 +2079,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       inst.setRotation(q)
     }
     inst.__wc3ForgeRotation = rot
+    nudgeSkeletonRefresh(inst)
   }
   function applyScale(inst: any, s: number[]) {
     // Per-axis scale via setScale so the Roblox-style gizmo's per-axis
@@ -2059,6 +2098,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       inst.uniformScale(s[0] * modelScale)
     }
     inst.__wc3ForgeScale = [s[0], s[1], s[2]]
+    nudgeSkeletonRefresh(inst)
   }
   EventsOn(ENTITY_EVENT, (payload: EntityChangedPayload) => {
     if (!payload) return

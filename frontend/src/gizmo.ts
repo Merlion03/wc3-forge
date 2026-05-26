@@ -1395,7 +1395,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           let dx = hit.hx - ds.anchorPoint[0]
           let dy = hit.hy - ds.anchorPoint[1]
           let dz = hit.hz - ds.anchorPoint[2]
-          if (snapSettings.moveOn !== shift) {
+          if (snapSettings.moveOn) {
             dx = snap(dx, snapSettings.moveStep)
             dy = snap(dy, snapSettings.moveStep)
             dz = snap(dz, snapSettings.moveStep)
@@ -1415,7 +1415,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           )
           if (!nearest) return
           let delta = nearest.s - ds.anchorParam
-          if (snapSettings.moveOn !== shift) delta = snap(delta, snapSettings.moveStep)
+          if (snapSettings.moveOn) delta = snap(delta, snapSettings.moveStep)
           for (const ent of ds.entities) {
             const nx = ent.posOrig[0] + adx * delta
             const ny = ent.posOrig[1] + ady * delta
@@ -1433,7 +1433,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           const dpy = py - ds.anchorPy
           const signed = dpx * ds.screenAxisX + dpy * ds.screenAxisY
           let factor = Math.pow(2, signed / SCALE_DRAG_PIXELS)
-          if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
+          if (snapSettings.scaleOn) factor = snap(factor, snapSettings.scaleStep)
           if (factor < 0.1) factor = 0.1
           if (factor > 10) factor = 10
           ds.perAxisFactor = [factor, factor, factor]
@@ -1467,14 +1467,18 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           // negative in -axis). faceSign decides which direction means "grow."
           const signedDist = nearest.s * ds.faceSign
           let factor = signedDist / ds.origHandleDist
-          if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
+          if (snapSettings.scaleOn) factor = snap(factor, snapSettings.scaleStep)
           if (factor < 0.1) factor = 0.1
           if (factor > 10) factor = 10
-          // Only the dragged axis's factor changes; others stay 1.
-          const f: [number, number, number] = [
-            ds.perAxisFactor[0], ds.perAxisFactor[1], ds.perAxisFactor[2],
-          ]
-          f[axisIdx] = factor
+          // Shift held = uniform: the dragged axis's factor applies to all
+          // three. Released mid-drag snaps the non-dragged axes back to 1
+          // immediately so the user sees the modifier toggle live (Blender's
+          // shift-scale convention). Without shift = per-axis: only the
+          // dragged axis changes, others stay at 1.
+          const f: [number, number, number] = shift
+            ? [factor, factor, factor]
+            : [1, 1, 1]
+          if (!shift) f[axisIdx] = factor
           ds.perAxisFactor = f
           for (const ent of ds.entities) {
             const inst = ent.inst as any
@@ -1501,7 +1505,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
         const angle = Math.atan2(hit.hy - origin[1], hit.hx - origin[0])
         let delta = wrapAngle(angle - ds.anchorAngle)
         // Snap in DEGREES — rotateStep is in degrees, convert to radians for math.
-        if (snapSettings.rotateOn !== shift) {
+        if (snapSettings.rotateOn) {
           const step = (snapSettings.rotateStep * Math.PI) / 180
           delta = snap(delta, step)
         }
@@ -1547,7 +1551,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
               dz = hit.hz - ds.anchorPoint[2]
             }
           }
-          if (snapSettings.moveOn !== shift) {
+          if (snapSettings.moveOn) {
             dx = snap(dx, snapSettings.moveStep)
             dy = snap(dy, snapSettings.moveStep)
             dz = snap(dz, snapSettings.moveStep)
@@ -1563,7 +1567,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
             )
             if (nearest) delta = nearest.s - ds.anchorParam
           }
-          if (snapSettings.moveOn !== shift) delta = snap(delta, snapSettings.moveStep)
+          if (snapSettings.moveOn) delta = snap(delta, snapSettings.moveStep)
           const [adx, ady, adz] = AXIS_DIRS[ds.axis]
           dx = adx * delta; dy = ady * delta; dz = adz * delta
         }
@@ -1600,7 +1604,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
         // saw at the moment of mouseup (the last onDrag may have been one
         // mouse-tick stale; ds.currentAngle reflects that tick's snapped value).
         let delta = ds.currentAngle - ds.anchorAngle
-        if (snapSettings.rotateOn !== shift) {
+        if (snapSettings.rotateOn) {
           const step = (snapSettings.rotateStep * Math.PI) / 180
           delta = snap(delta, step)
         }
@@ -1645,7 +1649,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           ds.perAxisFactor[0], ds.perAxisFactor[1], ds.perAxisFactor[2],
         ]
         // Apply scale-snap to whichever axes changed.
-        if (snapSettings.scaleOn !== shift) {
+        if (snapSettings.scaleOn) {
           for (let i = 0; i < 3; i++) {
             if (Math.abs(f[i] - 1) > 1e-6) f[i] = snap(f[i], snapSettings.scaleStep)
           }
