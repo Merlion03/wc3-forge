@@ -173,3 +173,11 @@ export function Status() {
 export function Undo() {
   return window['go']['main']['App']['Undo']();
 }
+
+export function ListTilesets() {
+  return window['go']['main']['App']['ListTilesets']();
+}
+
+export function SwapTileset(arg1) {
+  return window['go']['main']['App']['SwapTileset'](arg1);
+}

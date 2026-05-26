@@ -91,3 +91,7 @@ export function SetUnitAnimation(arg1:number,arg2:string):Promise<void>;
 export function Status():Promise<main.MapStatus>;
 
 export function Undo():Promise<void>;
+
+export function ListTilesets():Promise<Array<main.TilesetInfoDTO>>;
+
+export function SwapTileset(arg1:main.SwapTilesetRequest):Promise<main.TerrainDTO>;
