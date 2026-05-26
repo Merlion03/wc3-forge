@@ -45,8 +45,11 @@ const PICK_RADIUS_INFLATE = 1.5
 // ─── Move-arrow geometry (Phase B, unchanged) ──────────────────────────────
 const CYL_SEGS = 12
 const CONE_SEGS = 12
-const CYL_RADIUS = 0.05
-const CONE_RADIUS = 0.10
+// Thinner stem + slightly trimmer cone per user feedback ("make the move
+// gizmo thinner"). Pick zones are still inflated via PICK_RADIUS_INFLATE
+// so the hit area stays generous even though the visible geometry shrinks.
+const CYL_RADIUS = 0.022
+const CONE_RADIUS = 0.07
 const CYL_TOP = 0.75
 const CONE_BASE = 0.75
 const CONE_TIP = 1.00
@@ -467,6 +470,14 @@ export interface GizmoRenderer {
   isDragging(): boolean
   dragAxis(): GizmoAxis | null
   dragMode(): GizmoMode | null
+  /**
+   * Returns the world-space arrow-tip positions for the X/Y/Z move arrows,
+   * or null when the gizmo isn't currently visible in move mode. Callers
+   * project these into screen space to position DOM overlay labels.
+   * The Y arrow uses its flipped (-Y) direction so the label sits at the
+   * visible cone tip.
+   */
+  getMoveArrowTips(): { x: [number, number, number]; y: [number, number, number]; z: [number, number, number] } | null
   dispose(): void
 }
 
@@ -1697,6 +1708,22 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
     isDragging() { return dragState !== null },
     dragAxis()   { return dragState?.axis ?? null },
     dragMode()   { return dragState?.mode ?? null },
+
+    getMoveArrowTips() {
+      if (mode !== 'move' || !lastVisible) return null
+      const o = lastOrigin
+      const s = lastHandleScale
+      // CONE_TIP * s = world distance from origin to the arrow's tip. Add a
+      // small visual outset so the label sits just past the cone instead of
+      // intersecting it. Y axis uses its flipped direction so the label is
+      // at the VISIBLE cone tip (matches AXIS_DIRS.y = [0, -1, 0]).
+      const t = CONE_TIP * s * 1.15
+      return {
+        x: [o[0] + t, o[1], o[2]] as [number, number, number],
+        y: [o[0], o[1] - t, o[2]] as [number, number, number],
+        z: [o[0], o[1], o[2] + t] as [number, number, number],
+      }
+    },
 
     dispose() {
       gl.deleteBuffer(cylVBO)

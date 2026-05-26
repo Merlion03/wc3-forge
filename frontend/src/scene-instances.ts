@@ -945,6 +945,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
             camera.getEye(),
           )
         }
+        updateAxisLabels()
       } catch (e) {
         crashed = true
         flog('[render-loop crash]', e instanceof Error ? e.stack : String(e))
@@ -1234,6 +1235,28 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // Project a world point through the current view-projection matrix into
   // canvas-pixel space (DOM-Y, origin top-left). Returns null if the point
   // is behind the camera (w <= 0). Used by rubber-band hit-testing.
+  // Per-frame update for the move gizmo's X/Y/Z labels. Hides them when
+  // the gizmo isn't visible in move mode; otherwise projects each arrow's
+  // tip world position to canvas pixels and positions the labels there.
+  function updateAxisLabels() {
+    const tips = gizmo?.getMoveArrowTips?.()
+    if (!tips) {
+      axisLabelEls.x.style.display = 'none'
+      axisLabelEls.y.style.display = 'none'
+      axisLabelEls.z.style.display = 'none'
+      return
+    }
+    for (const ax of ['x', 'y', 'z'] as const) {
+      const w = tips[ax]
+      const sp = worldToCanvasPx(w[0], w[1], w[2])
+      const el = axisLabelEls[ax]
+      if (!sp) { el.style.display = 'none'; continue }
+      el.style.left = `${sp.x}px`
+      el.style.top = `${sp.y}px`
+      el.style.display = 'block'
+    }
+  }
+
   function worldToCanvasPx(wx: number, wy: number, wz: number): { x: number; y: number } | null {
     const m = scene.camera.viewProjectionMatrix as Float32Array
     const x = m[0]*wx + m[4]*wy + m[8]*wz + m[12]
@@ -1526,6 +1549,36 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // test contexts) so the listener wiring doesn't crash.
   const overlayHost = canvas.parentElement ?? document.body
   overlayHost.appendChild(overlay)
+
+  // Per-axis labels for the move gizmo. Three absolute-positioned divs in the
+  // same overlay container, repositioned per frame to sit just past each
+  // arrow's cone tip. Hidden whenever the gizmo isn't in move mode or no
+  // entity is selected. Pointer-events:none so they don't intercept clicks.
+  const axisLabelEls: Record<'x' | 'y' | 'z', HTMLDivElement> = {
+    x: document.createElement('div'),
+    y: document.createElement('div'),
+    z: document.createElement('div'),
+  }
+  const AXIS_LABEL_COLORS: Record<'x' | 'y' | 'z', string> = {
+    x: 'rgb(255,80,80)',
+    y: 'rgb(90,220,90)',
+    z: 'rgb(120,140,255)',
+  }
+  for (const ax of ['x', 'y', 'z'] as const) {
+    const el = axisLabelEls[ax]
+    el.textContent = ax.toUpperCase()
+    el.style.cssText = [
+      'position:absolute',
+      'pointer-events:none',
+      'transform:translate(-50%,-50%)',
+      'font:bold 11px system-ui,sans-serif',
+      `color:${AXIS_LABEL_COLORS[ax]}`,
+      'text-shadow:0 0 2px rgba(0,0,0,0.85),0 0 4px rgba(0,0,0,0.6)',
+      'display:none',
+      'z-index:11',
+    ].join(';')
+    overlayHost.appendChild(el)
+  }
 
   function modeFromModifiers(shift: boolean, ctrl: boolean): SelectMode {
     if (ctrl) return 'toggle'
@@ -2279,6 +2332,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       // tolerant of duplicate offs (no-op when no listener is attached).
       EventsOff(ENTITY_EVENT)
       try { overlay.remove() } catch { /* parent already gone */ }
+      for (const ax of ['x', 'y', 'z'] as const) {
+        try { axisLabelEls[ax].remove() } catch { /* parent already gone */ }
+      }
       if (slocRenderer) {
         slocRenderer.dispose()
         slocRenderer = null
