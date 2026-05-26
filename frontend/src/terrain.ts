@@ -306,18 +306,31 @@ function buildAtlas(
   if (numPalettes === 0) return null
 
   // Atlas width = widest palette (256 for non-extended-only, 512 if any
-  // extended). Atlas height = numPalettes * 256.
+  // extended). Atlas height = numPalettes * 256, rounded UP to the next
+  // power-of-two so WebGL1's mipmap-completeness rule is satisfied. WebGL1
+  // requires PoT dimensions for textures sampled with LINEAR_MIPMAP_LINEAR;
+  // a non-PoT atlas with that filter samples as black. The padding sits at
+  // the BOTTOM of the atlas (atlas pixel y in [0, atlasH - atlasH_data));
+  // sub-tile UV math never targets it, but high-LOD mips will average
+  // padding into the bottom palette's lowest sub-tile row — see the
+  // inter-palette-bleed note on `insetV` below.
   let atlasW = 256
   for (const p of palettes) {
     if (p.glTex && p.width > atlasW) atlasW = p.width
   }
   const rowH = 256
-  const atlasH = numPalettes * rowH
+  const atlasH_data = numPalettes * rowH
+  let atlasH = 1
+  while (atlasH < atlasH_data) atlasH <<= 1
+  const padded = atlasH !== atlasH_data
 
   const atlas = gl.createTexture()
   if (!atlas) return null
   gl.bindTexture(gl.TEXTURE_2D, atlas)
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, atlasW, atlasH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+  // Initial MIN_FILTER is LINEAR; we flip to LINEAR_MIPMAP_LINEAR after the
+  // FBO blits + generateMipmap below. WebGL1 rejects mipmap filters on a
+  // texture whose mip chain hasn't been generated yet.
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -466,6 +479,19 @@ void main() {
   gl.deleteShader(vs)
   gl.deleteShader(fs)
 
+  // Generate the mip chain and switch to trilinear minification. HiveWE's
+  // ground_texture.ixx loads each slot into a sampler2DArray with
+  // GL_LINEAR_MIPMAP_LINEAR; we mirror that on the atlas so that at zoom
+  // levels where each sub-tile renders at 1-4 screen pixels, WC3's
+  // hand-baked diagonal alpha-variant slots (mask 6 = BL+TR, mask 9 =
+  // TL+BR) blur into smooth frames instead of sharp "diamonds". Sub-tile
+  // sampling is inset by `insetU/insetV` (5%) to keep neighbor-slot bleed
+  // out of the sampled rect at the LOD levels that matter for those zooms.
+  gl.bindTexture(gl.TEXTURE_2D, atlas)
+  gl.generateMipmap(gl.TEXTURE_2D)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR)
+  flog(`[terrain atlas] built ${atlasW}×${atlasH} (data ${atlasH_data}, padded=${padded}); mipmaps on, MIN=LINEAR_MIPMAP_LINEAR`)
+
   return { atlas, atlasW, atlasH, rows }
 }
 
@@ -579,9 +605,18 @@ export async function buildTerrain(
   //   v0 = yPx / atlasH
   const subW = 64 / atlasW
   const subH = 64 / atlasH
-  // Inset by 1% of sub-tile to suppress LINEAR bleed from neighbors.
-  const insetU = subW * 0.01
-  const insetV = subH * 0.01
+  // Inset the sampling rect by 5% of a sub-tile on every side to absorb mip-
+  // level bleed from neighbor slots. With sub-tile = 64 px, 5% = ~3.2 atlas
+  // pixels of margin — enough to keep LOD-1 (2 px) and LOD-2 (4 px) sampling
+  // strictly inside the slot's own pixels. Higher LODs (LOD-3 = 8 px, LOD-4
+  // = 16 px) will bleed across slots and palette-row boundaries; that is the
+  // SAME blur HiveWE applies via its mipmap chain, so the cross-bleed at
+  // those LODs is what produces the smooth far-zoom appearance instead of
+  // sharp transitions. Was 0.01 (= 0.64 px) before this commit, which was
+  // tight enough for LINEAR (no mipmaps) but leaked at LOD-1+ once mipmaps
+  // were enabled.
+  const insetU = subW * 0.05
+  const insetV = subH * 0.05
   // Slot → (sub-tile column, row) in the SOURCE image, per HiveWE's
   // GroundTexture atlas layout (ground_texture.ixx). Non-extended (4×4 grid,
   // 256×256 image): slot ∈ 0..15, c = slot%4, r = slot/4. Extended (slots 0..31
