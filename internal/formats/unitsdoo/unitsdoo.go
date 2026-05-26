@@ -224,21 +224,35 @@ func readEntity(r *reader, subversion uint32) (Entity, error) {
 		return e, fmt.Errorf("rotation: %w", err)
 	}
 
-	// Scale (vec3 float32). The on-disk value is the natural scale multiplied
-	// by 128 (HiveWE's storage convention). We divide here so the wire format
-	// matches the runtime convention used by Lua's BlzSetUnitScale (1.0 = default).
-	// Without this divide, every unit reports scale=128 instead of 1.0.
+	// Scale (vec3 float32). The on-disk convention is split:
+	//   - Normal units (heroes, buildings, creeps): natural scale × 128
+	//     (raw=128.0 → natural=1.0). Storage matches HiveWE's load() which
+	//     uniformly does `/ 128.f` and gets 1.0 for the common case.
+	//   - Items + slocs: natural scale × 1 (raw=1.0 → natural=1.0).
+	//     HiveWE happens to work because its render path for items pulls
+	//     scale from ItemData.slk and ignores i.scale entirely
+	//     (HiveWE/src/base/units.ixx:78-94). wc3-forge's render path
+	//     multiplies the per-instance scale into the final render scale
+	//     (so the gizmo's per-axis scale handles can edit it), which means
+	//     uniformly dividing by 128 would render items at 1/128 of their
+	//     intended size — invisible. Heuristic: raw < 2.0 is already a
+	//     natural scale (items/slocs); raw >= 2.0 is 128-encoded (units).
+	//     Real authored per-instance scales fall well outside the [0, 2)
+	//     band on either convention.
 	//
-	// scaleRaw captures the on-disk value verbatim — the divide isn't strictly
-	// bidirectional in practice (slocs store raw 1.0, normal units store 128.0)
-	// so byte-faithful Encode needs the original.
+	// scaleRaw captures the on-disk value verbatim so byte-faithful Encode
+	// can preserve the original convention without inferring it.
 	for i := 0; i < 3; i++ {
 		raw, err := r.readF32()
 		if err != nil {
 			return e, fmt.Errorf("scale[%d]: %w", i, err)
 		}
 		e.scaleRaw[i] = raw
-		e.Scale[i] = raw / 128.0
+		if raw < 2.0 {
+			e.Scale[i] = raw
+		} else {
+			e.Scale[i] = raw / 128.0
+		}
 	}
 
 	// skin_id — the ambiguous Reforged field.
