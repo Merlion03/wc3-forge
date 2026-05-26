@@ -20,6 +20,8 @@ export function EmitTestCommand(arg1:string):Promise<void>;
 
 export function EndUndoGroup():Promise<void>;
 
+export function ForceQuit():Promise<void>;
+
 export function GetBridgeInfo():Promise<main.BridgeInfo>;
 
 export function GetDoodad(arg1:number):Promise<doodadsdoo.Doodad>;

@@ -30,6 +30,10 @@ export function EndUndoGroup() {
   return window['go']['main']['App']['EndUndoGroup']();
 }
 
+export function ForceQuit() {
+  return window['go']['main']['App']['ForceQuit']();
+}
+
 export function GetBridgeInfo() {
   return window['go']['main']['App']['GetBridgeInfo']();
 }

@@ -45,6 +45,12 @@ const (
 	// UI uses this to refresh the Edit menu enable state + the History panel.
 	// Payload mirrors HistoryList (forge.HistoryState).
 	eventHistoryChanged   = "wc3-forge:history-changed"
+	// eventCloseRequested fires when the user clicks the window close
+	// button while the session has unsaved edits. App.svelte subscribes
+	// and shows its "unsaved changes" modal; the close is aborted by the
+	// onBeforeClose handler in main.go until the user explicitly chooses
+	// Save & Quit, Discard & Quit, or Cancel.
+	eventCloseRequested   = "wc3-forge:close-requested"
 )
 
 // App is the Wails-bindable surface exposed to the frontend. Every method
@@ -56,6 +62,10 @@ const (
 // clients — both routes converge on forge.Session.
 type App struct {
 	ctx context.Context
+	// forceQuitting is flipped true by ForceQuit so the next OnBeforeClose
+	// callback knows the user already confirmed via the modal and lets the
+	// close proceed without re-prompting.
+	forceQuitting bool
 }
 
 func NewApp() *App {
@@ -1125,6 +1135,36 @@ func (a *App) EndUndoGroup() error {
 // arrive via the dirty-changed Wails event.
 func (a *App) IsDirty() bool {
 	return forge.Current.IsDirty()
+}
+
+// onBeforeClose is the Wails window-close gate. Returns false to allow the
+// close, true to abort it. When dirty we abort + emit a JS event so
+// App.svelte can put up the "unsaved changes" modal; the user's choice
+// then drives either SaveMap+ForceQuit or just ForceQuit.
+//
+// First-call vs re-entry: when the user picks Discard/Save in the modal,
+// the JS side calls ForceQuit, which calls runtime.Quit. Wails routes
+// that through OnBeforeClose AGAIN — we detect this re-entry by checking
+// the forceQuitting flag (set just before Quit fires) and let the close
+// through unchallenged.
+func (a *App) onBeforeClose(ctx context.Context) bool {
+	if a.forceQuitting {
+		return false
+	}
+	if !forge.Current.IsDirty() {
+		return false
+	}
+	runtime.EventsEmit(ctx, eventCloseRequested)
+	return true
+}
+
+// ForceQuit closes the window without re-checking dirty state. Called by
+// the "unsaved changes" modal after the user picks Save & Quit or
+// Discard & Quit. Sets forceQuitting first so the re-entry into
+// onBeforeClose lets the close proceed.
+func (a *App) ForceQuit() {
+	a.forceQuitting = true
+	runtime.Quit(a.ctx)
 }
 
 // SaveMap flushes all pending edits back through the source's write path.
