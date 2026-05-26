@@ -323,12 +323,16 @@ interface ScaleDrag {
   axis: GizmoAxis
   origin: [number, number, number]
   entities: EntityOrig[]
-  // Screen-space distance (canvas pixels) from cursor to gizmo origin at
-  // mousedown. The factor during the drag is currentScreenDist /
-  // anchorScreenDist — Blender's convention. Purely 2D math, robust
-  // against axis-near-camera-direction projection weirdness that broke
-  // the earlier world-space approach.
-  anchorScreenDist: number
+  // Cursor position (canvas pixels) at mousedown.
+  anchorPx: number
+  anchorPy: number
+  // Screen-space direction of the dragged axis at mousedown, normalized.
+  // factor = 2^(((px - anchorPx) * sax + (py - anchorPy) * say) / SCALE_DRAG_PIXELS).
+  // Sign-aware: dragging in the axis-arrow direction grows; opposite shrinks;
+  // perpendicular = no change. Click position no longer affects sensitivity
+  // (every drag of the same screen-distance gives the same factor change).
+  screenAxisX: number
+  screenAxisY: number
   currentFactor: number
 }
 
@@ -1015,20 +1019,39 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           }
         }
       } else if (pick.mode === 'scale') {
-        // Blender-style: factor = current_screen_dist / mousedown_screen_dist.
-        // Purely 2D so it doesn't whipsaw based on axis-vs-view angle the way
-        // the world-space ray-line projection did. Axis choice is purely
-        // cosmetic (the scaled value is uniform — see commit branch below).
-        const sp = worldToScreen(scene, canvas, origin)
-        if (!sp) return
-        // Floor anchor at 10px so clicks very close to the gizmo origin
-        // (shouldn't happen — the cube sits at the END of the stem — but
-        // defense in depth) can't divide-by-near-zero into a huge factor.
-        const anchorScreenDist = Math.max(10, Math.hypot(px - sp.x, py - sp.y))
-        dragState = {
-          mode: 'scale', axis: pick.axis, origin, entities,
-          anchorScreenDist,
-          currentFactor: 1,
+        // Maya/Unity-style: signed projection of cursor delta onto the
+        // axis direction in SCREEN space. Sign-aware (reversing the drag
+        // direction actually reverses the scale change); click position
+        // doesn't affect sensitivity; perpendicular drags do nothing.
+        // The 2D-only math avoids axis-vs-view-angle whipsaws.
+        const sp0 = worldToScreen(scene, canvas, origin)
+        if (!sp0) return
+        if (!isPlaneAxis(pick.axis)) {
+          const [adx, ady, adz] = AXIS_DIRS[pick.axis]
+          // Pick a point along the axis at the gizmo's visible width so the
+          // screen projection is large enough to normalize stably.
+          const ref = lastHandleScale > 0 ? lastHandleScale : 100
+          const sp1 = worldToScreen(scene, canvas, [
+            origin[0] + adx * ref,
+            origin[1] + ady * ref,
+            origin[2] + adz * ref,
+          ])
+          if (!sp1) return
+          let sax = sp1.x - sp0.x
+          let say = sp1.y - sp0.y
+          const len = Math.hypot(sax, say)
+          if (len < 1e-3) return
+          sax /= len; say /= len
+          dragState = {
+            mode: 'scale', axis: pick.axis, origin, entities,
+            anchorPx: px, anchorPy: py,
+            screenAxisX: sax, screenAxisY: say,
+            currentFactor: 1,
+          }
+        } else {
+          // Plane-axis scale is not currently surfaced in the UI (planes
+          // are move-only). Defensive fallback: refuse the drag.
+          return
         }
       } else if (pick.mode === 'rotate') {
         const hit = rayPlane(
@@ -1096,18 +1119,24 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           }
         }
       } else if (ds.mode === 'scale') {
-        // Screen-space ratio (Blender). factor = current_screen_dist /
-        // mousedown_screen_dist from the gizmo's projected pixel position.
-        // Dead-simple 2D: move the cursor twice as far from the gizmo as
-        // where you clicked → 2×. Move it half as far → 0.5×. Axis choice
-        // is purely cosmetic (the commit branch writes uniform scale).
-        const sp = worldToScreen(scene, canvas, origin)
-        if (!sp) return
-        const currentScreenDist = Math.max(1, Math.hypot(px - sp.x, py - sp.y))
-        let factor = currentScreenDist / ds.anchorScreenDist
+        // Signed cursor-delta projection onto the screen-space axis
+        // direction. K=400 means dragging 400 px in the axis direction = 2×;
+        // 400 px against the axis direction = 0.5×; perpendicular = no
+        // change. Reversing the drag actually shrinks (unlike the screen-
+        // distance ratio which was unsigned and bounced when crossing the
+        // gizmo). Click position no longer affects sensitivity.
+        const SCALE_DRAG_PIXELS = 400
+        const dpx = px - ds.anchorPx
+        const dpy = py - ds.anchorPy
+        const signed = dpx * ds.screenAxisX + dpy * ds.screenAxisY
+        let factor = Math.pow(2, signed / SCALE_DRAG_PIXELS)
         if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
-        if (factor < 0.01) factor = 0.01
-        if (factor > 100) factor = 100
+        // Tighter clamp [0.1, 10] than the prior [0.01, 100] — typical
+        // doodad use is well within that range and the looser clamp made
+        // accidental runaways recoverable but visible. Undo still covers
+        // anything legitimate.
+        if (factor < 0.1) factor = 0.1
+        if (factor > 10) factor = 10
         ds.currentFactor = factor
         for (const ent of ds.entities) {
           const newScale = ent.scaleOrig[0] * factor
@@ -1276,8 +1305,8 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
       } else if (ds.mode === 'scale') {
         let factor = ds.currentFactor
         if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
-        if (factor < 0.01) factor = 0.01
-        if (factor > 100) factor = 100
+        if (factor < 0.1) factor = 0.1
+        if (factor > 10) factor = 10
         const origin = ds.origin
         const axis = ds.axis
         const ents = ds.entities
