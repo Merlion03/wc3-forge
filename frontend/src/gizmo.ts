@@ -27,6 +27,7 @@ import {
   MoveUnit, MoveDoodad,
   RotateUnit, RotateDoodad,
   ScaleUnit, ScaleDoodad,
+  BeginUndoGroup, EndUndoGroup,
 } from '../wailsjs/go/main/App.js'
 import { flog } from './debuglog'
 
@@ -1144,18 +1145,30 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           dx = adx * delta; dy = ady * delta; dz = adz * delta
         }
         const ents = ds.entities
+        // Wrap the per-entity commit loop in an undo group so the whole drag
+        // (1 or N entities) collapses to a single Ctrl+Z. Single-entity drags
+        // benefit too — the group label reads cleaner ("Move doodad ×1" still
+        // beats untagged "Move doodad" in a list).
+        const label = ents.length > 1 ? `Move ${ents.length} entities` : ''
         ;(async () => {
-          for (const ent of ents) {
-            const nx = ent.posOrig[0] + dx
-            const ny = ent.posOrig[1] + dy
-            const nz = ent.posOrig[2] + dz
-            ;(ent.inst as any).setLocation([nx, ny, nz])
-            const gameZ = nz - ent.moveHeight
-            try {
-              if (ent.kind === 'unit') await MoveUnit(ent.cn, nx, ny, gameZ)
-              else                     await MoveDoodad(ent.cn, nx, ny, gameZ)
-            } catch (err) {
-              flog(`[gizmo] move commit ${ent.kind} cn=${ent.cn} failed:`, err instanceof Error ? err.message : String(err))
+          await BeginUndoGroup(label)
+          try {
+            for (const ent of ents) {
+              const nx = ent.posOrig[0] + dx
+              const ny = ent.posOrig[1] + dy
+              const nz = ent.posOrig[2] + dz
+              ;(ent.inst as any).setLocation([nx, ny, nz])
+              const gameZ = nz - ent.moveHeight
+              try {
+                if (ent.kind === 'unit') await MoveUnit(ent.cn, nx, ny, gameZ)
+                else                     await MoveDoodad(ent.cn, nx, ny, gameZ)
+              } catch (err) {
+                flog(`[gizmo] move commit ${ent.kind} cn=${ent.cn} failed:`, err instanceof Error ? err.message : String(err))
+              }
+            }
+          } finally {
+            try { await EndUndoGroup() } catch (err) {
+              flog(`[gizmo] EndUndoGroup failed:`, err instanceof Error ? err.message : String(err))
             }
           }
         })()
@@ -1171,28 +1184,36 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
         const cosD = Math.cos(delta), sinD = Math.sin(delta)
         const origin = ds.origin
         const ents = ds.entities
+        const rotLabel = ents.length > 1 ? `Rotate ${ents.length} entities` : ''
         ;(async () => {
-          for (const ent of ents) {
-            const newRot = ent.rotOrig + delta
-            // Orbit position around centroid (no-op for single-select).
-            const dx = ent.posOrig[0] - origin[0]
-            const dy = ent.posOrig[1] - origin[1]
-            const nx = dx * cosD - dy * sinD + origin[0]
-            const ny = dx * sinD + dy * cosD + origin[1]
-            const nz = ent.posOrig[2]
-            const positionChanged = (Math.abs(nx - ent.posOrig[0]) > 1e-3
-                                  || Math.abs(ny - ent.posOrig[1]) > 1e-3)
-            const gameZ = nz - ent.moveHeight
-            try {
-              if (ent.kind === 'unit') {
-                await RotateUnit(ent.cn, newRot)
-                if (positionChanged) await MoveUnit(ent.cn, nx, ny, gameZ)
-              } else {
-                await RotateDoodad(ent.cn, newRot)
-                if (positionChanged) await MoveDoodad(ent.cn, nx, ny, gameZ)
+          await BeginUndoGroup(rotLabel)
+          try {
+            for (const ent of ents) {
+              const newRot = ent.rotOrig + delta
+              // Orbit position around centroid (no-op for single-select).
+              const dx = ent.posOrig[0] - origin[0]
+              const dy = ent.posOrig[1] - origin[1]
+              const nx = dx * cosD - dy * sinD + origin[0]
+              const ny = dx * sinD + dy * cosD + origin[1]
+              const nz = ent.posOrig[2]
+              const positionChanged = (Math.abs(nx - ent.posOrig[0]) > 1e-3
+                                    || Math.abs(ny - ent.posOrig[1]) > 1e-3)
+              const gameZ = nz - ent.moveHeight
+              try {
+                if (ent.kind === 'unit') {
+                  await RotateUnit(ent.cn, newRot)
+                  if (positionChanged) await MoveUnit(ent.cn, nx, ny, gameZ)
+                } else {
+                  await RotateDoodad(ent.cn, newRot)
+                  if (positionChanged) await MoveDoodad(ent.cn, nx, ny, gameZ)
+                }
+              } catch (err) {
+                flog(`[gizmo] rotate commit ${ent.kind} cn=${ent.cn} failed:`, err instanceof Error ? err.message : String(err))
               }
-            } catch (err) {
-              flog(`[gizmo] rotate commit ${ent.kind} cn=${ent.cn} failed:`, err instanceof Error ? err.message : String(err))
+            }
+          } finally {
+            try { await EndUndoGroup() } catch (err) {
+              flog(`[gizmo] EndUndoGroup failed:`, err instanceof Error ? err.message : String(err))
             }
           }
         })()
@@ -1204,32 +1225,40 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
         const origin = ds.origin
         const axis = ds.axis
         const ents = ds.entities
+        const scaleLabel = ents.length > 1 ? `Scale ${ents.length} entities` : ''
         ;(async () => {
-          for (const ent of ents) {
-            const newS = ent.scaleOrig[0] * factor
-            const dx = ent.posOrig[0] - origin[0]
-            const dy = ent.posOrig[1] - origin[1]
-            const dz = ent.posOrig[2] - origin[2]
-            const nx = ent.posOrig[0] + (axis === 'x' ? dx * (factor - 1) : 0)
-            const ny = ent.posOrig[1] + (axis === 'y' ? dy * (factor - 1) : 0)
-            const nz = ent.posOrig[2] + (axis === 'z' ? dz * (factor - 1) : 0)
-            const positionChanged = (Math.abs(nx - ent.posOrig[0]) > 1e-3
-                                  || Math.abs(ny - ent.posOrig[1]) > 1e-3
-                                  || Math.abs(nz - ent.posOrig[2]) > 1e-3)
-            const gameZ = nz - ent.moveHeight
-            try {
-              // Visual is uniform via scale[0]; we write uniform on-disk too
-              // so the saved file matches what the user sees. Per-axis editing
-              // belongs in Properties, not the gizmo.
-              if (ent.kind === 'unit') {
-                await ScaleUnit(ent.cn, newS, newS, newS)
-                if (positionChanged) await MoveUnit(ent.cn, nx, ny, gameZ)
-              } else {
-                await ScaleDoodad(ent.cn, newS, newS, newS)
-                if (positionChanged) await MoveDoodad(ent.cn, nx, ny, gameZ)
+          await BeginUndoGroup(scaleLabel)
+          try {
+            for (const ent of ents) {
+              const newS = ent.scaleOrig[0] * factor
+              const dx = ent.posOrig[0] - origin[0]
+              const dy = ent.posOrig[1] - origin[1]
+              const dz = ent.posOrig[2] - origin[2]
+              const nx = ent.posOrig[0] + (axis === 'x' ? dx * (factor - 1) : 0)
+              const ny = ent.posOrig[1] + (axis === 'y' ? dy * (factor - 1) : 0)
+              const nz = ent.posOrig[2] + (axis === 'z' ? dz * (factor - 1) : 0)
+              const positionChanged = (Math.abs(nx - ent.posOrig[0]) > 1e-3
+                                    || Math.abs(ny - ent.posOrig[1]) > 1e-3
+                                    || Math.abs(nz - ent.posOrig[2]) > 1e-3)
+              const gameZ = nz - ent.moveHeight
+              try {
+                // Visual is uniform via scale[0]; we write uniform on-disk too
+                // so the saved file matches what the user sees. Per-axis editing
+                // belongs in Properties, not the gizmo.
+                if (ent.kind === 'unit') {
+                  await ScaleUnit(ent.cn, newS, newS, newS)
+                  if (positionChanged) await MoveUnit(ent.cn, nx, ny, gameZ)
+                } else {
+                  await ScaleDoodad(ent.cn, newS, newS, newS)
+                  if (positionChanged) await MoveDoodad(ent.cn, nx, ny, gameZ)
+                }
+              } catch (err) {
+                flog(`[gizmo] scale commit ${ent.kind} cn=${ent.cn} failed:`, err instanceof Error ? err.message : String(err))
               }
-            } catch (err) {
-              flog(`[gizmo] scale commit ${ent.kind} cn=${ent.cn} failed:`, err instanceof Error ? err.message : String(err))
+            }
+          } finally {
+            try { await EndUndoGroup() } catch (err) {
+              flog(`[gizmo] EndUndoGroup failed:`, err instanceof Error ? err.message : String(err))
             }
           }
         })()

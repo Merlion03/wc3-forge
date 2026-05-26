@@ -459,6 +459,22 @@ func ClearScaleRaw(e *Entity) {
 	e.scaleRaw = [3]float32{}
 }
 
+// ScaleRaw reads the unexported scaleRaw field. Used by undo/redo machinery
+// to snapshot the pre-mutation raw bytes so a later Revert can restore both
+// the public Scale field AND the on-disk byte preservation.
+func ScaleRaw(e *Entity) [3]float32 {
+	return e.scaleRaw
+}
+
+// SetScaleRaw writes the unexported scaleRaw field. Counterpart to ScaleRaw —
+// used by undo/redo Revert to restore byte-faithful round-tripping after the
+// public Scale has been rolled back. Zero values are valid (slocs originally
+// store raw=1.0 → public 0.0078125, real units raw=128.0 → public 1.0; undo
+// re-establishes whichever of those was in place pre-mutation).
+func SetScaleRaw(e *Entity, raw [3]float32) {
+	e.scaleRaw = raw
+}
+
 // isPrintableFourCC reports whether all 4 bytes are in the printable ASCII range
 // 0x20..0x7E. This is the same criterion HiveWE uses for its skin_id peek
 // heuristic (`std::all_of(..., c >= 0x20 && c <= 0x7E)`).

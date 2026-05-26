@@ -40,6 +40,11 @@ const (
 	// runtime. The JS receiver pans + sets distance via the existing
 	// startup-camera handler in App.svelte.
 	eventStartupCamera    = "wc3-forge:startup-camera"
+	// eventHistoryChanged fires after any undo/redo stack mutation (mutator
+	// recordCommand, BeginUndoGroup commit, Undo, Redo, ClearHistory). The
+	// UI uses this to refresh the Edit menu enable state + the History panel.
+	// Payload mirrors HistoryList (forge.HistoryState).
+	eventHistoryChanged   = "wc3-forge:history-changed"
 )
 
 // App is the Wails-bindable surface exposed to the frontend. Every method
@@ -137,6 +142,12 @@ func (a *App) startup(ctx context.Context) {
 	// camel-case-not (the tags are lowercase: kind/id/field/position).
 	forge.Current.OnEntityChanged(func(c forge.EntityChange) {
 		runtime.EventsEmit(a.ctx, eventEntityChanged, c)
+	})
+	// History-changed bus — forward snapshot of both stacks so the UI Edit
+	// menu can rebuild its enabled state + labels in one round-trip. Fired
+	// after every mutator, undo, redo, group-end, and ClearHistory call.
+	forge.Current.OnHistoryChanged(func() {
+		runtime.EventsEmit(a.ctx, eventHistoryChanged, forge.Current.HistoryList())
 	})
 	// Bridge-call observability — every MCP handler dispatch fires through
 	// here. Forwarded to the in-page Agent Console (BridgeConsole.svelte) so
@@ -1068,6 +1079,45 @@ func (a *App) ScaleUnit(creationNumber uint32, sx, sy, sz float32) error {
 // Parse), so the values passed here are written verbatim by Encode.
 func (a *App) ScaleDoodad(creationNumber uint32, sx, sy, sz float32) error {
 	return forge.Current.ScaleDoodad(creationNumber, sx, sy, sz)
+}
+
+// Undo reverts the most-recent mutation on the session's history stack.
+// No-op when the stack is empty. The reverted command is pushed onto the
+// redo stack so the user can re-apply it. Bound to Ctrl+Z in the UI.
+func (a *App) Undo() error {
+	return forge.Current.Undo()
+}
+
+// Redo re-applies the most-recently-undone mutation. No-op when the redo
+// stack is empty. Any new mutation (mouse drag, MCP call, Properties edit)
+// wipes the redo stack — standard editor behavior. Bound to Ctrl+Y in the UI.
+func (a *App) Redo() error {
+	return forge.Current.Redo()
+}
+
+// HistoryList returns the current undo/redo stacks (oldest-first) so the
+// Edit menu can show enabled state + tooltips ("Undo Move Footman" etc.).
+func (a *App) HistoryList() forge.HistoryState {
+	return forge.Current.HistoryList()
+}
+
+// CanUndo / CanRedo report whether the corresponding action is currently
+// available. For menu enable/disable state.
+func (a *App) CanUndo() bool { return forge.Current.CanUndo() }
+func (a *App) CanRedo() bool { return forge.Current.CanRedo() }
+
+// BeginUndoGroup starts a transaction. Subsequent mutations until
+// EndUndoGroup land in a single undo step. Used by the gizmo's drag-end
+// commit loop so a single drag = one Ctrl+Z. Nestable — the outermost
+// begin/end pair is the one that publishes to history.
+func (a *App) BeginUndoGroup(label string) {
+	forge.Current.BeginUndoGroup(label)
+}
+
+// EndUndoGroup closes the outermost group (or decrements nesting).
+// Returns an error if called without a matching BeginUndoGroup.
+func (a *App) EndUndoGroup() error {
+	return forge.Current.EndUndoGroup()
 }
 
 // IsDirty reports whether the session has unsaved edits. The header Save

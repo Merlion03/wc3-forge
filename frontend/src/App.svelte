@@ -9,6 +9,7 @@
     GetUnitTypeIndex, GetDoodadTypeIndex,
     MoveUnit, MoveDoodad, IsDirty, SaveMap,
     LaunchInWC3,
+    Undo, Redo, CanUndo, CanRedo, HistoryList,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
@@ -110,6 +111,15 @@
   let dirty: boolean = $state(false)
   let saving: boolean = $state(false)
   let launching: boolean = $state(false)
+
+  // Undo/redo state. Mirrors session.History — refreshed on
+  // wc3-forge:history-changed events. The Edit menu reads from these to set
+  // enabled state + tooltip labels ("Undo Move Footman"). Defaults to "off
+  // and empty" so the menu renders correctly before the first map opens.
+  let canUndo: boolean = $state(false)
+  let canRedo: boolean = $state(false)
+  let undoLabel: string = $state('')
+  let redoLabel: string = $state('')
 
   async function launchTestMap() {
     if (testMapDisabled) return
@@ -485,6 +495,10 @@
     const sel = await GetSelection()
     ingestSelection(sel)
     try { dirty = await IsDirty() } catch { dirty = false }
+    await refreshHistoryState()
+    EventsOn('wc3-forge:history-changed', () => {
+      void refreshHistoryState()
+    })
     window.addEventListener('keydown', onGlobalKeyDown)
     window.addEventListener('resize', onWindowResize)
     // Test-driver hook: receives commands from Go's App.EmitTestCommand so
@@ -635,6 +649,27 @@
       e.preventDefault()
       void doSave()
     }
+    // Undo: Ctrl+Z (no shift). Skip when an input/textarea has focus so the
+    // browser's text-undo keeps working. Same skip pattern the WASD-pan
+    // hotkeys use.
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'z' || e.key === 'Z')) {
+      const tgt = e.target as HTMLElement | null
+      const tagName = tgt?.tagName?.toLowerCase()
+      if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
+      e.preventDefault()
+      void doUndo()
+    }
+    // Redo: Ctrl+Y OR Ctrl+Shift+Z (both common; Y is Windows-canonical,
+    // Shift+Z is Blender/Adobe). Skip in inputs.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey
+        && ((e.key === 'y' || e.key === 'Y') && !e.shiftKey
+         || (e.key === 'z' || e.key === 'Z') && e.shiftKey)) {
+      const tgt = e.target as HTMLElement | null
+      const tagName = tgt?.tagName?.toLowerCase()
+      if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
+      e.preventDefault()
+      void doRedo()
+    }
     // Map Info Editor hotkey: Ctrl+Shift+I. Picked because Ctrl+I alone is
     // commonly bound (italic) and Shift differentiates without conflicting
     // with existing wc3-forge shortcuts (Ctrl+S Save).
@@ -683,6 +718,30 @@
   function setGizmoMode(m: 'move' | 'rotate' | 'scale') {
     gizmoMode = m
     scene?.setGizmoMode(m)
+  }
+
+  async function refreshHistoryState() {
+    try {
+      const [u, r, list] = await Promise.all([CanUndo(), CanRedo(), HistoryList()])
+      canUndo = u
+      canRedo = r
+      undoLabel = (list.undo && list.undo.length > 0) ? list.undo[list.undo.length - 1].label : ''
+      redoLabel = (list.redo && list.redo.length > 0) ? list.redo[list.redo.length - 1].label : ''
+      // Dirty may have been flipped by undo/redo too (the in-memory state
+      // changed; we mark dirty defensively in the Go-side Undo/Redo path).
+      // Refresh the local flag so the Save pill / OS title stay correct.
+      try { dirty = await IsDirty() } catch {}
+    } catch {
+      canUndo = false; canRedo = false; undoLabel = ''; redoLabel = ''
+    }
+  }
+  async function doUndo() {
+    if (!canUndo) return
+    try { await Undo() } catch (e) { showToast('error', `Undo failed: ${e instanceof Error ? e.message : String(e)}`) }
+  }
+  async function doRedo() {
+    if (!canRedo) return
+    try { await Redo() } catch (e) { showToast('error', `Redo failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
   function pushSnap() {
@@ -1286,6 +1345,23 @@
         >
           <span class="flex-1 {dirty ? 'text-amber-400' : ''}">Save{dirty ? ' •' : ''}</span>
           <DropdownMenu.Shortcut>Ctrl+S</DropdownMenu.Shortcut>
+        </DropdownMenu.Item>
+        <DropdownMenu.Separator />
+        <DropdownMenu.Item
+          onSelect={runMenuAction(doUndo)}
+          disabled={!canUndo}
+          title={undoLabel ? `Undo: ${undoLabel}` : 'Nothing to undo'}
+        >
+          <span class="flex-1">Undo{undoLabel ? ` — ${undoLabel}` : ''}</span>
+          <DropdownMenu.Shortcut>Ctrl+Z</DropdownMenu.Shortcut>
+        </DropdownMenu.Item>
+        <DropdownMenu.Item
+          onSelect={runMenuAction(doRedo)}
+          disabled={!canRedo}
+          title={redoLabel ? `Redo: ${redoLabel}` : 'Nothing to redo'}
+        >
+          <span class="flex-1">Redo{redoLabel ? ` — ${redoLabel}` : ''}</span>
+          <DropdownMenu.Shortcut>Ctrl+Y</DropdownMenu.Shortcut>
         </DropdownMenu.Item>
         <DropdownMenu.Separator />
         <DropdownMenu.Item
