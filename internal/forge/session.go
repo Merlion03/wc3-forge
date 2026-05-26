@@ -167,6 +167,17 @@ type Session struct {
 	// already handles. Keeps the bridge layer App-free (no Wails imports in
 	// forge.*) while still letting bridge handlers reach UI state.
 	uiCommandListeners []func(string)
+
+	// Undo/redo machinery (history.go). history stores applied commands
+	// oldest-first; redoStack holds commands that have been undone and are
+	// ready to be re-applied. groupDepth + pendingGroup support transactional
+	// commits (gizmo drag wraps N per-entity mutations into one undo step).
+	// historyListeners subscribe to stack-mutation events for UI repaints.
+	history          []Command
+	redoStack        []Command
+	groupDepth       int
+	pendingGroup     *groupCmd
+	historyListeners []func()
 }
 
 // EntityChange is the payload for OnEntityChanged. Kind/ID identify which
@@ -363,6 +374,15 @@ func (s *Session) Open(path string) error {
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
 	s.dirtyInfo = false
+	// Reset history — previous map's undo stack must not leak across opens
+	// (creation_numbers would dangle and Revert would error). Mutating the
+	// slices directly under the existing write-lock; ClearHistory's own lock
+	// would deadlock here.
+	hadHistory := len(s.history) > 0 || len(s.redoStack) > 0
+	s.history = nil
+	s.redoStack = nil
+	s.groupDepth = 0
+	s.pendingGroup = nil
 	s.mu.Unlock()
 	if prevSource != nil {
 		_ = prevSource.close()
@@ -371,6 +391,9 @@ func (s *Session) Open(path string) error {
 	s.notifyMapChanged(true)
 	if wasDirty {
 		s.notifyDirty(false)
+	}
+	if hadHistory {
+		s.notifyHistoryChanged()
 	}
 	return nil
 }
@@ -418,6 +441,11 @@ func (s *Session) Close() {
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
 	s.dirtyInfo = false
+	hadHistory := len(s.history) > 0 || len(s.redoStack) > 0
+	s.history = nil
+	s.redoStack = nil
+	s.groupDepth = 0
+	s.pendingGroup = nil
 	s.mu.Unlock()
 	if prevSource != nil {
 		_ = prevSource.close()
@@ -426,6 +454,9 @@ func (s *Session) Close() {
 	s.notifyMapChanged(false)
 	if wasDirty {
 		s.notifyDirty(false)
+	}
+	if hadHistory {
+		s.notifyHistoryChanged()
 	}
 }
 
@@ -656,9 +687,13 @@ func (s *Session) MoveUnit(creationNumber uint32, x, y, z float32) error {
 		s.mu.Unlock()
 		return nil
 	}
-	s.units.Entities[found].Position = [3]float32{x, y, z}
+	oldPos := cur
+	newPos := [3]float32{x, y, z}
 	wasDirty := s.dirtyUnits
+	s.units.Entities[found].Position = newPos
 	s.dirtyUnits = true
+	s.recordCommand(&moveUnitCmd{cn: creationNumber, oldPos: oldPos, newPos: newPos})
+	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
 	if !wasDirty {
 		s.notifyDirty(true)
@@ -672,8 +707,11 @@ func (s *Session) MoveUnit(creationNumber uint32, x, y, z float32) error {
 		Kind:     "unit",
 		ID:       creationNumber,
 		Field:    "position",
-		Position: [3]float32{x, y, z},
+		Position: newPos,
 	})
+	if historyChanged {
+		s.notifyHistoryChanged()
+	}
 	return nil
 }
 
@@ -716,12 +754,16 @@ func (s *Session) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 		s.mu.Unlock()
 		return nil
 	}
-	s.doodads.Doodads[found].Position = [3]float32{x, y, z}
+	oldPos := cur
+	newPos := [3]float32{x, y, z}
 	// 0→1 transition of the combined dirty flag (any per-file flag). If the
 	// session was already dirty for another reason (e.g. dirtyUnits), this
 	// edit doesn't re-fire the public dirty event.
 	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
+	s.doodads.Doodads[found].Position = newPos
 	s.dirtyDoodads = true
+	s.recordCommand(&moveDoodadCmd{cn: creationNumber, oldPos: oldPos, newPos: newPos})
+	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
 	if !wasDirty {
 		s.notifyDirty(true)
@@ -730,8 +772,11 @@ func (s *Session) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 		Kind:     "doodad",
 		ID:       creationNumber,
 		Field:    "position",
-		Position: [3]float32{x, y, z},
+		Position: newPos,
 	})
+	if historyChanged {
+		s.notifyHistoryChanged()
+	}
 	return nil
 }
 
@@ -762,10 +807,13 @@ func (s *Session) RotateUnit(creationNumber uint32, rotation float32) error {
 		s.mu.Unlock()
 		return nil
 	}
-	s.units.Entities[found].Rotation = rotation
+	oldRot := s.units.Entities[found].Rotation
 	wasDirty := s.dirtyUnits
+	s.units.Entities[found].Rotation = rotation
 	s.dirtyUnits = true
 	pos := s.units.Entities[found].Position
+	s.recordCommand(&rotateUnitCmd{cn: creationNumber, oldRot: oldRot, newRot: rotation})
+	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
 	if !wasDirty {
 		s.notifyDirty(true)
@@ -777,6 +825,9 @@ func (s *Session) RotateUnit(creationNumber uint32, rotation float32) error {
 		Position: pos,
 		Rotation: rotation,
 	})
+	if historyChanged {
+		s.notifyHistoryChanged()
+	}
 	return nil
 }
 
@@ -809,10 +860,13 @@ func (s *Session) RotateDoodad(creationNumber uint32, rotation float32) error {
 		s.mu.Unlock()
 		return nil
 	}
-	s.doodads.Doodads[found].Rotation = rotation
+	oldRot := s.doodads.Doodads[found].Rotation
 	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
+	s.doodads.Doodads[found].Rotation = rotation
 	s.dirtyDoodads = true
 	pos := s.doodads.Doodads[found].Position
+	s.recordCommand(&rotateDoodadCmd{cn: creationNumber, oldRot: oldRot, newRot: rotation})
+	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
 	if !wasDirty {
 		s.notifyDirty(true)
@@ -824,6 +878,9 @@ func (s *Session) RotateDoodad(creationNumber uint32, rotation float32) error {
 		Position: pos,
 		Rotation: rotation,
 	})
+	if historyChanged {
+		s.notifyHistoryChanged()
+	}
 	return nil
 }
 
@@ -860,24 +917,40 @@ func (s *Session) ScaleUnit(creationNumber uint32, sx, sy, sz float32) error {
 		s.mu.Unlock()
 		return nil
 	}
-	s.units.Entities[found].Scale = [3]float32{sx, sy, sz}
+	oldScale := cur
+	newScale := [3]float32{sx, sy, sz}
+	// Capture the pre-mutation scaleRaw so Revert can restore byte-faithful
+	// round-trip (slocs store raw=1.0, real units raw=128.0; the original
+	// bits matter for save-after-undo equality).
+	oldScaleRaw := unitsdoo.ScaleRaw(&s.units.Entities[found])
+	wasDirty := s.dirtyUnits
+	s.units.Entities[found].Scale = newScale
 	// Invalidate scaleRaw so Encode derives from the new Scale value.
 	// scaleRaw is unexported; we call the package-level helper to set it.
 	unitsdoo.ClearScaleRaw(&s.units.Entities[found])
-	wasDirty := s.dirtyUnits
 	s.dirtyUnits = true
 	pos := s.units.Entities[found].Position
+	s.recordCommand(&scaleUnitCmd{
+		cn:          creationNumber,
+		oldScale:    oldScale,
+		newScale:    newScale,
+		oldScaleRaw: oldScaleRaw,
+	})
+	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
 	if !wasDirty {
 		s.notifyDirty(true)
 	}
 	s.notifyEntityChanged(EntityChange{
-		Kind:  "unit",
-		ID:    creationNumber,
-		Field: "scale",
-		Scale: [3]float32{sx, sy, sz},
+		Kind:     "unit",
+		ID:       creationNumber,
+		Field:    "scale",
+		Scale:    newScale,
 		Position: pos,
 	})
+	if historyChanged {
+		s.notifyHistoryChanged()
+	}
 	return nil
 }
 
@@ -909,21 +982,28 @@ func (s *Session) ScaleDoodad(creationNumber uint32, sx, sy, sz float32) error {
 		s.mu.Unlock()
 		return nil
 	}
-	s.doodads.Doodads[found].Scale = [3]float32{sx, sy, sz}
+	oldScale := cur
+	newScale := [3]float32{sx, sy, sz}
 	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo
+	s.doodads.Doodads[found].Scale = newScale
 	s.dirtyDoodads = true
 	pos := s.doodads.Doodads[found].Position
+	s.recordCommand(&scaleDoodadCmd{cn: creationNumber, oldScale: oldScale, newScale: newScale})
+	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
 	if !wasDirty {
 		s.notifyDirty(true)
 	}
 	s.notifyEntityChanged(EntityChange{
-		Kind:  "doodad",
-		ID:    creationNumber,
-		Field: "scale",
-		Scale: [3]float32{sx, sy, sz},
+		Kind:     "doodad",
+		ID:       creationNumber,
+		Field:    "scale",
+		Scale:    newScale,
 		Position: pos,
 	})
+	if historyChanged {
+		s.notifyHistoryChanged()
+	}
 	return nil
 }
 

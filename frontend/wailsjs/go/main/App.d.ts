@@ -3,13 +3,22 @@
 import {main} from '../models';
 import {doodadsdoo} from '../models';
 import {unitsdoo} from '../models';
+import {forge} from '../models';
 import {w3i} from '../models';
+
+export function BeginUndoGroup(arg1:string):Promise<void>;
+
+export function CanRedo():Promise<boolean>;
+
+export function CanUndo():Promise<boolean>;
 
 export function ClearSelection():Promise<main.SelectionDTO>;
 
 export function CloseMap():Promise<main.MapStatus>;
 
 export function EmitTestCommand(arg1:string):Promise<void>;
+
+export function EndUndoGroup():Promise<void>;
 
 export function GetBridgeInfo():Promise<main.BridgeInfo>;
 
@@ -33,6 +42,8 @@ export function GetUnit(arg1:number):Promise<unitsdoo.Entity>;
 
 export function GetUnitTypeIndex():Promise<Record<string, main.UnitTypeInfo>>;
 
+export function HistoryList():Promise<forge.HistoryState>;
+
 export function IsDirty():Promise<boolean>;
 
 export function LaunchInWC3():Promise<void>;
@@ -55,6 +66,8 @@ export function OpenMap(arg1:string):Promise<main.MapStatus>;
 
 export function OpenMapDialog():Promise<string>;
 
+export function Redo():Promise<void>;
+
 export function RotateDoodad(arg1:number,arg2:number):Promise<void>;
 
 export function RotateUnit(arg1:number,arg2:number):Promise<void>;
@@ -74,3 +87,5 @@ export function SetSelection(arg1:Array<main.SelectionItemDTO>):Promise<main.Sel
 export function SetUnitAnimation(arg1:number,arg2:string):Promise<void>;
 
 export function Status():Promise<main.MapStatus>;
+
+export function Undo():Promise<void>;

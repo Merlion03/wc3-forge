@@ -77,6 +77,15 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("view.set_mode", handleViewSetMode)
 	reg("view.set_doodad_category_visible", handleViewSetDoodadCategoryVisible)
 	reg("camera.set_view", handleCameraSetView)
+	// Undo/redo + transactional grouping. AI clients can drive these the same
+	// way the UI does (Ctrl+Z is just a hotkey wrapper around history.undo);
+	// agents that batch multi-step edits should bracket them with
+	// history.begin_group / history.end_group so the user sees ONE undo step.
+	reg("history.undo", handleHistoryUndo)
+	reg("history.redo", handleHistoryRedo)
+	reg("history.list", handleHistoryList)
+	reg("history.begin_group", handleHistoryBeginGroup)
+	reg("history.end_group", handleHistoryEndGroup)
 	// _ui.send_command — escape hatch for test/verification drivers. Routes
 	// a raw test-command string through Session.EmitUICommand → App →
 	// wc3-forge:test-command Wails event → existing App.svelte dispatch.
@@ -781,4 +790,66 @@ func handleCameraSetView(params json.RawMessage) (any, error) {
 	}
 	Current.EmitUICommand("camera.set " + spec)
 	return map[string]any{"ok": true, "spec": spec}, nil
+}
+
+// handleHistoryUndo reverts the most recent mutation. Returns {ok, label}
+// where label is the human-readable description of what was undone (empty
+// when the history stack was already empty — the call is a no-op).
+func handleHistoryUndo(params json.RawMessage) (any, error) {
+	state := Current.HistoryList()
+	label := ""
+	if n := len(state.Undo); n > 0 {
+		label = state.Undo[n-1].Label
+	}
+	if err := Current.Undo(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "label": label}, nil
+}
+
+// handleHistoryRedo re-applies the most-recently-undone mutation.
+func handleHistoryRedo(params json.RawMessage) (any, error) {
+	state := Current.HistoryList()
+	label := ""
+	if n := len(state.Redo); n > 0 {
+		label = state.Redo[n-1].Label
+	}
+	if err := Current.Redo(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "label": label}, nil
+}
+
+// handleHistoryList returns the current undo/redo stacks (oldest-first).
+// Agents use this to surface the editor's history state without keeping
+// their own shadow copy.
+func handleHistoryList(params json.RawMessage) (any, error) {
+	return Current.HistoryList(), nil
+}
+
+// handleHistoryBeginGroup starts an undo transaction. All subsequent
+// mutations until the matching history.end_group land in one undo step.
+// Idempotent re-entry is supported (nested begins increment depth).
+type historyGroupParams struct {
+	Label string `json:"label"`
+}
+
+func handleHistoryBeginGroup(params json.RawMessage) (any, error) {
+	var p historyGroupParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+	}
+	Current.BeginUndoGroup(p.Label)
+	return map[string]any{"ok": true, "label": p.Label}, nil
+}
+
+// handleHistoryEndGroup closes the outermost undo group (or decrements
+// nesting). Returns an error if called without a matching begin.
+func handleHistoryEndGroup(params json.RawMessage) (any, error) {
+	if err := Current.EndUndoGroup(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
 }
