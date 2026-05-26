@@ -263,10 +263,31 @@ export interface SelectionItem {
 
 export interface UnitTypeInfo { move_height: number; model_scale?: number }
 
+/**
+ * Per-channel snap settings (design §3.2). Defaults are all OFF — freeform
+ * editing is the v1 default. Snap value units:
+ *   - move:   studs (game distance units; 128 studs = one terrain tile)
+ *   - rotate: degrees (converted to radians internally)
+ *   - scale:  multiplier (e.g. 0.1 rounds the factor to nearest 10%)
+ *
+ * Shift held during a drag INVERTS the channel's snap state for that drag
+ * only (Blender convention). So Shift-drag with snap OFF snaps; Shift-drag
+ * with snap ON is freeform. The invert is per-channel — switching modes
+ * mid-session keeps each channel's preferred default intact.
+ */
+export interface SnapSettings {
+  moveOn:   boolean; moveStep:   number   // studs
+  rotateOn: boolean; rotateStep: number   // degrees
+  scaleOn:  boolean; scaleStep:  number   // multiplier
+}
+
 export interface GizmoRenderer {
   /** Set the active mode. Cancels any in-progress drag. */
   setMode(mode: GizmoMode): void
   getMode(): GizmoMode
+  /** Update snap settings. Pass partial — undefined keys keep current values. */
+  setSnap(s: Partial<SnapSettings>): void
+  getSnap(): SnapSettings
 
   draw(
     gl: WebGLRenderingContext,
@@ -303,6 +324,7 @@ export interface GizmoRenderer {
     py: number,
     scene: any,
     canvas: HTMLCanvasElement,
+    shiftKey?: boolean,
   ): void
 
   onDragEnd(
@@ -310,6 +332,7 @@ export interface GizmoRenderer {
     py: number,
     scene: any,
     canvas: HTMLCanvasElement,
+    shiftKey?: boolean,
   ): void
 
   cancelDrag(): void
@@ -444,6 +467,12 @@ function wrapAngle(a: number): number {
   return a
 }
 
+/** Round to nearest multiple of `step`. Returns `v` unchanged when step<=0. */
+function snap(v: number, step: number): number {
+  if (!isFinite(step) || step <= 0) return v
+  return Math.round(v / step) * step
+}
+
 // ─── Main builder ──────────────────────────────────────────────────────────
 export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
   let prog: ReturnType<typeof buildProgram>
@@ -473,6 +502,14 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
   gl.bindBuffer(gl.ARRAY_BUFFER, null)
 
   let mode: GizmoMode = 'move'
+  // Per-channel snap settings. Defaults all OFF (freeform), per design §3.2
+  // user-preference note. Step sizes use the same units the user picks in
+  // the UI (move=studs, rotate=degrees, scale=multiplier).
+  const snapSettings: SnapSettings = {
+    moveOn: false,   moveStep: 32,    // 1/4 tile by default if enabled
+    rotateOn: false, rotateStep: 15,  // 15° by default if enabled
+    scaleOn: false,  scaleStep: 0.1,  // 10% steps by default if enabled
+  }
   let lastOrigin: [number, number, number] = [0, 0, 0]
   let lastHandleScale: number = 1
   let lastVisible: boolean = false
@@ -659,6 +696,16 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
 
     getMode(): GizmoMode { return mode },
 
+    setSnap(s: Partial<SnapSettings>) {
+      if (s.moveOn   !== undefined) snapSettings.moveOn   = s.moveOn
+      if (s.moveStep !== undefined && s.moveStep > 0) snapSettings.moveStep = s.moveStep
+      if (s.rotateOn !== undefined) snapSettings.rotateOn = s.rotateOn
+      if (s.rotateStep !== undefined && s.rotateStep > 0) snapSettings.rotateStep = s.rotateStep
+      if (s.scaleOn  !== undefined) snapSettings.scaleOn  = s.scaleOn
+      if (s.scaleStep !== undefined && s.scaleStep > 0) snapSettings.scaleStep = s.scaleStep
+    },
+    getSnap(): SnapSettings { return { ...snapSettings } },
+
     draw(
       _gl, viewer, scene, _canvas,
       selectionItems, unitInstances, doodadInstances,
@@ -812,7 +859,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
       }
     },
 
-    onDrag(px, py, scene, canvas) {
+    onDrag(px, py, scene, canvas, shiftKey) {
       if (!dragState) return
       const ray = screenRay(px, py, scene, canvas)
       if (!ray) return
@@ -820,6 +867,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
 
       const ds = dragState
       const origin = ds.origin
+      const shift = !!shiftKey
 
       if (ds.mode === 'move') {
         const [adx, ady, adz] = AXIS_DIRS[ds.axis]
@@ -828,7 +876,9 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           origin[0], origin[1], origin[2], adx, ady, adz,
         )
         if (!nearest) return
-        const delta = nearest.s - ds.anchorParam
+        let delta = nearest.s - ds.anchorParam
+        // Snap (XOR shift). When snap is ON: shift gives freeform; OFF: shift snaps.
+        if (snapSettings.moveOn !== shift) delta = snap(delta, snapSettings.moveStep)
         for (const ent of ds.entities) {
           const nx = ent.posOrig[0] + adx * delta
           const ny = ent.posOrig[1] + ady * delta
@@ -843,6 +893,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
         )
         if (!nearest) return
         let factor = nearest.s / ds.anchorSignedDist
+        if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
         if (factor < 0.01) factor = 0.01
         if (factor > 100) factor = 100
         ds.currentFactor = factor
@@ -851,6 +902,15 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           if (typeof (ent.inst as any).uniformScale === 'function') {
             ;(ent.inst as any).uniformScale(newScale * ent.modelScale)
           }
+          // Multi-select: entity distance to centroid scales along the dragged axis.
+          // For single-select (centroid == orig.pos) this is a no-op (delta=0).
+          const dx = ent.posOrig[0] - origin[0]
+          const dy = ent.posOrig[1] - origin[1]
+          const dz = ent.posOrig[2] - origin[2]
+          const nx = ent.posOrig[0] + (ds.axis === 'x' ? dx * (factor - 1) : 0)
+          const ny = ent.posOrig[1] + (ds.axis === 'y' ? dy * (factor - 1) : 0)
+          const nz = ent.posOrig[2] + (ds.axis === 'z' ? dz * (factor - 1) : 0)
+          ;(ent.inst as any).setLocation([nx, ny, nz])
         }
       } else if (ds.mode === 'rotate') {
         const hit = rayPlane(
@@ -860,21 +920,36 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
         )
         if (!hit) return
         const angle = Math.atan2(hit.hy - origin[1], hit.hx - origin[0])
-        const delta = wrapAngle(angle - ds.anchorAngle)
+        let delta = wrapAngle(angle - ds.anchorAngle)
+        // Snap in DEGREES — rotateStep is in degrees, convert to radians for math.
+        if (snapSettings.rotateOn !== shift) {
+          const step = (snapSettings.rotateStep * Math.PI) / 180
+          delta = snap(delta, step)
+        }
         ds.currentAngle = ds.anchorAngle + delta
+        const cosD = Math.cos(delta), sinD = Math.sin(delta)
         for (const ent of ds.entities) {
           const newRot = ent.rotOrig + delta
           const q = quatZ(newRot)
           if (typeof (ent.inst as any).setRotation === 'function') {
             ;(ent.inst as any).setRotation(q)
           }
+          // Multi-select: orbit entity around centroid in XY plane (Z unchanged
+          // since we only rotate around Z axis). Single-select reduces to
+          // entity.pos == origin → delta=0 → no position change.
+          const dx = ent.posOrig[0] - origin[0]
+          const dy = ent.posOrig[1] - origin[1]
+          const nx = dx * cosD - dy * sinD + origin[0]
+          const ny = dx * sinD + dy * cosD + origin[1]
+          ;(ent.inst as any).setLocation([nx, ny, ent.posOrig[2]])
         }
       }
     },
 
-    onDragEnd(px, py, scene, canvas) {
+    onDragEnd(px, py, scene, canvas, shiftKey) {
       if (!dragState) return
       const ds = dragState
+      const shift = !!shiftKey
 
       if (ds.mode === 'move') {
         let delta = 0
@@ -888,6 +963,7 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           )
           if (nearest) delta = nearest.s - ds.anchorParam
         }
+        if (snapSettings.moveOn !== shift) delta = snap(delta, snapSettings.moveStep)
         const [adx, ady, adz] = AXIS_DIRS[ds.axis]
         const ents = ds.entities
         ;(async () => {
@@ -906,31 +982,74 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           }
         })()
       } else if (ds.mode === 'rotate') {
-        const delta = ds.currentAngle - ds.anchorAngle
+        // Re-apply snap to the final delta so commit matches what the user
+        // saw at the moment of mouseup (the last onDrag may have been one
+        // mouse-tick stale; ds.currentAngle reflects that tick's snapped value).
+        let delta = ds.currentAngle - ds.anchorAngle
+        if (snapSettings.rotateOn !== shift) {
+          const step = (snapSettings.rotateStep * Math.PI) / 180
+          delta = snap(delta, step)
+        }
+        const cosD = Math.cos(delta), sinD = Math.sin(delta)
+        const origin = ds.origin
         const ents = ds.entities
         ;(async () => {
           for (const ent of ents) {
             const newRot = ent.rotOrig + delta
+            // Orbit position around centroid (no-op for single-select).
+            const dx = ent.posOrig[0] - origin[0]
+            const dy = ent.posOrig[1] - origin[1]
+            const nx = dx * cosD - dy * sinD + origin[0]
+            const ny = dx * sinD + dy * cosD + origin[1]
+            const nz = ent.posOrig[2]
+            const positionChanged = (Math.abs(nx - ent.posOrig[0]) > 1e-3
+                                  || Math.abs(ny - ent.posOrig[1]) > 1e-3)
+            const gameZ = nz - ent.moveHeight
             try {
-              if (ent.kind === 'unit') await RotateUnit(ent.cn, newRot)
-              else                     await RotateDoodad(ent.cn, newRot)
+              if (ent.kind === 'unit') {
+                await RotateUnit(ent.cn, newRot)
+                if (positionChanged) await MoveUnit(ent.cn, nx, ny, gameZ)
+              } else {
+                await RotateDoodad(ent.cn, newRot)
+                if (positionChanged) await MoveDoodad(ent.cn, nx, ny, gameZ)
+              }
             } catch (err) {
               flog(`[gizmo] rotate commit ${ent.kind} cn=${ent.cn} failed:`, err instanceof Error ? err.message : String(err))
             }
           }
         })()
       } else if (ds.mode === 'scale') {
-        const factor = ds.currentFactor
+        let factor = ds.currentFactor
+        if (snapSettings.scaleOn !== shift) factor = snap(factor, snapSettings.scaleStep)
+        if (factor < 0.01) factor = 0.01
+        if (factor > 100) factor = 100
+        const origin = ds.origin
+        const axis = ds.axis
         const ents = ds.entities
         ;(async () => {
           for (const ent of ents) {
             const newS = ent.scaleOrig[0] * factor
+            const dx = ent.posOrig[0] - origin[0]
+            const dy = ent.posOrig[1] - origin[1]
+            const dz = ent.posOrig[2] - origin[2]
+            const nx = ent.posOrig[0] + (axis === 'x' ? dx * (factor - 1) : 0)
+            const ny = ent.posOrig[1] + (axis === 'y' ? dy * (factor - 1) : 0)
+            const nz = ent.posOrig[2] + (axis === 'z' ? dz * (factor - 1) : 0)
+            const positionChanged = (Math.abs(nx - ent.posOrig[0]) > 1e-3
+                                  || Math.abs(ny - ent.posOrig[1]) > 1e-3
+                                  || Math.abs(nz - ent.posOrig[2]) > 1e-3)
+            const gameZ = nz - ent.moveHeight
             try {
               // Visual is uniform via scale[0]; we write uniform on-disk too
               // so the saved file matches what the user sees. Per-axis editing
               // belongs in Properties, not the gizmo.
-              if (ent.kind === 'unit') await ScaleUnit(ent.cn, newS, newS, newS)
-              else                     await ScaleDoodad(ent.cn, newS, newS, newS)
+              if (ent.kind === 'unit') {
+                await ScaleUnit(ent.cn, newS, newS, newS)
+                if (positionChanged) await MoveUnit(ent.cn, nx, ny, gameZ)
+              } else {
+                await ScaleDoodad(ent.cn, newS, newS, newS)
+                if (positionChanged) await MoveDoodad(ent.cn, nx, ny, gameZ)
+              }
             } catch (err) {
               flog(`[gizmo] scale commit ${ent.kind} cn=${ent.cn} failed:`, err instanceof Error ? err.message : String(err))
             }
