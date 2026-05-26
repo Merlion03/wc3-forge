@@ -593,52 +593,12 @@ export async function buildTerrain(
   //   slot 0..15   → c = slot % 4,        r = slot / 4
   //   slot 16..31  → c = (slot-16) % 4 + 4, r = (slot-16) / 4
   //
-  // V-MAPPING (corrected): the FBO blit y-flips the source (GL UV(0,0) is
-  // texture bottom-left, sampling source UV.v=0 returns source image row h-1
-  // = image BOTTOM in image-y-down convention). So in the atlas:
-  //
-  //   LOW atlas-v end of a palette row = source image BOTTOM (image row h-1).
-  //   HIGH atlas-v end                  = source image TOP    (image row 0).
-  //
-  // For sub-tile slot N at image (col=c, row=r) with r∈[0..3] (image-y-down,
-  // r=0 is image-top row), the slot's atlas-v range is the FLIPPED inverse:
-  //
-  //   slot atlas-v range = [baseV + (3-r)*subH, baseV + (4-r)*subH]
-  //
-  // i.e. slot r=0 (image top) sits at the HIGH atlas-v end of the palette row;
-  // slot r=3 (image bottom) sits at the LOW atlas-v end. The fragment shader's
-  // (1 - cellUV.y) flip means cellUV.y=1 (cell TOP) samples atlasUV.y = v0
-  // (LOW end of slot's atlas-v range). For that sample to land on image-row-0
-  // pixels (slot r=0 image content), v0 must be at the LOWER atlas-v end of
-  // the SLOT's range — which corresponds to the HIGH atlas-v end of the palette
-  // row when r=0. That's `baseV + (3-r)*subH`.
-  //
-  // ── BUG HISTORY ──────────────────────────────────────────────────────────
-  // Previously: `v0 = baseV + r * subH`, which inverted the sr direction. The
-  // picker thought slot r=0 was at LOW atlas-v (palette row bottom), so when
-  // sampling at cellUV.y=1 we ended up reading image rows belonging to slot
-  // r=3 INSTEAD of slot r=0. Concretely on Enfo's FFB at the spear-tip
-  // plateau-top cells (overlays with mask=5 or mask=10):
-  //   mask=5  (BR+TR right half coverage) → expected to sample slot 5 (image
-  //                                          row 1, "right-side alpha" mask)
-  //                                       → ACTUALLY sampled slot 9 (image
-  //                                          row 2, "BR+TL diagonal" mask)
-  //                                       → diagonal alpha = visible diamond
-  //   mask=10 (BL+TL left half coverage)  → expected slot 10 (image row 2,
-  //                                          "left-side alpha")
-  //                                       → ACTUALLY sampled slot 6 (image
-  //                                          row 1, "BL+TR diagonal")
-  //                                       → other diagonal = same diamond
-  // The two diagonals layered across many adjacent cells produced the
-  // characteristic pentagram/diamond X visible at plateau-edge cells.
-  //
-  // The fix is one line — flip sr to (3 - sr) in the v0 calc — but the
-  // diagnosis took multiple sessions because (a) parser-level verification
-  // tests passed (slot numbers were "correct"), (b) the bug is invisible on
-  // single-palette cells (uniform sort = no overlay sampled, base layer's
-  // chosen slot 0 or 15 happens to be symmetric/uniform in most Blizzard
-  // textures), and (c) at low zoom levels the diagonals blend into a uniform
-  // texture noise indistinguishable from natural ground variation.
+  // The v-mapping here matches the existing (pre-refactor) terrain.ts that the
+  // alpha-weighted-bilinear renderer used and confirmed visually correct: the
+  // FBO blit stores image-row-0 at the LOWER atlas-v end of each palette's
+  // strip (i.e. row r maps to atlas-v = baseV + r*subH, growing with r), and
+  // the fragment shader compensates with (1 - cellUV.y) * subSize.y so that
+  // cellUV.y=1 (cell TL) samples the image's TOP of the sub-tile.
   function subTileAtlasOrigin(p: number, slot: number): { u0: number; v0: number } {
     const half = slot >> 4              // 0 for slots 0..15, 1 for 16..31
     const k = slot & 0xF                // slot index within the half (0..15)
@@ -646,9 +606,7 @@ export async function buildTerrain(
     const sr = k >> 2
     const xPx = sc * 64
     const baseV = (atlasH - (p + 1) * 256) / atlasH
-    // (3 - sr) inverts the source-row direction so slot r=0 (image top) sits
-    // at the HIGH atlas-v end of the palette row, matching the FBO blit's y-flip.
-    const v0 = baseV + (3 - sr) * (64 / atlasH)
+    const v0 = baseV + sr * (64 / atlasH)
     return { u0: xPx / atlasW + insetU, v0: v0 + insetV }
   }
   // The shader's effective sub-tile sampling rect is `[u0, u0 + subWEff]` ×
