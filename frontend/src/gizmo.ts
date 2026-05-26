@@ -154,6 +154,40 @@ function buildCube(): Float32Array {
 
 const CUBE_VERTS = buildCube()
 
+// ─── Plane-handle geometry (Phase E) ───────────────────────────────────────
+// Small quads at the corner between two axes for 2-axis simultaneous move.
+// Each quad lies in the plane spanned by the two axes and is rendered with
+// the identity rotation matrix (pre-rotated geometry in local space). Click
+// fills the quad with a semi-transparent tinted patch; the user drags within
+// the plane and both axes translate together.
+const PLANE_LO = 0.18
+const PLANE_HI = 0.40
+
+function buildPlaneXY(): Float32Array {
+  // Quad in z=0 plane, between +X and +Y axes.
+  return new Float32Array([
+    PLANE_LO, PLANE_LO, 0,  PLANE_HI, PLANE_LO, 0,  PLANE_HI, PLANE_HI, 0,
+    PLANE_LO, PLANE_LO, 0,  PLANE_HI, PLANE_HI, 0,  PLANE_LO, PLANE_HI, 0,
+  ])
+}
+function buildPlaneXZ(): Float32Array {
+  // Quad in y=0 plane, between +X and +Z axes.
+  return new Float32Array([
+    PLANE_LO, 0, PLANE_LO,  PLANE_HI, 0, PLANE_LO,  PLANE_HI, 0, PLANE_HI,
+    PLANE_LO, 0, PLANE_LO,  PLANE_HI, 0, PLANE_HI,  PLANE_LO, 0, PLANE_HI,
+  ])
+}
+function buildPlaneYZ(): Float32Array {
+  // Quad in x=0 plane, between +Y and +Z axes.
+  return new Float32Array([
+    0, PLANE_LO, PLANE_LO,  0, PLANE_HI, PLANE_LO,  0, PLANE_HI, PLANE_HI,
+    0, PLANE_LO, PLANE_LO,  0, PLANE_HI, PLANE_HI,  0, PLANE_LO, PLANE_HI,
+  ])
+}
+const PLANE_XY_VERTS = buildPlaneXY()
+const PLANE_XZ_VERTS = buildPlaneXZ()
+const PLANE_YZ_VERTS = buildPlaneYZ()
+
 // ─── Shader ───────────────────────────────────────────────────────────────
 const VERT_SHADER = `
 attribute vec3 a_position;
@@ -195,25 +229,49 @@ const ROT_Z_R1 = new Float32Array([0, 1, 0])
 const ROT_Z_R2 = new Float32Array([0, 0, 1])
 
 // ─── Public types ──────────────────────────────────────────────────────────
-export type GizmoAxis = 'x' | 'y' | 'z'
+// Single-axis handles ('x', 'y', 'z') for all 3 modes.
+// Plane handles ('xy', 'xz', 'yz') for move mode only — 2-axis simultaneous
+// translation. Defined here so move-mode's GizmoPickResult.axis can carry
+// any of them.
+export type GizmoAxis = 'x' | 'y' | 'z' | 'xy' | 'xz' | 'yz'
 export type GizmoMode = 'move' | 'rotate' | 'scale'
+
+const PLANE_AXES: GizmoAxis[] = ['xy', 'xz', 'yz']
+function isPlaneAxis(a: GizmoAxis): a is 'xy' | 'xz' | 'yz' {
+  return a === 'xy' || a === 'xz' || a === 'yz'
+}
+const PLANE_NORMAL: Record<'xy' | 'xz' | 'yz', [number, number, number]> = {
+  xy: [0, 0, 1],  // plane normal for XY plane
+  xz: [0, 1, 0],
+  yz: [1, 0, 0],
+}
+// Plane fill colors — blend of the two axes' colors, less saturated so the
+// handle reads as "secondary." A slight transparency would be ideal but our
+// shader writes opaque colors only; the muted tint is the visual proxy.
+const PLANE_COLOR: Record<'xy' | 'xz' | 'yz', [number, number, number]> = {
+  xy: [0.85, 0.85, 0.30],  // red+green → yellow
+  xz: [0.85, 0.30, 0.85],  // red+blue → magenta
+  yz: [0.30, 0.85, 0.85],  // green+blue → cyan
+}
 
 export interface GizmoPickResult {
   axis: GizmoAxis
   mode: GizmoMode
 }
 
-const AXIS_ROT: Record<GizmoAxis, [Float32Array, Float32Array, Float32Array]> = {
+// Single-axis records (no plane entries — plane handles use their own
+// constants further up since the geometry is pre-rotated).
+const AXIS_ROT: Record<'x' | 'y' | 'z', [Float32Array, Float32Array, Float32Array]> = {
   x: [ROT_X_R0, ROT_X_R1, ROT_X_R2],
   y: [ROT_Y_R0, ROT_Y_R1, ROT_Y_R2],
   z: [ROT_Z_R0, ROT_Z_R1, ROT_Z_R2],
 }
 
-const AXIS_COLOR: Record<GizmoAxis, [number, number, number]> = {
+const AXIS_COLOR: Record<'x' | 'y' | 'z', [number, number, number]> = {
   x: X_COLOR, y: Y_COLOR, z: Z_COLOR,
 }
 
-const AXIS_DIRS: Record<GizmoAxis, [number,number,number]> = {
+const AXIS_DIRS: Record<'x' | 'y' | 'z', [number,number,number]> = {
   x: [1, 0, 0],
   y: [0, 1, 0],
   z: [0, 0, 1],
@@ -235,7 +293,10 @@ interface MoveDrag {
   axis: GizmoAxis
   origin: [number, number, number]
   entities: EntityOrig[]
+  // For single-axis ('x'|'y'|'z'): signed distance along the axis line at mousedown.
+  // For plane axes ('xy'|'xz'|'yz'): 3D world-space hit point on the plane at mousedown.
   anchorParam: number
+  anchorPoint: [number, number, number]
 }
 interface RotateDrag {
   mode: 'rotate'
@@ -499,7 +560,22 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
   gl.bindBuffer(gl.ARRAY_BUFFER, cubeVBO)
   gl.bufferData(gl.ARRAY_BUFFER, CUBE_VERTS, gl.STATIC_DRAW)
 
+  const planeXYVBO = gl.createBuffer()!
+  gl.bindBuffer(gl.ARRAY_BUFFER, planeXYVBO)
+  gl.bufferData(gl.ARRAY_BUFFER, PLANE_XY_VERTS, gl.STATIC_DRAW)
+
+  const planeXZVBO = gl.createBuffer()!
+  gl.bindBuffer(gl.ARRAY_BUFFER, planeXZVBO)
+  gl.bufferData(gl.ARRAY_BUFFER, PLANE_XZ_VERTS, gl.STATIC_DRAW)
+
+  const planeYZVBO = gl.createBuffer()!
+  gl.bindBuffer(gl.ARRAY_BUFFER, planeYZVBO)
+  gl.bufferData(gl.ARRAY_BUFFER, PLANE_YZ_VERTS, gl.STATIC_DRAW)
+
   gl.bindBuffer(gl.ARRAY_BUFFER, null)
+  const PLANE_VBO: Record<'xy' | 'xz' | 'yz', WebGLBuffer> = {
+    xy: planeXYVBO, xz: planeXZVBO, yz: planeYZVBO,
+  }
 
   let mode: GizmoMode = 'move'
   // Per-channel snap settings. Defaults all OFF (freeform), per design §3.2
@@ -591,12 +667,48 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
     bindVBO(ringVBO); gl.drawArrays(gl.TRIANGLES, 0, RING_VERTS.length / 3)
   }
 
+  function drawPlaneHandle(
+    viewProj: Float32Array,
+    origin: [number, number, number], scale: number,
+    plane: 'xy' | 'xz' | 'yz', hovered: boolean,
+  ) {
+    // Plane geometry is pre-rotated into world axes, so use identity rotation.
+    const [r0, r1, r2] = AXIS_ROT['z']
+    setAxisUniforms(origin, scale, r0, r1, r2, PLANE_COLOR[plane], hovered, viewProj)
+    bindVBO(PLANE_VBO[plane])
+    gl.drawArrays(gl.TRIANGLES, 0, 6)
+  }
+
   function pickMove(
     rox: number, roy: number, roz: number, rdx: number, rdy: number, rdz: number,
     origin: [number, number, number], scale: number,
   ): GizmoAxis | null {
     let bestT = Infinity
     let bestAxis: GizmoAxis | null = null
+    // Plane handles FIRST (they sit between the axis arrows and overlap them
+    // visually; testing planes first gives them ergonomic priority when a
+    // click lands in the overlap zone).
+    for (const plane of PLANE_AXES) {
+      const p = plane as 'xy' | 'xz' | 'yz'
+      const [nx, ny, nz] = PLANE_NORMAL[p]
+      const hit = rayPlane(
+        rox, roy, roz, rdx, rdy, rdz,
+        origin[0], origin[1], origin[2], nx, ny, nz,
+      )
+      if (!hit) continue
+      // Convert hit to local space relative to origin (no rotation since
+      // plane geometry is identity-rotated; verts are in world-axis frame).
+      const lx = hit.hx - origin[0], ly = hit.hy - origin[1], lz = hit.hz - origin[2]
+      // Check the two axes in the plane are both within [PLANE_LO, PLANE_HI]*scale.
+      const lo = PLANE_LO * scale, hi = PLANE_HI * scale
+      let inPlane = false
+      if (p === 'xy') inPlane = lx >= lo && lx <= hi && ly >= lo && ly <= hi
+      if (p === 'xz') inPlane = lx >= lo && lx <= hi && lz >= lo && lz <= hi
+      if (p === 'yz') inPlane = ly >= lo && ly <= hi && lz >= lo && lz <= hi
+      if (!inPlane) continue
+      if (hit.t > 0 && hit.t < bestT) { bestT = hit.t; bestAxis = plane }
+    }
+    // Then the single-axis arrows.
     for (const axis of ['x', 'y', 'z'] as GizmoAxis[]) {
       const [adx, ady, adz] = AXIS_DIRS[axis]
       const cylR = CYL_RADIUS * scale * PICK_RADIUS_INFLATE
@@ -747,6 +859,9 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
           drawMoveArrow(vp, origin, handleScale, 'x', activeAxis === 'x')
           drawMoveArrow(vp, origin, handleScale, 'y', activeAxis === 'y')
           drawMoveArrow(vp, origin, handleScale, 'z', activeAxis === 'z')
+          drawPlaneHandle(vp, origin, handleScale, 'xy', activeAxis === 'xy')
+          drawPlaneHandle(vp, origin, handleScale, 'xz', activeAxis === 'xz')
+          drawPlaneHandle(vp, origin, handleScale, 'yz', activeAxis === 'yz')
         } else if (mode === 'scale') {
           drawScaleHandle(vp, origin, handleScale, 'x', activeAxis === 'x')
           drawScaleHandle(vp, origin, handleScale, 'y', activeAxis === 'y')
@@ -822,15 +937,31 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
       if (entities.length === 0) return
 
       if (pick.mode === 'move') {
-        const [adx, ady, adz] = AXIS_DIRS[pick.axis]
-        const nearest = rayLineNearest(
-          rox, roy, roz, rdx, rdy, rdz,
-          origin[0], origin[1], origin[2], adx, ady, adz,
-        )
-        if (!nearest) return
-        dragState = {
-          mode: 'move', axis: pick.axis, origin, entities,
-          anchorParam: nearest.s,
+        if (isPlaneAxis(pick.axis)) {
+          // Plane move: project ray onto plane → 3D anchor point.
+          const [nx, ny, nz] = PLANE_NORMAL[pick.axis]
+          const hit = rayPlane(
+            rox, roy, roz, rdx, rdy, rdz,
+            origin[0], origin[1], origin[2], nx, ny, nz,
+          )
+          if (!hit) return
+          dragState = {
+            mode: 'move', axis: pick.axis, origin, entities,
+            anchorParam: 0,
+            anchorPoint: [hit.hx, hit.hy, hit.hz],
+          }
+        } else {
+          const [adx, ady, adz] = AXIS_DIRS[pick.axis]
+          const nearest = rayLineNearest(
+            rox, roy, roz, rdx, rdy, rdz,
+            origin[0], origin[1], origin[2], adx, ady, adz,
+          )
+          if (!nearest) return
+          dragState = {
+            mode: 'move', axis: pick.axis, origin, entities,
+            anchorParam: nearest.s,
+            anchorPoint: [0, 0, 0],
+          }
         }
       } else if (pick.mode === 'scale') {
         const [adx, ady, adz] = AXIS_DIRS[pick.axis]
@@ -870,20 +1001,44 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
       const shift = !!shiftKey
 
       if (ds.mode === 'move') {
-        const [adx, ady, adz] = AXIS_DIRS[ds.axis]
-        const nearest = rayLineNearest(
-          rox, roy, roz, rdx, rdy, rdz,
-          origin[0], origin[1], origin[2], adx, ady, adz,
-        )
-        if (!nearest) return
-        let delta = nearest.s - ds.anchorParam
-        // Snap (XOR shift). When snap is ON: shift gives freeform; OFF: shift snaps.
-        if (snapSettings.moveOn !== shift) delta = snap(delta, snapSettings.moveStep)
-        for (const ent of ds.entities) {
-          const nx = ent.posOrig[0] + adx * delta
-          const ny = ent.posOrig[1] + ady * delta
-          const nz = ent.posOrig[2] + adz * delta
-          ;(ent.inst as any).setLocation([nx, ny, nz])
+        if (isPlaneAxis(ds.axis)) {
+          // Plane move: project cursor onto same plane, delta = current - anchor.
+          const [nx0, ny0, nz0] = PLANE_NORMAL[ds.axis]
+          const hit = rayPlane(
+            rox, roy, roz, rdx, rdy, rdz,
+            origin[0], origin[1], origin[2], nx0, ny0, nz0,
+          )
+          if (!hit) return
+          let dx = hit.hx - ds.anchorPoint[0]
+          let dy = hit.hy - ds.anchorPoint[1]
+          let dz = hit.hz - ds.anchorPoint[2]
+          if (snapSettings.moveOn !== shift) {
+            dx = snap(dx, snapSettings.moveStep)
+            dy = snap(dy, snapSettings.moveStep)
+            dz = snap(dz, snapSettings.moveStep)
+          }
+          for (const ent of ds.entities) {
+            ;(ent.inst as any).setLocation([
+              ent.posOrig[0] + dx,
+              ent.posOrig[1] + dy,
+              ent.posOrig[2] + dz,
+            ])
+          }
+        } else {
+          const [adx, ady, adz] = AXIS_DIRS[ds.axis]
+          const nearest = rayLineNearest(
+            rox, roy, roz, rdx, rdy, rdz,
+            origin[0], origin[1], origin[2], adx, ady, adz,
+          )
+          if (!nearest) return
+          let delta = nearest.s - ds.anchorParam
+          if (snapSettings.moveOn !== shift) delta = snap(delta, snapSettings.moveStep)
+          for (const ent of ds.entities) {
+            const nx = ent.posOrig[0] + adx * delta
+            const ny = ent.posOrig[1] + ady * delta
+            const nz = ent.posOrig[2] + adz * delta
+            ;(ent.inst as any).setLocation([nx, ny, nz])
+          }
         }
       } else if (ds.mode === 'scale') {
         const [adx, ady, adz] = AXIS_DIRS[ds.axis]
@@ -952,25 +1107,48 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
       const shift = !!shiftKey
 
       if (ds.mode === 'move') {
-        let delta = 0
+        let dx = 0, dy = 0, dz = 0
         const ray = screenRay(px, py, scene, canvas)
-        if (ray) {
-          const [rox, roy, roz, rdx, rdy, rdz] = ray
+        if (isPlaneAxis(ds.axis)) {
+          if (ray) {
+            const [rox, roy, roz, rdx, rdy, rdz] = ray
+            const [nx0, ny0, nz0] = PLANE_NORMAL[ds.axis]
+            const hit = rayPlane(
+              rox, roy, roz, rdx, rdy, rdz,
+              ds.origin[0], ds.origin[1], ds.origin[2], nx0, ny0, nz0,
+            )
+            if (hit) {
+              dx = hit.hx - ds.anchorPoint[0]
+              dy = hit.hy - ds.anchorPoint[1]
+              dz = hit.hz - ds.anchorPoint[2]
+            }
+          }
+          if (snapSettings.moveOn !== shift) {
+            dx = snap(dx, snapSettings.moveStep)
+            dy = snap(dy, snapSettings.moveStep)
+            dz = snap(dz, snapSettings.moveStep)
+          }
+        } else {
+          let delta = 0
+          if (ray) {
+            const [rox, roy, roz, rdx, rdy, rdz] = ray
+            const [adx, ady, adz] = AXIS_DIRS[ds.axis]
+            const nearest = rayLineNearest(
+              rox, roy, roz, rdx, rdy, rdz,
+              ds.origin[0], ds.origin[1], ds.origin[2], adx, ady, adz,
+            )
+            if (nearest) delta = nearest.s - ds.anchorParam
+          }
+          if (snapSettings.moveOn !== shift) delta = snap(delta, snapSettings.moveStep)
           const [adx, ady, adz] = AXIS_DIRS[ds.axis]
-          const nearest = rayLineNearest(
-            rox, roy, roz, rdx, rdy, rdz,
-            ds.origin[0], ds.origin[1], ds.origin[2], adx, ady, adz,
-          )
-          if (nearest) delta = nearest.s - ds.anchorParam
+          dx = adx * delta; dy = ady * delta; dz = adz * delta
         }
-        if (snapSettings.moveOn !== shift) delta = snap(delta, snapSettings.moveStep)
-        const [adx, ady, adz] = AXIS_DIRS[ds.axis]
         const ents = ds.entities
         ;(async () => {
           for (const ent of ents) {
-            const nx = ent.posOrig[0] + adx * delta
-            const ny = ent.posOrig[1] + ady * delta
-            const nz = ent.posOrig[2] + adz * delta
+            const nx = ent.posOrig[0] + dx
+            const ny = ent.posOrig[1] + dy
+            const nz = ent.posOrig[2] + dz
             ;(ent.inst as any).setLocation([nx, ny, nz])
             const gameZ = nz - ent.moveHeight
             try {
@@ -1077,6 +1255,9 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
       gl.deleteBuffer(coneVBO)
       gl.deleteBuffer(ringVBO)
       gl.deleteBuffer(cubeVBO)
+      gl.deleteBuffer(planeXYVBO)
+      gl.deleteBuffer(planeXZVBO)
+      gl.deleteBuffer(planeYZVBO)
       gl.deleteProgram(prog.program)
       dragState = null
     },

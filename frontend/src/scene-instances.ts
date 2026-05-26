@@ -1510,6 +1510,17 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   }
 
   function onCanvasMouseDown(e: MouseEvent) {
+    // Right-click cancels an in-progress gizmo drag (industry standard:
+    // Maya/Blender/Unity all use RMB to abort a transform). Restore each
+    // entity to its pre-drag transform and swallow the click so it doesn't
+    // also pop the WebView context menu.
+    if (e.button === 2 && gizmoDragging && gizmo?.isDragging()) {
+      e.preventDefault()
+      gizmo.cancelDrag()
+      gizmoDragging = false
+      downAt = null
+      return
+    }
     if (e.button !== 0) return
     const r = canvas.getBoundingClientRect()
     const px = e.clientX - r.left
@@ -1799,6 +1810,13 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   }
 
   canvas.addEventListener('mousedown', onCanvasMouseDown)
+  // Suppress the default WebView context menu when the user right-clicks to
+  // cancel a gizmo drag. Otherwise both the cancel-drag and the menu fire,
+  // and the menu lingers until dismissed.
+  function onCanvasContextMenu(e: MouseEvent) {
+    if (gizmoDragging && gizmo?.isDragging()) e.preventDefault()
+  }
+  canvas.addEventListener('contextmenu', onCanvasContextMenu)
   // Listen on document for move/up so the rubber-band gesture survives the
   // cursor leaving the canvas. Mirrors the camera controller's window-level
   // mouseup listener for the same reason.
@@ -2218,6 +2236,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       cancelAnimationFrame(rafId)
       ro.disconnect()
       canvas.removeEventListener('mousedown', onCanvasMouseDown)
+      canvas.removeEventListener('contextmenu', onCanvasContextMenu)
       canvas.removeEventListener('mousemove', onCanvasHoverMove)
       canvas.removeEventListener('mouseleave', onCanvasHoverLeave)
       document.removeEventListener('mousemove', onDocMouseMove)
