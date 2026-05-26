@@ -475,6 +475,12 @@ export interface SceneAPI {
   /** Move the camera pivot to (x, y) in world XY. Z defaults to 0 (ground plane). */
   panTo(x: number, y: number, z?: number): void
   /**
+   * Camera handle. Lets the on-screen orbit gizmo read current yaw/pitch
+   * and drive `setOrbit`/`resetOrbit` without poking the `window.__camera`
+   * dev hook (which only exists for verification scripts).
+   */
+  getCamera(): RTSCamera
+  /**
    * Re-position an already-placed unit instance to (x, y, z) in game-space
    * coordinates (the same coords stored in war3map.doo / GetUnit's Position).
    * Applies the type's move_height Z offset internally to match what placeUnit
@@ -2461,6 +2467,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     isReforged() { return currentReforged },
     panTo(x: number, y: number, z: number = 0) {
       camera.setPivot(x, y, z)
+    },
+    getCamera() {
+      return camera
     },
     updateUnitPosition(cn: number, x: number, y: number, z: number) {
       // Delegates to the shared impl so direct callers and the
