@@ -217,6 +217,49 @@ func (c *scaleDoodadCmd) Affected(s *Session) []EntityChange {
 	return []EntityChange{{Kind: "doodad", ID: c.cn, Field: "scale", Scale: sc}}
 }
 
+// swapTilesetCmd captures both directions of a tileset swap in full. The
+// per-tile arrays are required because the SwapTileset remap is lossy
+// (multiple old palette slots can collapse onto a single new slot, so
+// inverting the from_to table wouldn't restore the original GroundTexture
+// values). Storing full snapshots costs ~2 bytes × map vertex count per
+// undo step — even a 480×480 map is under 500 KB, which is fine for an
+// editor where each tileset swap is a deliberate user action.
+type swapTilesetCmd struct {
+	oldLetter byte
+	oldGround []string
+	oldCliff  []string
+	oldTileG  []uint8
+	oldTileC  []uint8
+	newLetter byte
+	newGround []string
+	newCliff  []string
+	newTileG  []uint8
+	newTileC  []uint8
+}
+
+func (c *swapTilesetCmd) Label() string { return "Swap tileset" }
+func (c *swapTilesetCmd) Apply(s *Session) error {
+	if s.terrain == nil || s.info == nil {
+		return fmt.Errorf("no map loaded")
+	}
+	applyTilesetSnapshot(s, c.newLetter, c.newGround, c.newCliff, c.newTileG, c.newTileC)
+	s.dirtyTerrain = true
+	s.dirtyInfo = true
+	return nil
+}
+func (c *swapTilesetCmd) Revert(s *Session) error {
+	if s.terrain == nil || s.info == nil {
+		return fmt.Errorf("no map loaded")
+	}
+	applyTilesetSnapshot(s, c.oldLetter, c.oldGround, c.oldCliff, c.oldTileG, c.oldTileC)
+	s.dirtyTerrain = true
+	s.dirtyInfo = true
+	return nil
+}
+func (c *swapTilesetCmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "terrain", ID: 0, Field: "tileset"}}
+}
+
 // ---------------------------------------------------------------------------
 // Low-level entity accessors. All called with s.mu held. They handle the
 // dirty-flag flip for the affected file. Public ScaleUnit / RotateUnit / etc.

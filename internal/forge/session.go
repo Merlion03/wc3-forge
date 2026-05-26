@@ -141,6 +141,7 @@ type Session struct {
 	dirtyUnits     bool
 	dirtyDoodads   bool
 	dirtyInfo      bool
+	dirtyTerrain   bool
 	dirtyGameplay  bool
 	dirtyListeners []func(bool)
 
@@ -464,10 +465,11 @@ func (s *Session) Close() {
 	s.strings = nil
 	s.gameplay = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyGameplay
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
 	s.dirtyInfo = false
+	s.dirtyTerrain = false
 	s.dirtyGameplay = false
 	hadHistory := len(s.history) > 0 || len(s.redoStack) > 0
 	s.history = nil
@@ -1085,6 +1087,152 @@ func (s *Session) MutateInfo(fn func(*w3i.Info)) error {
 	return nil
 }
 
+// SwapTilesetRequest re-tiles the loaded map. NewLetter is the single-byte
+// tileset code written into both war3map.w3i and war3map.w3e (HiveWE keeps
+// these in sync; Blizzard's editor refuses to load maps where they disagree).
+// NewGroundTilesets / NewCliffTilesets are the new palette FourCCs in the
+// order callers want them stored on disk. GroundFromTo / CliffFromTo are
+// per-tilepoint remap tables — index by the OLD palette slot, value is the
+// NEW palette slot to assign. Lengths must match the OLD palette lengths.
+//
+// Per the HiveWE tile-setter dialog, callers are expected to have already
+// resolved every old tile to a concrete new tile (no "auto-pick" magic at
+// this layer — that's policy that belongs in the UI).
+type SwapTilesetRequest struct {
+	NewLetter         byte     // tileset code letter ('L', 'A', …)
+	NewGroundTilesets []string // length 1..maxGround (16 for v11, 64 for v12+)
+	NewCliffTilesets  []string // length 0..16
+	GroundFromTo      []int    // len == len(old ground palette); value is index into NewGroundTilesets
+	CliffFromTo       []int    // len == len(old cliff palette);  value is index into NewCliffTilesets
+}
+
+// SwapTileset retiles the loaded map: replaces the ground/cliff palettes,
+// remaps every tilepoint's GroundTexture / CliffTexture via the from→to
+// tables, and updates the tileset letter in both .w3e and .w3i. Sets the
+// terrain + info dirty flags so Save will persist both files.
+//
+// Mirrors HiveWE's Terrain::change_tileset (src/base/terrain.ixx) but stays
+// at the file-format level — the UI owns palette-choice policy (what new
+// tileset, which old tiles to carry over, what to substitute when a tile
+// isn't carried over) and hands SwapTileset a fully-resolved remap.
+//
+// Errors out of band, before mutating anything, so a failed call leaves the
+// in-memory map unchanged.
+func (s *Session) SwapTileset(req SwapTilesetRequest) error {
+	s.mu.Lock()
+	if s.terrain == nil || s.info == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("SwapTileset: no map loaded")
+	}
+	terrain := s.terrain
+	maxGround := 16
+	if terrain.Version >= 12 {
+		maxGround = 64
+	}
+	oldGround := len(terrain.GroundTilesets)
+	oldCliff := len(terrain.CliffTilesets)
+	if len(req.NewGroundTilesets) == 0 || len(req.NewGroundTilesets) > maxGround {
+		s.mu.Unlock()
+		return fmt.Errorf("SwapTileset: ground palette size %d out of range [1, %d]", len(req.NewGroundTilesets), maxGround)
+	}
+	if len(req.NewCliffTilesets) > 16 {
+		s.mu.Unlock()
+		return fmt.Errorf("SwapTileset: cliff palette size %d exceeds cap 16", len(req.NewCliffTilesets))
+	}
+	for i, id := range req.NewGroundTilesets {
+		if len(id) != 4 {
+			s.mu.Unlock()
+			return fmt.Errorf("SwapTileset: NewGroundTilesets[%d] = %q, want 4-char FourCC", i, id)
+		}
+	}
+	for i, id := range req.NewCliffTilesets {
+		if len(id) != 4 {
+			s.mu.Unlock()
+			return fmt.Errorf("SwapTileset: NewCliffTilesets[%d] = %q, want 4-char FourCC", i, id)
+		}
+	}
+	if len(req.GroundFromTo) != oldGround {
+		s.mu.Unlock()
+		return fmt.Errorf("SwapTileset: GroundFromTo len %d, want %d (old palette size)", len(req.GroundFromTo), oldGround)
+	}
+	for oldIdx, newIdx := range req.GroundFromTo {
+		if newIdx < 0 || newIdx >= len(req.NewGroundTilesets) {
+			s.mu.Unlock()
+			return fmt.Errorf("SwapTileset: GroundFromTo[%d] = %d, out of range [0, %d)", oldIdx, newIdx, len(req.NewGroundTilesets))
+		}
+	}
+	if len(req.CliffFromTo) != oldCliff {
+		s.mu.Unlock()
+		return fmt.Errorf("SwapTileset: CliffFromTo len %d, want %d (old palette size)", len(req.CliffFromTo), oldCliff)
+	}
+	if oldCliff > 0 && len(req.NewCliffTilesets) == 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("SwapTileset: cannot remove cliff palette while map references cliffs")
+	}
+	for oldIdx, newIdx := range req.CliffFromTo {
+		if newIdx < 0 || newIdx >= len(req.NewCliffTilesets) {
+			s.mu.Unlock()
+			return fmt.Errorf("SwapTileset: CliffFromTo[%d] = %d, out of range [0, %d)", oldIdx, newIdx, len(req.NewCliffTilesets))
+		}
+	}
+
+	// All validation passed — snapshot the BEFORE state for undo, build the
+	// new per-tile arrays, then apply via the same helper Apply/Revert call.
+	// We snapshot both directions in full because the remap can be lossy
+	// (multiple old slots → one new slot), so inverting the from_to table
+	// wouldn't restore the original GroundTexture/CliffTexture values.
+	oldStateGround := make([]uint8, len(terrain.Tiles))
+	oldStateCliff := make([]uint8, len(terrain.Tiles))
+	newStateGround := make([]uint8, len(terrain.Tiles))
+	newStateCliff := make([]uint8, len(terrain.Tiles))
+	for i := range terrain.Tiles {
+		tp := terrain.Tiles[i]
+		oldStateGround[i] = tp.GroundTexture
+		oldStateCliff[i] = tp.CliffTexture
+		newG := tp.GroundTexture
+		if int(newG) < len(req.GroundFromTo) {
+			newG = uint8(req.GroundFromTo[newG])
+		}
+		newStateGround[i] = newG
+		// CliffTexture is 4 bits (0..15). The value 15 is the WC3 "no cliff"
+		// sentinel that often appears even on non-cliff vertices, so we only
+		// remap indices that point inside the OLD palette and leave higher
+		// values untouched. New palette will still validate on Encode.
+		newC := tp.CliffTexture
+		if int(newC) < len(req.CliffFromTo) {
+			newC = uint8(req.CliffFromTo[newC])
+		}
+		newStateCliff[i] = newC
+	}
+
+	cmd := &swapTilesetCmd{
+		oldLetter: terrain.Tileset,
+		oldGround: append([]string(nil), terrain.GroundTilesets...),
+		oldCliff:  append([]string(nil), terrain.CliffTilesets...),
+		oldTileG:  oldStateGround,
+		oldTileC:  oldStateCliff,
+		newLetter: req.NewLetter,
+		newGround: append([]string(nil), req.NewGroundTilesets...),
+		newCliff:  append([]string(nil), req.NewCliffTilesets...),
+		newTileG:  newStateGround,
+		newTileC:  newStateCliff,
+	}
+
+	applyTilesetSnapshot(s, cmd.newLetter, cmd.newGround, cmd.newCliff, cmd.newTileG, cmd.newTileC)
+
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay
+	s.dirtyTerrain = true
+	s.dirtyInfo = true
+	s.recordCommand(cmd)
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	s.notifyEntityChanged(EntityChange{Kind: "terrain", ID: 0, Field: "tileset"})
+	s.notifyHistoryChanged()
+	return nil
+}
+
 // Gameplay returns the parsed war3mapMisc.txt (per-map gameplay constants),
 // or nil if no map is loaded. The returned pointer is shared — callers must
 // not mutate; use MutateGameplay for changes so dirty-tracking fires.
@@ -1115,18 +1263,29 @@ func (s *Session) MutateGameplay(fn func(*miscdata.File)) error {
 		s.gameplay = &miscdata.File{}
 	}
 	fn(s.gameplay)
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyGameplay
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay
 	s.dirtyGameplay = true
 	s.mu.Unlock()
 	if !wasDirty {
 		s.notifyDirty(true)
 	}
-	s.notifyEntityChanged(EntityChange{
-		Kind:  "gameplay",
-		ID:    0,
-		Field: "gameplay",
-	})
+	s.notifyEntityChanged(EntityChange{Kind: "gameplay", ID: 0, Field: "gameplay"})
 	return nil
+}
+
+// applyTilesetSnapshot is the shared mutation helper used by SwapTileset's
+// initial apply path and by swapTilesetCmd.Apply/Revert for undo/redo.
+// Caller MUST hold s.mu. No notifications / dirty flips happen here —
+// caller is responsible for those, post-unlock.
+func applyTilesetSnapshot(s *Session, letter byte, ground, cliff []string, tileG, tileC []uint8) {
+	s.terrain.Tileset = letter
+	s.terrain.GroundTilesets = append([]string(nil), ground...)
+	s.terrain.CliffTilesets = append([]string(nil), cliff...)
+	for i := range s.terrain.Tiles {
+		s.terrain.Tiles[i].GroundTexture = tileG[i]
+		s.terrain.Tiles[i].CliffTexture = tileC[i]
+	}
+	s.info.Tileset = letter
 }
 
 // IsDirty reports whether the session holds unsaved edits to any in-memory
@@ -1136,7 +1295,7 @@ func (s *Session) MutateGameplay(fn func(*miscdata.File)) error {
 func (s *Session) IsDirty() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyGameplay
+	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay
 }
 
 // Save flushes every dirty in-memory file back through the source's write
@@ -1155,7 +1314,7 @@ func (s *Session) Save() error {
 		s.mu.Unlock()
 		return fmt.Errorf("no map loaded")
 	}
-	if !s.dirtyUnits && !s.dirtyDoodads && !s.dirtyInfo && !s.dirtyGameplay {
+	if !s.dirtyUnits && !s.dirtyDoodads && !s.dirtyInfo && !s.dirtyTerrain && !s.dirtyGameplay {
 		s.mu.Unlock()
 		return nil // nothing to do
 	}
@@ -1163,10 +1322,12 @@ func (s *Session) Save() error {
 	units := s.units
 	doodads := s.doodads
 	info := s.info
+	terrain := s.terrain
 	gameplay := s.gameplay
 	saveUnits := s.dirtyUnits
 	saveDoodads := s.dirtyDoodads
 	saveInfo := s.dirtyInfo
+	saveTerrain := s.dirtyTerrain
 	saveGameplay := s.dirtyGameplay
 	s.mu.Unlock()
 
@@ -1215,6 +1376,18 @@ func (s *Session) Save() error {
 		}
 		s.mu.Lock()
 		s.dirtyInfo = false
+		s.mu.Unlock()
+	}
+	if saveTerrain {
+		data, err := w3e.Encode(terrain)
+		if err != nil {
+			return fmt.Errorf("encode war3map.w3e: %w", err)
+		}
+		if err := src.write("war3map.w3e", data); err != nil {
+			return fmt.Errorf("write war3map.w3e: %w", err)
+		}
+		s.mu.Lock()
+		s.dirtyTerrain = false
 		s.mu.Unlock()
 	}
 	if saveGameplay {

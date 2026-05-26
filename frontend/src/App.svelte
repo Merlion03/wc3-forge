@@ -23,6 +23,7 @@
   import ViewMenu from './ViewMenu.svelte'
   import AssetPreview from './AssetPreview.svelte'
   import MapInfoEditor from './MapInfoEditor.svelte'
+  import SwapTilesetDialog from './SwapTilesetDialog.svelte'
   import GameplayConstantsEditor from './GameplayConstantsEditor.svelte'
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
@@ -183,6 +184,19 @@
   }
   function closeMapInfoEditor() {
     showMapInfoEditor = false
+  }
+
+  // ----- Swap Tileset modal -----
+  // Same mount-on-demand pattern as Map Info Editor. The terrain refresh on
+  // Apply (and on Undo/Redo) is driven uniformly by the kind=='terrain'
+  // entity-changed event handler — no need for a per-dialog callback.
+  let showSwapTileset: boolean = $state(false)
+  function openSwapTileset() {
+    if (!status.loaded) return
+    showSwapTileset = true
+  }
+  function closeSwapTileset() {
+    showSwapTileset = false
   }
 
   // ----- Gameplay Constants Editor modal -----
@@ -475,6 +489,15 @@
     })
     EventsOn(ENTITY_EVENT, async (payload: { kind: string; id: number; field: string; position: number[] }) => {
       if (!payload) return
+      if (payload.kind === 'terrain') {
+        // Tileset swap (initial Apply, Undo, or Redo) — palette + per-tile
+        // texture indices have changed. Rebuild the terrain renderer's atlas
+        // + minimap so the viewport reflects the new state. Keep camera so
+        // the undo doesn't yank the user's viewpoint.
+        mapLoadGen += 1
+        await reloadMap({ keepCamera: true })
+        return
+      }
       if (payload.kind === 'unit') {
         if (!primaryEntity || primaryEntity.CreationNumber !== payload.id) return
         try { primaryEntity = await GetUnit(payload.id) } catch { /* ignore */ }
@@ -1416,6 +1439,13 @@
           <DropdownMenu.Shortcut>Ctrl+Shift+I</DropdownMenu.Shortcut>
         </DropdownMenu.Item>
         <DropdownMenu.Item
+          onSelect={runMenuAction(openSwapTileset)}
+          disabled={!status.loaded}
+          title="Swap the map's tileset, remapping each tile to a slot in the new palette."
+        >
+          <span class="flex-1">Swap Tileset…</span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Item
           onSelect={runMenuAction(openGameplayConstantsEditor)}
           disabled={!status.loaded}
           title="Edit per-map gameplay constants (war3mapMisc.txt)."
@@ -1940,6 +1970,13 @@
 
   {#if showMapInfoEditor}
     <MapInfoEditor bind:open={showMapInfoEditor} onClose={closeMapInfoEditor} />
+  {/if}
+
+  {#if showSwapTileset}
+    <SwapTilesetDialog
+      bind:open={showSwapTileset}
+      onClose={closeSwapTileset}
+    />
   {/if}
 
   {#if showGameplayConstantsEditor}
