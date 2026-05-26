@@ -22,6 +22,10 @@ export function EndUndoGroup():Promise<void>;
 
 export function ForceQuit():Promise<void>;
 
+export function GameplayConstantsApply(arg1:Array<main.GameplayConstantRow>):Promise<void>;
+
+export function GameplayConstantsGet():Promise<Array<main.GameplayConstantRow>>;
+
 export function GetBridgeInfo():Promise<main.BridgeInfo>;
 
 export function GetDoodad(arg1:number):Promise<doodadsdoo.Doodad>;
