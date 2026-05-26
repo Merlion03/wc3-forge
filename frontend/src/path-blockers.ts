@@ -89,18 +89,19 @@ export interface PathBlockerRenderer {
 // z-fight terrain on a tilted camera. Same rationale as cell-highlight.ts.
 const Z_LIFT = 2
 
-// Vertical extent of the box in studs. Picked at 128 studs (= one terrain
-// tile edge) so the silhouette reads at the same scale as the cell grid the
-// user sees in the editor's grid overlay. Half-extent (64) is what the AABB
+// Vertical extent of the box in studs. Set to 64 so the box reads as a cube
+// matching the default XY footprint (half-extent 32 → 64-stud width). User
+// feedback: a 128-stud box reads as ~2× too tall vs the footprint and looks
+// like a column rather than a marker block. Half-extent (32) is what the AABB
 // picker uses for its Z half.
-const BOX_HEIGHT = 128
+const BOX_HEIGHT = 64
 const BOX_HALF_Z = BOX_HEIGHT * 0.5
 
 // Checker pattern scale: each square in the checker is CHECKER_STUDS wide in
-// world space. 32 studs makes the pattern read clearly without becoming
-// noisy — at a default footprint of 64×64, a single blocker shows a 2×2
-// checker on top and 4×2 stripes on each side which is unmistakable.
-const CHECKER_STUDS = 32
+// world space. 16 studs gives a 4×4 = 16-cell checker on each face of the
+// default 64-stud cube — denser than the previous 2×2 grid, more legible as
+// a "hazard" texture at every editor zoom.
+const CHECKER_STUDS = 16
 
 // Unit cube from (-1,-1,0) to (+1,+1,+1) in local space. The vertex shader
 // scales X/Y by per-marker half-extents (`u_half`) and Z by box height
@@ -205,7 +206,7 @@ void main() {
   }
   vec2 cell = floor(uv / ${CHECKER_STUDS.toFixed(1)});
   float odd = mod(cell.x + cell.y, 2.0);
-  vec3 pink = vec3(1.00, 0.10, 0.85);
+  vec3 pink = vec3(0.55, 0.20, 0.70);
   vec3 dark = vec3(0.02, 0.02, 0.02);
   vec3 col = mix(dark, pink, odd);
   // Half-Lambert lighting: hard-coded sun coming from +X +Y +Z, biased so
@@ -320,17 +321,24 @@ export function buildPathBlockerRenderer(gl: WebGLRenderingContext): PathBlocker
       gl.uniformMatrix4fv(prog.uViewProj, false, viewProj)
       gl.uniform1f(prog.uHeight, BOX_HEIGHT)
       // Alpha-blended marker: depth-test ON so terrain / cliffs / models can
-      // occlude / be occluded correctly; depth-write OFF so multiple
-      // overlapping blockers + downstream passes (water, slocs, highlight)
-      // don't pollute the depth buffer with our translucent boxes. Same
-      // pattern slocs and cell-highlight use.
+      // occlude / be occluded correctly. Depth-write ON so blockers occlude
+      // EACH OTHER — without this, a blocker behind another reads through
+      // the front one (you "see" the far blocker's silhouette inside the
+      // near one's, which looks like x-ray vision rather than two solid
+      // markers in space). The end-of-pass `depthMask(true)` restore below
+      // is now a no-op but kept for symmetry with the other state restores.
       gl.enable(gl.DEPTH_TEST)
       gl.depthFunc(gl.LEQUAL)
-      gl.depthMask(false)
-      // No back-face culling — alpha-blended faces need both sides visible
-      // when the camera sees the inside of the box (rare but possible at
-      // extreme zoom-in). Sidesteps any winding-order surprises too.
-      gl.disable(gl.CULL_FACE)
+      gl.depthMask(true)
+      // Back-face culling ON. The box is convex, so only the 3 camera-facing
+      // faces ever rasterize — that's enough to silhouette the marker without
+      // the user seeing the opposite-side back faces blending through the
+      // front (which read as "this is hollow / wireframe-y" rather than "this
+      // is a translucent solid"). Alpha blend with the scene behind the box
+      // is unchanged.
+      gl.enable(gl.CULL_FACE)
+      gl.cullFace(gl.BACK)
+      gl.frontFace(gl.CCW)
       gl.enable(gl.BLEND)
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
 
