@@ -82,6 +82,22 @@
   // mode-switch UI. Defaults match the scene's own default.
   let gizmoMode: 'move' | 'rotate' | 'scale' = $state('move')
 
+  // Gizmo snap settings (Phase D). All channels default OFF (freeform);
+  // step values match the gizmo's own defaults so a fresh "Enable" reads
+  // sensibly without the user picking a value first. Step units:
+  //   moveStep  = studs (128 = one terrain tile)
+  //   rotateStep = degrees
+  //   scaleStep  = multiplier (e.g. 0.1 = 10% increments)
+  // Shift held during drag inverts each channel's enabled state for that
+  // drag only (Blender convention).
+  let snapMoveOn = $state(false), snapMoveStep = $state(32)
+  let snapRotateOn = $state(false), snapRotateStep = $state(15)
+  let snapScaleOn = $state(false), snapScaleStep = $state(0.1)
+  // Preset step values per channel (design §3.2 recommendations).
+  const MOVE_STEPS = [1, 5, 32, 64, 128]
+  const ROTATE_STEPS = [1, 5, 15, 45, 90]
+  const SCALE_STEPS = [0.05, 0.1, 0.25, 0.5]
+
   // Doodad-category visibility — owned here, mirrored to scene via
   // scene.setDoodadCategoryVisible. Categories absent from the map are
   // omitted from the View menu. Visibility is RENDERING-ONLY (never persists
@@ -551,6 +567,28 @@
           if (m === 'move' || m === 'rotate' || m === 'scale') setGizmoMode(m)
           break
         }
+        case 'gizmo.snap': {
+          // Args: <channel> <on|off> [step]
+          //   channel: 'move' | 'rotate' | 'scale'
+          //   on/off:  'on' or 'off' (or 'toggle')
+          //   step:    optional numeric step
+          const ch = args[0] as 'move' | 'rotate' | 'scale'
+          const state = args[1]
+          const step = args[2] ? parseFloat(args[2]) : NaN
+          if (ch !== 'move' && ch !== 'rotate' && ch !== 'scale') break
+          const wantOn = state === 'on' ? true
+                       : state === 'off' ? false
+                       : state === 'toggle'
+                         ? !(ch === 'move' ? snapMoveOn : ch === 'rotate' ? snapRotateOn : snapScaleOn)
+                         : null
+          if (wantOn === null) break
+          if (ch === 'move') snapMoveOn = wantOn
+          if (ch === 'rotate') snapRotateOn = wantOn
+          if (ch === 'scale') snapScaleOn = wantOn
+          if (isFinite(step) && step > 0) setSnapStep(ch, step)
+          pushSnap()
+          break
+        }
         case 'minimap.click': {
           // Args: u v (normalized image-pixel coords, 0..1 each).
           // Synthesizes the click handler since WebView2 drops real synthetic
@@ -645,6 +683,27 @@
   function setGizmoMode(m: 'move' | 'rotate' | 'scale') {
     gizmoMode = m
     scene?.setGizmoMode(m)
+  }
+
+  function pushSnap() {
+    scene?.setGizmoSnap({
+      moveOn: snapMoveOn, moveStep: snapMoveStep,
+      rotateOn: snapRotateOn, rotateStep: snapRotateStep,
+      scaleOn: snapScaleOn, scaleStep: snapScaleStep,
+    })
+  }
+  function toggleSnap(ch: 'move' | 'rotate' | 'scale') {
+    if (ch === 'move') snapMoveOn = !snapMoveOn
+    if (ch === 'rotate') snapRotateOn = !snapRotateOn
+    if (ch === 'scale') snapScaleOn = !snapScaleOn
+    pushSnap()
+  }
+  function setSnapStep(ch: 'move' | 'rotate' | 'scale', step: number) {
+    if (!isFinite(step) || step <= 0) return
+    if (ch === 'move') snapMoveStep = step
+    if (ch === 'rotate') snapRotateStep = step
+    if (ch === 'scale') snapScaleStep = step
+    pushSnap()
   }
 
   async function doSave() {
@@ -1296,6 +1355,51 @@
           title="Scale (R) — drag a cube to scale uniformly"
         >Scale</Button>
       </div>
+      <!-- Snap settings (Phase D). DropdownMenu popover with 3 channels.
+           Each channel row: clickable toggle + step-value preset row. Hold
+           Shift during a drag to invert the active channel's snap state. -->
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger>
+          {#snippet child({ props })}
+            <Button {...props} variant="secondary" size="sm"
+                    class={(snapMoveOn || snapRotateOn || snapScaleOn) ? 'border border-amber-500/60' : ''}
+                    title="Snap settings — Shift during drag inverts each channel">
+              Snap{(snapMoveOn || snapRotateOn || snapScaleOn) ? ' •' : ''}
+              <ChevronDownIcon class="text-muted-foreground" />
+            </Button>
+          {/snippet}
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Content class="min-w-[260px] p-2" align="end">
+          <div class="px-2 pb-1 text-xs font-semibold text-muted-foreground">Snap</div>
+          {#each [
+            { ch: 'move' as const,   label: 'Move',   on: snapMoveOn,   step: snapMoveStep,   steps: MOVE_STEPS,   suffix: '' },
+            { ch: 'rotate' as const, label: 'Rotate', on: snapRotateOn, step: snapRotateStep, steps: ROTATE_STEPS, suffix: '°' },
+            { ch: 'scale' as const,  label: 'Scale',  on: snapScaleOn,  step: snapScaleStep,  steps: SCALE_STEPS,  suffix: '×' },
+          ] as row (row.ch)}
+            <div class="flex items-center gap-2 px-2 py-1">
+              <button type="button"
+                      class="flex-1 text-left text-sm {row.on ? 'text-amber-400 font-medium' : 'text-foreground'}"
+                      onclick={() => toggleSnap(row.ch)}
+                      title="Toggle {row.label} snap">
+                {row.on ? '✓' : '○'} {row.label}
+              </button>
+              <div class="flex gap-0.5" class:opacity-40={!row.on}>
+                {#each row.steps as s}
+                  <button type="button"
+                          class="rounded px-1.5 py-0.5 text-xs {s === row.step ? 'bg-amber-500/30 text-amber-100' : 'hover:bg-muted'}"
+                          onclick={() => setSnapStep(row.ch, s)}
+                          title="{row.label} step = {s}{row.suffix}">
+                    {s}{row.suffix}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/each}
+          <div class="border-t border-border mt-1 pt-1.5 px-2 text-[10px] text-muted-foreground">
+            Hold <kbd class="px-1 bg-muted rounded">Shift</kbd> during a drag to invert.
+          </div>
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
       <span class="mx-1 inline-block h-5 w-px bg-border" aria-hidden="true"></span>
       <Button
         size="sm"

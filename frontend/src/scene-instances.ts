@@ -574,6 +574,23 @@ export interface SceneAPI {
   setGizmoMode(mode: 'move' | 'rotate' | 'scale'): void
   /** Current gizmo mode — for UI display. */
   getGizmoMode(): 'move' | 'rotate' | 'scale'
+  /**
+   * Update gizmo snap settings (Phase D). Partial — undefined keys leave
+   * current values intact. Step units: move=studs, rotate=degrees, scale=
+   * multiplier. Shift held during drag inverts the channel's snap state
+   * for that drag only (Blender convention).
+   */
+  setGizmoSnap(s: {
+    moveOn?: boolean; moveStep?: number
+    rotateOn?: boolean; rotateStep?: number
+    scaleOn?: boolean; scaleStep?: number
+  }): void
+  /** Read current snap settings — for UI display. */
+  getGizmoSnap(): {
+    moveOn: boolean; moveStep: number
+    rotateOn: boolean; rotateStep: number
+    scaleOn: boolean; scaleStep: number
+  }
 }
 
 export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false): SceneAPI {
@@ -1600,7 +1617,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // ── Gizmo drag path ─────────────────────────────────────────────────
     if (gizmoDragging && gizmo?.isDragging()) {
       const r = canvas.getBoundingClientRect()
-      gizmo.onDrag(e.clientX - r.left, e.clientY - r.top, scene, canvas)
+      gizmo.onDrag(e.clientX - r.left, e.clientY - r.top, scene, canvas, e.shiftKey)
       return
     }
 
@@ -1653,7 +1670,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       gizmoDragging = false
       if (gizmo?.isDragging()) {
         const r = canvas.getBoundingClientRect()
-        gizmo.onDragEnd(e.clientX - r.left, e.clientY - r.top, scene, canvas)
+        gizmo.onDragEnd(e.clientX - r.left, e.clientY - r.top, scene, canvas, e.shiftKey)
       }
       return
     }
@@ -2273,6 +2290,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     },
     getGizmoMode(): 'move' | 'rotate' | 'scale' {
       return gizmo?.getMode() ?? 'move'
+    },
+    setGizmoSnap(s) {
+      gizmo?.setSnap(s)
+    },
+    getGizmoSnap() {
+      return gizmo?.getSnap() ?? {
+        moveOn: false, moveStep: 32,
+        rotateOn: false, rotateStep: 15,
+        scaleOn: false, scaleStep: 0.1,
+      }
     },
     setReforgedMode(b: boolean) {
       if (b === currentReforged) return
