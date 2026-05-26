@@ -976,12 +976,23 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
   }
 
   function restoreEntity(ent: EntityOrig) {
-    ;(ent.inst as any).setLocation([ent.posOrig[0], ent.posOrig[1], ent.posOrig[2]])
-    if (typeof (ent.inst as any).setRotation === 'function') {
-      ;(ent.inst as any).setRotation(quatZ(ent.rotOrig))
+    const inst = ent.inst as any
+    inst.setLocation([ent.posOrig[0], ent.posOrig[1], ent.posOrig[2]])
+    if (typeof inst.setRotation === 'function') {
+      inst.setRotation(quatZ(ent.rotOrig))
     }
-    if (typeof (ent.inst as any).uniformScale === 'function') {
-      ;(ent.inst as any).uniformScale(ent.scaleOrig[0] * ent.modelScale)
+    // Per-axis restore so a cancel after a Roblox-style per-axis scale
+    // drag truly reverts to original (uniformScale here would clobber Y/Z
+    // back to scaleOrig[0]).
+    const ms = ent.modelScale
+    if (typeof inst.setScale === 'function') {
+      inst.setScale([
+        ent.scaleOrig[0] * ms,
+        ent.scaleOrig[1] * ms,
+        ent.scaleOrig[2] * ms,
+      ])
+    } else if (typeof inst.uniformScale === 'function') {
+      inst.uniformScale(ent.scaleOrig[0] * ms)
     }
   }
 

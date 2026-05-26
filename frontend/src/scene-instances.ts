@@ -998,7 +998,15 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const inst = model.addInstance()
     inst.move([unit.position[0], unit.position[1], unit.position[2] + info.move_height])
     inst.rotateLocal(quatZ(unit.rotation))
-    inst.uniformScale(unit.scale[0] * (info.model_scale || 1))
+    // Use setScale per-axis so the on-disk per-axis values (the gizmo's
+    // Roblox-style face handles can write non-uniform) round-trip through
+    // reload. Falls back to uniformScale when the lib lacks setScale.
+    const ms = info.model_scale || 1
+    if (typeof inst.setScale === 'function') {
+      inst.setScale([unit.scale[0] * ms, unit.scale[1] * ms, unit.scale[2] * ms])
+    } else {
+      inst.uniformScale(unit.scale[0] * ms)
+    }
     inst.setTeamColor(unit.player)
     // Stash the unit's type_id on the instance so later position-update calls
     // (SceneAPI.updateUnitPosition) can resolve the type's move_height without
@@ -1010,6 +1018,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // by the entity-changed event subscriber when rotation/scale mutate.
     ;(inst as any).__wc3ForgeRotation = unit.rotation
     ;(inst as any).__wc3ForgeScale = [unit.scale[0], unit.scale[1], unit.scale[2]]
+    // ModelScale baked-in multiplier — entity-changed scale handler reads
+    // this to reconstruct the rendered value from the disk-stored unit
+    // scale (the lib's worldScale = unit.scale × info.model_scale).
+    ;(inst as any).__wc3ForgeModelScale = ms
     if (info.red || info.green || info.blue) {
       inst.setVertexColor([info.red / 255, info.green / 255, info.blue / 255, 1])
     }
@@ -1106,7 +1118,19 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       rot = quatMul(rot, quatX(-mr))
     }
     inst.rotateLocal(rot)
-    inst.uniformScale((d.scale[0] || 1) * (info.model_scale || 1))
+    // Per-axis scale via setScale (so Roblox-style gizmo per-axis values
+    // round-trip through reload); fall back to uniform if the lib lacks it.
+    {
+      const ms = info.model_scale || 1
+      const sx = (d.scale[0] || 1) * ms
+      const sy = (d.scale[1] || 1) * ms
+      const sz = (d.scale[2] || 1) * ms
+      if (typeof inst.setScale === 'function') {
+        inst.setScale([sx, sy, sz])
+      } else {
+        inst.uniformScale(sx)
+      }
+    }
     // Stash placement rotation (yaw only, before pitch/roll composition) +
     // raw scale + model_scale on the inst so the gizmo can snapshot orig
     // values for its rotate/scale drag without needing a Go round-trip.
@@ -1943,11 +1967,19 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     inst.__wc3ForgeRotation = rot
   }
   function applyScale(inst: any, s: number[]) {
-    // Visual is uniform via scale[0]; the stash captures all three for
-    // future per-axis surfaces and so the gizmo's orig snapshot reads
-    // what was actually committed.
+    // Per-axis scale via setScale so the Roblox-style gizmo's per-axis
+    // commits actually render correctly. Previously called uniformScale
+    // (which only uses s[0]); for an X-only drag that wrote (2,1,1) to
+    // disk but the uniformScale(2) ALSO grew Y and Z; for a Y-only drag
+    // that wrote (1,2,1) but the uniformScale(1) snapped everything back
+    // to 1× — the "size changes on mouseup" bug.
+    //
+    // Stash captures all three components so the gizmo's orig snapshot
+    // reads what was actually committed.
     const modelScale = inst.__wc3ForgeModelScale ?? 1
-    if (typeof inst.uniformScale === 'function') {
+    if (typeof inst.setScale === 'function') {
+      inst.setScale([s[0] * modelScale, s[1] * modelScale, s[2] * modelScale])
+    } else if (typeof inst.uniformScale === 'function') {
       inst.uniformScale(s[0] * modelScale)
     }
     inst.__wc3ForgeScale = [s[0], s[1], s[2]]
