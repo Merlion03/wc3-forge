@@ -5,9 +5,8 @@
 // Every request must carry params._token matching the lockfile token.
 //
 // The wire contract is preserved verbatim from the HiveWE C++ fork's
-// src/mcp_bridge/ so existing clients (the HiveWE Node MCP server) work
-// against wc3-forge unchanged when pointed at our lockdir via the
-// HIVEWE_MCP_LOCK_DIR override.
+// src/mcp_bridge/, so MCP clients written against that bridge work against
+// wc3-forge unchanged. See CREDITS.md for the upstream attribution.
 package bridge
 
 import (

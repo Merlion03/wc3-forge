@@ -97,8 +97,12 @@ wails build
 
 ## MCP wire contract
 
-JSON-RPC 2.0 over TCP, NDJSON-framed on 127.0.0.1. Per-pid lockfile at `~/.wc3-forge/mcp/<pid>.lock` (override with `WC3FORGE_MCP_LOCK_DIR`; `HIVEWE_MCP_LOCK_DIR` is honored for legacy compat). Every request carries `params._token` matching the lockfile token.
+JSON-RPC 2.0 over TCP, NDJSON-framed on 127.0.0.1. Per-pid lockfile at `~/.wc3-forge/mcp/<pid>.lock` (override with `WC3FORGE_MCP_LOCK_DIR`). Every request carries `params._token` matching the lockfile token.
+
+## Credits
+
+wc3-forge is an independent Go reimplementation that draws heavily on [HiveWE](https://github.com/stijnherfst/HiveWE) (Stijn Herfst, GPL-3.0) for WC3 file-format details, terrain/cliff/water rendering logic, and the MCP bridge wire contract. Source files note specific ports inline; see [`CREDITS.md`](CREDITS.md) for the full attribution.
 
 ## License
 
-MIT.
+GPL-3.0-or-later. See [`LICENSE`](LICENSE).

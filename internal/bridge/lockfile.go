@@ -17,15 +17,10 @@ import (
 // `sessions_list`. On startup we prune any lock files whose pid is no
 // longer alive (force-kill / crash leaves them behind).
 //
-// Override the lock-dir location with either WC3FORGE_MCP_LOCK_DIR (preferred)
-// or HIVEWE_MCP_LOCK_DIR (legacy compatibility — the HiveWE Node MCP server
-// uses this env var to discover the bridge).
+// Override the lock-dir location with WC3FORGE_MCP_LOCK_DIR.
 
 func lockDir() string {
 	if v := os.Getenv("WC3FORGE_MCP_LOCK_DIR"); v != "" {
-		return v
-	}
-	if v := os.Getenv("HIVEWE_MCP_LOCK_DIR"); v != "" {
 		return v
 	}
 	home, err := os.UserHomeDir()

@@ -31,7 +31,7 @@ Runs `src/index.ts` directly via `tsx` with hot-reload. The MCP server speaks st
 2. This MCP server reads the directory on each tool invocation, filters by alive pids, and connects via TCP to whichever instance the user has `session_select`ed (default: the oldest one).
 3. Every request includes the lockfile token as `params._token` for authentication.
 
-The lockdir can be overridden with `WC3FORGE_MCP_LOCK_DIR` (preferred) or `HIVEWE_MCP_LOCK_DIR` (legacy compat — wc3-forge's bridge accepts both for the same reason).
+The lockdir can be overridden with `WC3FORGE_MCP_LOCK_DIR`.
 
 Two MCP tools manage the multi-instance case:
 

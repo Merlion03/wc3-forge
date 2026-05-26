@@ -10,10 +10,9 @@ export interface BridgeLock {
 }
 
 // Lock directory resolution mirrors the Go side (internal/bridge/lockfile.go).
-// WC3FORGE_MCP_LOCK_DIR is the canonical override; HIVEWE_MCP_LOCK_DIR is
-// honored as legacy compat so an existing HiveWE MCP setup keeps working.
+// Override via WC3FORGE_MCP_LOCK_DIR.
 const lockDir = (): string => {
-  const override = process.env.WC3FORGE_MCP_LOCK_DIR ?? process.env.HIVEWE_MCP_LOCK_DIR;
+  const override = process.env.WC3FORGE_MCP_LOCK_DIR;
   if (override) return override;
   return join(homedir(), ".wc3-forge", "mcp");
 };
