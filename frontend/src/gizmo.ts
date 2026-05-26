@@ -824,8 +824,19 @@ export function buildGizmo(gl: WebGLRenderingContext): GizmoRenderer | null {
       selectionItems, unitInstances, doodadInstances,
       eyePos,
     ) {
-      const origin = dragState ? dragState.origin
-        : computeOrigin(selectionItems, unitInstances, doodadInstances)
+      // Always recompute the visible origin from the CURRENT entity positions.
+      // For move drags this makes the gizmo track the entities as they move
+      // (otherwise it would stick to the mousedown snapshot — the bug the
+      // user filed). For rotate/scale drags the centroid is mathematically
+      // preserved (rotation around centroid keeps the mean position fixed;
+      // axis-scale from centroid keeps it fixed too), so always-recompute
+      // gives the same result as the snapshot would for those modes.
+      //
+      // dragState.origin remains the PIVOT for the drag math (orbit center
+      // for rotate, scale center for scale, anchor reference for move) —
+      // that's separate from the visible position. Render position is
+      // recomputed every frame; drag math uses the mousedown snapshot.
+      const origin = computeOrigin(selectionItems, unitInstances, doodadInstances)
       lastVisible = origin !== null
       if (!origin) return
       lastOrigin = origin
