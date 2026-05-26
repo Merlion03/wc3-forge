@@ -38,10 +38,11 @@
   // that into the `open` boolean so the public API stays a clean bindable.
   let value = $state<string>(open ? id : '')
 
-  // open → value
+  // open → value. Don't read `value` here — the guarded `if (value !== next)`
+  // version made this effect re-run on value-side changes and snap value back
+  // to id while `open` was still stale, blocking collapse on second click.
   $effect(() => {
-    const next = open ? id : ''
-    if (value !== next) value = next
+    value = open ? id : ''
   })
 
   // value → open + fire onToggle on a real change
