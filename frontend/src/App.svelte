@@ -1462,14 +1462,14 @@
           disabled={busy}
           title="Open an extracted .w3x folder (editable)."
         >
-          <span class="flex-1">Open Map Folder…</span>
+          <span class="flex-1">Open Map Folder</span>
         </DropdownMenu.Item>
         <DropdownMenu.Item
           onSelect={runMenuAction(pickAndOpenFile)}
           disabled={busy}
           title="Open a packaged .w3x / .w3m / .mpq archive (read-only; Save is disabled)."
         >
-          <span class="flex-1">Open Map File…</span>
+          <span class="flex-1">Open Map File</span>
         </DropdownMenu.Item>
         <DropdownMenu.Item
           onSelect={runMenuAction(doSave)}
@@ -1485,7 +1485,7 @@
           disabled={!status.loaded}
           title="Edit map name, author, description, and other metadata."
         >
-          <span class="flex-1">Map Info…</span>
+          <span class="flex-1">Map Info</span>
           <DropdownMenu.Shortcut>Ctrl+Shift+I</DropdownMenu.Shortcut>
         </DropdownMenu.Item>
         <DropdownMenu.Item
@@ -1493,14 +1493,22 @@
           disabled={!status.loaded}
           title="Swap the map's tileset, remapping each tile to a slot in the new palette."
         >
-          <span class="flex-1">Swap Tileset…</span>
+          <span class="flex-1">Swap Tileset</span>
         </DropdownMenu.Item>
         <DropdownMenu.Item
           onSelect={runMenuAction(openGameplayConstantsEditor)}
           disabled={!status.loaded}
           title="Edit per-map gameplay constants (war3mapMisc.txt)."
         >
-          <span class="flex-1">Gameplay Constants…</span>
+          <span class="flex-1">Gameplay Constants</span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Item
+          onSelect={runMenuAction(openObjectEditor)}
+          disabled={!status.loaded}
+          title="Browse units (Phase 1a: read-only)."
+        >
+          <span class="flex-1">Object Editor</span>
+          <DropdownMenu.Shortcut>F6</DropdownMenu.Shortcut>
         </DropdownMenu.Item>
         <DropdownMenu.Separator />
         <DropdownMenu.Item onSelect={runMenuAction(close)} disabled={!status.loaded || busy}>
@@ -1537,30 +1545,6 @@
         >
           <span class="flex-1">Redo{redoLabel ? ` — ${redoLabel}` : ''}</span>
           <DropdownMenu.Shortcut>Ctrl+Shift+Z</DropdownMenu.Shortcut>
-        </DropdownMenu.Item>
-      </DropdownMenu.Content>
-    </DropdownMenu.Root>
-
-    <!-- Module menu — hosts the WC3-style sub-editors (Object Editor today,
-         future: Trigger Editor, Sound Editor, etc). Mirrors HiveWE's
-         "Module" / WorldEdit's "Window" menu by convention. -->
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger>
-        {#snippet child({ props })}
-          <Button {...props} variant="ghost" size="sm" title="Module menu">
-            Module
-            <ChevronDownIcon class="text-muted-foreground" />
-          </Button>
-        {/snippet}
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Content class="min-w-[220px]" align="start">
-        <DropdownMenu.Item
-          onSelect={runMenuAction(openObjectEditor)}
-          disabled={!status.loaded}
-          title="Browse units (Phase 1a: read-only)."
-        >
-          <span class="flex-1">Object Editor…</span>
-          <DropdownMenu.Shortcut>F6</DropdownMenu.Shortcut>
         </DropdownMenu.Item>
       </DropdownMenu.Content>
     </DropdownMenu.Root>
