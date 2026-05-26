@@ -242,3 +242,78 @@ func TestSessionAgentLabel_NotifiesOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleUnitsList_Filter exercises the optional filter param. Sets up a
+// synthetic session with a mix of TypeIDs + players, calls handleUnitsList
+// four times (no filter, type_id only, player only, both), and asserts the
+// returned entity slice matches the expected subset each time. Verifies that
+// Player=0 is a real filter value (the pointer-based optional distinguishes
+// absent from zero).
+func TestHandleUnitsList_Filter(t *testing.T) {
+	prev := Current
+	t.Cleanup(func() { Current = prev })
+
+	Current = &Session{loaded: true}
+	Current.units = &unitsdoo.File{
+		Entities: []unitsdoo.Entity{
+			{CreationNumber: 1, TypeID: "ngol", Player: 27},
+			{CreationNumber: 2, TypeID: "ngol", Player: 0},
+			{CreationNumber: 3, TypeID: "hfoo", Player: 0},
+			{CreationNumber: 4, TypeID: "hfoo", Player: 1},
+			{CreationNumber: 5, TypeID: "ntav", Player: 27},
+		},
+	}
+
+	cases := []struct {
+		name   string
+		params string
+		want   []uint32 // expected creation_numbers
+	}{
+		{"no filter", `{}`, []uint32{1, 2, 3, 4, 5}},
+		{"empty params", ``, []uint32{1, 2, 3, 4, 5}},
+		{"type_id only", `{"filter":{"type_id":"ngol"}}`, []uint32{1, 2}},
+		{"player only", `{"filter":{"player":27}}`, []uint32{1, 5}},
+		{"player zero is real", `{"filter":{"player":0}}`, []uint32{2, 3}},
+		{"both filters", `{"filter":{"type_id":"hfoo","player":0}}`, []uint32{3}},
+		{"no match", `{"filter":{"type_id":"xxxx"}}`, []uint32{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := handleUnitsList(json.RawMessage(tc.params))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			m, ok := res.(map[string]any)
+			if !ok {
+				t.Fatalf("expected map response, got %T", res)
+			}
+			ents, ok := m["entities"].([]unitsListEntity)
+			if !ok {
+				t.Fatalf("entities key not a []unitsListEntity, got %T", m["entities"])
+			}
+			got := make([]uint32, 0, len(ents))
+			for _, e := range ents {
+				got = append(got, e.CreationNumber)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d entities (%v), want %d (%v)", len(got), got, len(tc.want), tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("entity %d = %d, want %d", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestHandleUnitsList_InvalidParams asserts malformed JSON surfaces a clean
+// error rather than panicking.
+func TestHandleUnitsList_InvalidParams(t *testing.T) {
+	prev := Current
+	t.Cleanup(func() { Current = prev })
+	Current = &Session{loaded: true, units: &unitsdoo.File{}}
+	if _, err := handleUnitsList(json.RawMessage(`{"filter":{"player":"not-a-number"}}`)); err == nil {
+		t.Fatal("expected error for malformed player filter")
+	}
+}
