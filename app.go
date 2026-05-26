@@ -718,26 +718,28 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 			if i > 0 && j > 0 && cornerRomp[idx-W-1] {
 				anyRomp = true
 			}
-			// Widened outer gate (vs HiveWE's literal rule): enter the remap
-			// block whenever ANY adjacent cell is a cliff or ramp, regardless
-			// of this corner's own ramp flag. The narrowed b64fe4e exemption
-			// below then surgically skips remap only for the corners that
-			// should inherit the floor tile (ramp-flagged AND no cliff
-			// adjacency). Cliff-edge ramp corners — the bottom-vertical edge
-			// of a plateau where the ramp's "shoulder" meets the cliff face —
-			// get the Irbk frame that HiveWE renders there.
-			if !anyRomp && !anyCliff {
-				continue
-			}
-			// Ramp continuity fix (narrowed b64fe4e): when this corner is on
-			// a ramp AND has NO cliff adjacency, keep the raw floor texture
-			// for ramp-surface continuity. When it's on a ramp AND ALSO on
-			// the cliff edge (the typical ramp-shoulder corner where ramp
-			// meets cliff face), DO remap so the Irbk frame matches HiveWE's
-			// visual. This catches the bottom-vertical edge of plateau
-			// columns where the user previously saw a flat-Itbk gap instead
-			// of the lighter rune-brick outline.
-			if t.Tiles[idx].HasRamp() && !anyCliff {
+			// HiveWE-literal rule (terrain.ixx::real_tile_texture line 770):
+			//   if (a_romp || (a_cliff && !corner_ramp[idx])) { remap }
+			// In words: remap when this corner sits on a renderable
+			// clifftrans piece (anyRomp), OR when any adjacent cell is a
+			// cliff cell AND this corner is NOT itself flagged as a ramp.
+			// Ramp corners are NEVER remapped on the basis of cliff
+			// adjacency alone — they keep their raw ground_texture so the
+			// ramp surface stays visually continuous with the floor.
+			//
+			// Why the previous "widened gate + narrow on (ramp AND no
+			// cliff)" was wrong: it remapped ramp corners that ARE
+			// cliff-adjacent (the typical plateau-edge ramp shoulder),
+			// flipping them from raw Itbk to Irbk. That created bogus
+			// 2-palette transition cells around the plateau edge with
+			// alpha-edged variants the spec then sampled at slot 6/9
+			// (diamond) instead of HiveWE's uniform Itbk. Symptom: visible
+			// diamond/X artifacts on Enfo's FFB spear-tip plateau at
+			// cells (11..13, 66..68) that HiveWE renders smooth. Verified
+			// 2026-05-25 via the embedded HiveWE MCP bridge + a parser-side
+			// real_tile_texture replay.
+			remap := anyRomp || (anyCliff && !t.Tiles[idx].HasRamp())
+			if !remap {
 				continue
 			}
 			// Resolve the cliff palette index for this corner.
