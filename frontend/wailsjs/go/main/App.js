@@ -150,6 +150,10 @@ export function MoveUnit(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['MoveUnit'](arg1, arg2, arg3, arg4);
 }
 
+export function NewWindow() {
+  return window['go']['main']['App']['NewWindow']();
+}
+
 export function OpenMap(arg1) {
   return window['go']['main']['App']['OpenMap'](arg1);
 }
@@ -160,6 +164,10 @@ export function OpenMapDialog() {
 
 export function OpenMapFileDialog() {
   return window['go']['main']['App']['OpenMapFileDialog']();
+}
+
+export function OpenMapInNewWindow(arg1) {
+  return window['go']['main']['App']['OpenMapInNewWindow'](arg1);
 }
 
 export function Redo() {

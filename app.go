@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -281,6 +282,50 @@ func (a *App) OpenMap(path string) (MapStatus, error) {
 		return MapStatus{}, err
 	}
 	return a.Status(), nil
+}
+
+// OpenMapInNewWindow launches a new wc3-forge process with --open <path> so
+// the requested map opens in its own window without disturbing the map already
+// loaded here. Multi-instance is supported on the bridge side via per-PID lock
+// files under ~/.wc3-forge/mcp/, so two windows can run simultaneously.
+func (a *App) OpenMapInNewWindow(path string) error {
+	if path == "" {
+		return fmt.Errorf("path is required")
+	}
+	return launchNewWindow(path)
+}
+
+// NewWindow launches a new wc3-forge process with no map loaded. Same
+// multi-instance story as OpenMapInNewWindow — the new process gets its own
+// bridge port + PID lock.
+func (a *App) NewWindow() error {
+	return launchNewWindow("")
+}
+
+// launchNewWindow spawns a detached wc3-forge child. If path is non-empty,
+// the child is started with --open <path>; otherwise it starts cold. The
+// process is released so it outlives us; without Release the child becomes
+// a zombie on Unix or a leaked handle on Windows.
+func launchNewWindow(path string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable: %w", err)
+	}
+	var args []string
+	if path != "" {
+		args = []string{"--open", path}
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("launch new window: %w", err)
+	}
+	if err := cmd.Process.Release(); err != nil {
+		return fmt.Errorf("release new window: %w", err)
+	}
+	return nil
 }
 
 func (a *App) CloseMap() MapStatus {

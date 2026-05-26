@@ -3,7 +3,7 @@
 
   import { onMount, onDestroy } from 'svelte'
   import {
-    OpenMapDialog, OpenMapFileDialog, OpenMap, CloseMap, ListUnits, ListDoodads, Status,
+    OpenMapDialog, OpenMapFileDialog, OpenMap, OpenMapInNewWindow, NewWindow, CloseMap, ListUnits, ListDoodads, Status,
     GetSelection, SetSelection, GetUnit,
     GetReforgedMode, SetReforgedMode,
     GetUnitTypeIndex, GetDoodadTypeIndex,
@@ -975,11 +975,26 @@
     scene?.dispose()
   })
 
+  async function newWindow() {
+    busy = true
+    try {
+      await NewWindow()
+    } catch (e) {
+      showToast('new window failed: ' + String(e), 'error')
+    } finally {
+      busy = false
+    }
+  }
+
   async function pickAndOpen() {
     busy = true
     try {
       const path = await OpenMapDialog()
       if (!path) { busy = false; return }
+      if (status.loaded) {
+        await OpenMapInNewWindow(path)
+        return
+      }
       status = await OpenMap(path)
       await reloadMap()
     } catch (e) {
@@ -994,6 +1009,10 @@
     try {
       const path = await OpenMapFileDialog()
       if (!path) { busy = false; return }
+      if (status.loaded) {
+        await OpenMapInNewWindow(path)
+        return
+      }
       status = await OpenMap(path)
       await reloadMap()
     } catch (e) {
@@ -1457,6 +1476,14 @@
         {/snippet}
       </DropdownMenu.Trigger>
       <DropdownMenu.Content class="min-w-[220px]" align="start">
+        <DropdownMenu.Item
+          onSelect={runMenuAction(newWindow)}
+          disabled={busy}
+          title="Launch a new wc3-forge editor window with no map loaded."
+        >
+          <span class="flex-1">New Window</span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Separator />
         <DropdownMenu.Item
           onSelect={runMenuAction(pickAndOpen)}
           disabled={busy}

@@ -80,11 +80,15 @@ export function MoveDoodad(arg1:number,arg2:number,arg3:number,arg4:number):Prom
 
 export function MoveUnit(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
+export function NewWindow():Promise<void>;
+
 export function OpenMap(arg1:string):Promise<main.MapStatus>;
 
 export function OpenMapDialog():Promise<string>;
 
 export function OpenMapFileDialog():Promise<string>;
+
+export function OpenMapInNewWindow(arg1:string):Promise<void>;
 
 export function Redo():Promise<void>;
 
