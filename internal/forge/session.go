@@ -145,6 +145,16 @@ type Session struct {
 	dirtyGameplay  bool
 	dirtyListeners []func(bool)
 
+	// Sky-model override: set by the Map Info → Sky picker (or any caller
+	// that wants to change the SetSkyModel call). nil = no pending change
+	// (use whatever's in war3map.j/.lua already). Non-nil = the desired
+	// argument string for the next SetSkyModel call; empty value is a valid
+	// "explicitly disable sky" intent and is distinct from nil.
+	//
+	// Lives outside the dirty<X> family because it doesn't map to a single
+	// encoded file — Save handles the script-rewrite path separately.
+	pendingSkyModel *string
+
 	// Entity-change bus — fired from any mutator (MoveUnit today; SetRotation,
 	// SetType, etc. in the future). Subscribers refresh stale views of the
 	// changed entity (Properties panel re-fetches, scene re-positions the
@@ -1087,6 +1097,83 @@ func (s *Session) MutateInfo(fn func(*w3i.Info)) error {
 	return nil
 }
 
+// SetSkyModel queues a sky-model change for the next Save. path is the raw
+// argument to insert into SetSkyModel("…") — typically a normalized
+// `environment/sky/…/….mdx` form; the rewriter handles Lua/JASS escaping.
+// Empty string is a valid intent (SetSkyModel("") — disables the sky at
+// runtime); pass nil to clear a pending change without committing.
+//
+// Records the change in the undo history, so Ctrl+Z reverts to the previous
+// override (or to "no override at all" if there wasn't one). Sequential
+// picks each create one history entry — the user can step back through them
+// individually. Marks the session dirty so the existing dirty-changed bus +
+// Save-enabling UI cues pick it up. The script-rewrite happens during Save
+// (see the pendingSky branch there).
+//
+// No-op when the new value matches the current pending value (by content,
+// not pointer identity — comparing pointer addresses would record a no-op
+// command every time the picker re-emits the same selection on focus).
+func (s *Session) SetSkyModel(path *string) error {
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	// Idempotence check — same content as current pending? Bail without
+	// adding a history entry. We compare values, not pointer identity, so
+	// frontends that wrap-and-unwrap don't pollute the undo stack.
+	if skyPtrEq(s.pendingSkyModel, path) {
+		s.mu.Unlock()
+		return nil
+	}
+	oldPath := clonePtr(s.pendingSkyModel)
+	newPath := clonePtr(path)
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.pendingSkyModel != nil
+	s.pendingSkyModel = newPath
+	s.recordCommand(&setSkyModelCmd{oldPath: oldPath, newPath: newPath})
+	nowDirty := s.pendingSkyModel != nil
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	if !wasDirty && nowDirty {
+		s.notifyDirty(true)
+	}
+	// Mirror the MutateInfo notification path so the sky picker doesn't have
+	// to learn a private event channel — it can subscribe to the same
+	// EntityChange stream as everything else and refresh on any "info" event.
+	s.notifyEntityChanged(EntityChange{Kind: "info", ID: 0, Field: "sky_model"})
+	if historyChanged {
+		s.notifyHistoryChanged()
+	}
+	return nil
+}
+
+// skyPtrEq returns true when two *string sky-override pointers point to the
+// same logical state. nil and nil are equal; non-nil values compare by
+// content. (nil vs &"" is NOT equal — "" is an explicit "disable sky" intent
+// distinct from "no override".)
+func skyPtrEq(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+// PendingSkyModel returns the queued sky-model override or nil if none is
+// pending. Renderers should prefer this over scanning the script directly so
+// the editor reflects unsaved picker changes immediately.
+func (s *Session) PendingSkyModel() *string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.pendingSkyModel == nil {
+		return nil
+	}
+	v := *s.pendingSkyModel
+	return &v
+}
+
 // SwapTilesetRequest re-tiles the loaded map. NewLetter is the single-byte
 // tileset code written into both war3map.w3i and war3map.w3e (HiveWE keeps
 // these in sync; Blizzard's editor refuses to load maps where they disagree).
@@ -1295,7 +1382,7 @@ func applyTilesetSnapshot(s *Session, letter byte, ground, cliff []string, tileG
 func (s *Session) IsDirty() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay
+	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.pendingSkyModel != nil
 }
 
 // Save flushes every dirty in-memory file back through the source's write
@@ -1314,7 +1401,7 @@ func (s *Session) Save() error {
 		s.mu.Unlock()
 		return fmt.Errorf("no map loaded")
 	}
-	if !s.dirtyUnits && !s.dirtyDoodads && !s.dirtyInfo && !s.dirtyTerrain && !s.dirtyGameplay {
+	if !s.dirtyUnits && !s.dirtyDoodads && !s.dirtyInfo && !s.dirtyTerrain && !s.dirtyGameplay && s.pendingSkyModel == nil {
 		s.mu.Unlock()
 		return nil // nothing to do
 	}
@@ -1327,6 +1414,8 @@ func (s *Session) Save() error {
 	saveUnits := s.dirtyUnits
 	saveDoodads := s.dirtyDoodads
 	saveInfo := s.dirtyInfo
+	pendingSky := s.pendingSkyModel
+	isLua := info != nil && info.Lua
 	saveTerrain := s.dirtyTerrain
 	saveGameplay := s.dirtyGameplay
 	s.mu.Unlock()
@@ -1414,6 +1503,35 @@ func (s *Session) Save() error {
 		}
 		s.mu.Lock()
 		s.dirtyGameplay = false
+		s.mu.Unlock()
+	}
+	if pendingSky != nil {
+		scriptName := "war3map.j"
+		if isLua {
+			scriptName = "war3map.lua"
+		}
+		orig, ok, err := src.read(scriptName)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", scriptName, err)
+		}
+		if !ok || len(orig) == 0 {
+			// Most real maps ship a script; if the file is missing entirely
+			// we don't try to synthesize one here — that's a much bigger ask
+			// (we'd need a stub `function main`/`function config` skeleton).
+			// Surface the missing-file as a friendly error so the picker
+			// can toast it. The pendingSky stays in place so a future Save
+			// after the user adds a script can commit.
+			return fmt.Errorf("write SetSkyModel: %s not present in map", scriptName)
+		}
+		updated, err := rewriteSetSkyModel(orig, *pendingSky, isLua)
+		if err != nil {
+			return fmt.Errorf("rewrite SetSkyModel in %s: %w", scriptName, err)
+		}
+		if err := src.write(scriptName, updated); err != nil {
+			return fmt.Errorf("write %s: %w", scriptName, err)
+		}
+		s.mu.Lock()
+		s.pendingSkyModel = nil
 		s.mu.Unlock()
 	}
 

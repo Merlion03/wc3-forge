@@ -157,8 +157,12 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ships the bytes as `.dds`. Without this swap, every HD-only unit
 // (Shadow Hunter, Beastmaster, several Reforged-era heroes) renders
 // invisible in any preview / scene that loads its MDX — the geometry is
-// there but every texture binding is null. One-way map: .dds doesn't
-// fall back to .tif because nothing in the wild stores it the other way.
+// there but every texture binding is null. mdx-m3-viewer's DDS handler
+// claims the bytes by magic regardless of URL extension, so serving DDS
+// through a .tif URL works. The same swap covers stock sky models like
+// IcecrownGlacierSky.mdx that also reference .tif. One-way map: .dds
+// doesn't fall back to .tif because nothing in the wild stores it the
+// other way.
 func siblingExtension(p string) string {
 	ext := path.Ext(p)
 	stem := p[:len(p)-len(ext)]

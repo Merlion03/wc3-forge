@@ -19,7 +19,7 @@
   // write them back verbatim per the existing w3i.Encode wire contract.
 
   import { tick } from 'svelte'
-  import { MapInfoGet, MapInfoApply } from '../wailsjs/go/main/App.js'
+  import { MapInfoGet, MapInfoApply, ListSkyModels, SetSkyModel, GetTerrain, HistoryUndoCount, DiscardTo } from '../wailsjs/go/main/App.js'
   import { showToast } from './toast'
   import * as Dialog from '$lib/components/ui/dialog'
   import * as Tabs from '$lib/components/ui/tabs'
@@ -31,9 +31,15 @@
   let {
     open = $bindable(false),
     onClose,
+    onSkyChanged,
   }: {
     open?: boolean
     onClose?: () => void
+    /** Fires when the sky picker changes value. Receives the resolved path
+     *  (normalized "environment/sky/.../....mdx", or "" for None). The
+     *  parent uses this to rebuild the scene's sky renderer immediately so
+     *  the user sees their pick without round-tripping a save. */
+    onSkyChanged?: (path: string) => void
   } = $props()
 
   // Tab definitions. v1 only populates 'description'; the rest render a
@@ -88,12 +94,15 @@
   let hasErrors = $derived(!!nameError || !!descError)
 
   // Live-changed: pending differs from baseline (any field). Drives the
-  // Apply button's enabled state.
+  // Apply button's enabled state. Sky changes count too — they live-preview
+  // but should still let the user "lock them in" via Apply so a subsequent
+  // dialog close doesn't revert.
   let isChanged = $derived(
     pending.name !== baseline.name ||
       pending.author !== baseline.author ||
       pending.description !== baseline.description ||
-      pending.suggestedPlayers !== baseline.suggestedPlayers,
+      pending.suggestedPlayers !== baseline.suggestedPlayers ||
+      skySelected !== skyBaseline,
   )
 
   // Char counts. Limits per design doc / lobby behavior:
@@ -114,6 +123,52 @@
 
   function blankPending(): Pending {
     return { name: '', author: '', description: '', suggestedPlayers: '' }
+  }
+
+  // Sky picker state. Lives outside `Pending` because saving the sky model
+  // doesn't go through MapInfoApply — it's a script-rewrite committed by
+  // SetSkyModel on Save. Loaded on dialog open from ListSkyModels (stock
+  // options sourced from WorldEditData.txt's [SkyModels]) and GetTerrain
+  // (current resolved path for the loaded map).
+  interface SkyOpt { path: string; name_key: string; display_name: string }
+  let skyOptions: SkyOpt[] = $state([])
+  let skySelected: string = $state('') // path of the currently-picked option
+  let skyBaseline: string = $state('') // value at dialog-open; used to detect "did the user change it?"
+  let skyChanged = $derived(skySelected !== skyBaseline)
+  // Undo-stack depth captured at dialog open. Cancel calls UndoTo(this) to
+  // revert every sky pick made during the dialog session in one RPC. Each
+  // picker change records its own undo entry server-side (see history.go
+  // setSkyModelCmd) so Ctrl+Z while the dialog is open also reverts a
+  // single step.
+  let skyHistoryAnchor: number = $state(0)
+
+  async function loadSkyState() {
+    try {
+      const [opts, t, anchor] = await Promise.all([
+        ListSkyModels(),
+        GetTerrain(),
+        HistoryUndoCount(),
+      ])
+      skyOptions = (opts ?? []) as SkyOpt[]
+      skySelected = (t as any)?.sky_model ?? ''
+      skyBaseline = skySelected
+      skyHistoryAnchor = anchor
+    } catch (e) {
+      // Non-fatal: picker stays empty, other tabs still work.
+      showToast('Could not load sky options: ' + String(e), 'error')
+    }
+  }
+
+  async function onSkyPicked(path: string) {
+    skySelected = path
+    try {
+      // Tell Go to queue the override + return the normalized path. The
+      // parent receives that path and rebuilds the scene's sky immediately.
+      const resolved = await SetSkyModel(path)
+      onSkyChanged?.(resolved)
+    } catch (e) {
+      showToast('Failed to set sky: ' + String(e), 'error')
+    }
   }
 
   // Open transition: pull current Info, populate pending + baseline. Errors
@@ -146,17 +201,31 @@
   // load Info, focus the first input. On true→false: notify the parent
   // and discard pending edits (shadcn closes on Esc/backdrop without
   // calling onCancel, so we must reset here).
+  // Track open-transitions. The OPEN side fires reliably here. The CLOSE
+  // side is mirrored in onCancel for the Cancel-button path because Svelte 5
+  // doesn't retrigger the child's $effect when the child itself writes to a
+  // $bindable prop (the write propagates through the parent, not through
+  // the child's local reactivity tracker). This branch handles Esc /
+  // click-outside, where the parent's binding flips open to false from
+  // outside the child — that path DOES retrigger the effect.
   let lastOpen = $state(false)
   $effect(() => {
     if (open && !lastOpen) {
       lastOpen = true
       activeTab = 'description'
       void loadInfo().then(() => tick().then(() => firstFocusableEl?.focus()))
+      void loadSkyState()
     } else if (!open && lastOpen) {
       lastOpen = false
-      // Discard any pending edits so a re-open starts clean.
+      // Discard any pending edits so a re-open starts clean. Mirrors the
+      // same cleanup onCancel does — see that function for the sky-revert
+      // rationale (DiscardTo reverts state AND drops the picks from history).
       pending = { ...baseline }
       validateAll()
+      if (skySelected !== skyBaseline) {
+        skySelected = skyBaseline
+        void DiscardTo(skyHistoryAnchor)
+      }
       onClose?.()
     }
   })
@@ -205,6 +274,14 @@
     if (hasErrors) return
     const diff = buildDiff()
     if (Object.keys(diff).length === 0) {
+      // No w3i changes — but if the sky picker moved, the user clicking
+      // Apply still has a purpose: lock in the sky pick so a subsequent
+      // dialog close doesn't revert it. (The Go-side override is already
+      // set live; we just update skyBaseline.)
+      if (skySelected !== skyBaseline) {
+        skyBaseline = skySelected
+        showToast('Sky updated — Save Map to commit to script', 'info')
+      }
       if (closeAfter) open = false
       return
     }
@@ -221,6 +298,11 @@
         suggestedPlayers: info?.SuggestedPlayers ?? '',
       }
       baseline = { ...pending }
+      // Lock in the sky pick too — Apply commits the dialog's whole state
+      // to the "this is what's pending in the session" line, so a later
+      // dialog close shouldn't revert the user's sky choice. The script
+      // rewrite still happens on the next "Save Map".
+      skyBaseline = skySelected
       validateAll()
       showToast('Map info updated', 'info')
       if (closeAfter) open = false
@@ -232,7 +314,20 @@
   }
 
   function onCancel() {
-    // The $effect on open will reset pending → baseline and fire onClose.
+    // Inline the close-path cleanup that the $effect would otherwise do.
+    // Svelte 5's $effect doesn't reliably retrigger when the child writes
+    // to its own $bindable prop (the write goes through the parent's
+    // reactivity, not the child's local tracker), so doing the revert here
+    // makes it deterministic. The $effect's close branch still fires for
+    // Esc / click-outside (parent-driven open=false) — it's idempotent
+    // because skySelected==skyBaseline after this runs, so DiscardTo
+    // short-circuits to a no-op.
+    if (skySelected !== skyBaseline) {
+      skySelected = skyBaseline
+      void DiscardTo(skyHistoryAnchor)
+    }
+    pending = { ...baseline }
+    validateAll()
     open = false
   }
 
@@ -387,7 +482,40 @@
               </div>
             </Tabs.Content>
 
-            {#each TABS.filter((t) => t.id !== 'description') as t (t.id)}
+            <Tabs.Content value="lighting" class="mt-0">
+              <div class="px-1 py-2 flex flex-col gap-4">
+                <div class="flex flex-col gap-1.5">
+                  <Label for="map-info-sky">Sky model</Label>
+                  <select
+                    id="map-info-sky"
+                    class="border border-input bg-background rounded px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                    value={skySelected}
+                    onchange={(e) => void onSkyPicked((e.target as HTMLSelectElement).value)}
+                  >
+                    {#each skyOptions as opt (opt.path)}
+                      <option value={opt.path}>{opt.display_name}</option>
+                    {/each}
+                  </select>
+                  <p class="text-xs text-muted-foreground leading-relaxed">
+                    Changing this updates the in-editor preview immediately
+                    by reading the new SkyModel mdx. On Save, a
+                    <code class="font-mono">SetSkyModel(...)</code> call is
+                    written into <code class="font-mono">war3map.j</code> or
+                    <code class="font-mono">war3map.lua</code> so the chosen
+                    sky also shows in-game. Pick <em>None</em> to drop the
+                    dome and use only the editor's gradient backdrop.
+                  </p>
+                  {#if skyChanged}
+                    <p class="text-xs text-amber-500">
+                      Unsaved change — applies in editor now; commits to
+                      script on Save.
+                    </p>
+                  {/if}
+                </div>
+              </div>
+            </Tabs.Content>
+
+            {#each TABS.filter((t) => t.id !== 'description' && t.id !== 'lighting') as t (t.id)}
               <Tabs.Content value={t.id} class="mt-0">
                 <div
                   class="text-center text-muted-foreground py-16 text-sm flex flex-col gap-1.5"
@@ -415,13 +543,6 @@
     >
       <Button variant="ghost" onclick={onCancel} disabled={applying}>
         Cancel
-      </Button>
-      <Button
-        variant="outline"
-        onclick={() => applyDiff(false)}
-        disabled={hasErrors || !isChanged || applying || loading}
-      >
-        Apply
       </Button>
       <Button
         onclick={() => applyDiff(true)}

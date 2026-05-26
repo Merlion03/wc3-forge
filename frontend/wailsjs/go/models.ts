@@ -283,6 +283,22 @@ export namespace main {
 		}
 	}
 	
+	export class SkyModelOption {
+	    path: string;
+	    name_key: string;
+	    display_name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SkyModelOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.name_key = source["name_key"];
+	        this.display_name = source["display_name"];
+	    }
+	}
 	export class SwapTilesetRequest {
 	    newLetter: string;
 	    newGroundTilesets: string[];
@@ -355,6 +371,8 @@ export namespace main {
 	    shadow_map_width: number;
 	    shadow_map_height: number;
 	    cell_skip: number[];
+	    sky_model: string;
+	    sky_model_from_script: boolean;
 	    cliff_displacement: number[];
 	
 	    static createFrom(source: any = {}) {
@@ -386,6 +404,8 @@ export namespace main {
 	        this.shadow_map_width = source["shadow_map_width"];
 	        this.shadow_map_height = source["shadow_map_height"];
 	        this.cell_skip = source["cell_skip"];
+	        this.sky_model = source["sky_model"];
+	        this.sky_model_from_script = source["sky_model_from_script"];
 	        this.cliff_displacement = source["cliff_displacement"];
 	    }
 	

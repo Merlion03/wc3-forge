@@ -22,6 +22,10 @@ export function CloseMap() {
   return window['go']['main']['App']['CloseMap']();
 }
 
+export function DiscardTo(arg1) {
+  return window['go']['main']['App']['DiscardTo'](arg1);
+}
+
 export function EmitTestCommand(arg1) {
   return window['go']['main']['App']['EmitTestCommand'](arg1);
 }
@@ -94,6 +98,10 @@ export function HistoryList() {
   return window['go']['main']['App']['HistoryList']();
 }
 
+export function HistoryUndoCount() {
+  return window['go']['main']['App']['HistoryUndoCount']();
+}
+
 export function IsDirty() {
   return window['go']['main']['App']['IsDirty']();
 }
@@ -104,6 +112,10 @@ export function LaunchInWC3() {
 
 export function ListDoodads() {
   return window['go']['main']['App']['ListDoodads']();
+}
+
+export function ListSkyModels() {
+  return window['go']['main']['App']['ListSkyModels']();
 }
 
 export function ListTilesets() {
@@ -182,6 +194,10 @@ export function SetSelection(arg1) {
   return window['go']['main']['App']['SetSelection'](arg1);
 }
 
+export function SetSkyModel(arg1) {
+  return window['go']['main']['App']['SetSkyModel'](arg1);
+}
+
 export function SetUnitAnimation(arg1, arg2) {
   return window['go']['main']['App']['SetUnitAnimation'](arg1, arg2);
 }
@@ -196,4 +212,8 @@ export function SwapTileset(arg1) {
 
 export function Undo() {
   return window['go']['main']['App']['Undo']();
+}
+
+export function UndoTo(arg1) {
+  return window['go']['main']['App']['UndoTo'](arg1);
 }

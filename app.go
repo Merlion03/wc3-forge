@@ -416,6 +416,18 @@ type TerrainDTO struct {
 	// the bug Problem 1 fixes. Stored as []uint32 for the same
 	// base64-marshal-trap reason as GroundTex.
 	CellSkip []uint32 `json:"cell_skip"`
+	// SkyModel is the asset path for the sky dome to render behind/around the
+	// terrain. Sourced from war3map.j/.lua's last SetSkyModel("...") call, or
+	// a wc3-forge tileset→sky default if no script call is present. Empty
+	// string means "render the flat clear color" (interior tilesets, citadel,
+	// ruins, or maps that explicitly call SetSkyModel("")). Normalized to
+	// lowercase + forward-slash + .mdx extension on the Go side, ready for
+	// `viewer.load(skyModel, solver)`.
+	SkyModel string `json:"sky_model"`
+	// SkyModelFromScript is true when SkyModel came from a SetSkyModel call
+	// in war3map.j/.lua, false when it came from the tileset-default table.
+	// The Map Info sky picker uses this to default the override checkbox.
+	SkyModelFromScript bool `json:"sky_model_from_script"`
 	// CliffDisplacement is the per-corner SMOOTH height (just `Tilepoint.Z()`,
 	// in studs) — i.e. the per-corner wobble WITHOUT the layer-step offset.
 	// This is what the cliff vertex shader's per-vertex displacement consumes.
@@ -827,7 +839,7 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		shadowW = sm.Width
 		shadowH = sm.Height
 	}
-	return TerrainDTO{
+	dto := TerrainDTO{
 		Width:         t.Width,
 		Height:        t.Height,
 		CenterOffset:  t.CenterOffset,
@@ -852,7 +864,9 @@ func (a *App) GetTerrain() (TerrainDTO, error) {
 		ShadowMapHeight: shadowH,
 		CellSkip:          cellSkip,
 		CliffDisplacement: cliffDisp,
-	}, nil
+	}
+	dto.SkyModel, dto.SkyModelFromScript = ResolveSkyModel(t.Tileset)
+	return dto, nil
 }
 
 // SelectionDTO mirrors forge.SelectionState for JS consumption.
@@ -864,6 +878,34 @@ type SelectionDTO struct {
 type SelectionItemDTO struct {
 	Kind string `json:"kind"`
 	ID   uint32 `json:"id"`
+}
+
+// SetSkyModel queues a sky-model change for the next Save. path is a
+// normalized editor path ("environment/sky/…/….mdx") or "" to disable the
+// sky. The renderer reflects the change immediately (Phase 2 picker preview);
+// the actual script rewrite happens on Save.
+//
+// Returns the resolved path that the renderer will now use (the same value
+// passed in, normalized). Empty if no map is loaded.
+func (a *App) SetSkyModel(path string) (string, error) {
+	p := path
+	if err := forge.Current.SetSkyModel(&p); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// ListSkyModels returns the WC3 stock sky-model options sourced from
+// UI/WorldEditData.txt's [SkyModels] section. Used by the Map Info → Lighting
+// tab's sky picker. Always includes a synthetic "None" entry at the top so
+// the picker can express "no sky" as a first-class choice (writes
+// SetSkyModel("") to the script, which suppresses the dome at runtime).
+func (a *App) ListSkyModels() []SkyModelOption {
+	stock := loadSkyModels()
+	out := make([]SkyModelOption, 0, len(stock)+1)
+	out = append(out, SkyModelOption{Path: "", NameKey: "", DisplayName: "None"})
+	out = append(out, stock...)
+	return out
 }
 
 func (a *App) GetSelection() SelectionDTO {
@@ -1167,6 +1209,26 @@ func (a *App) Redo() error {
 // Edit menu can show enabled state + tooltips ("Undo Move Footman" etc.).
 func (a *App) HistoryList() forge.HistoryState {
 	return forge.Current.HistoryList()
+}
+
+// HistoryUndoCount returns the current undo-stack depth. Modal dialogs
+// (Map Info Sky picker) snapshot this at open-time so Cancel can UndoTo it.
+func (a *App) HistoryUndoCount() int {
+	return forge.Current.HistoryUndoCount()
+}
+
+// UndoTo undoes commands until the stack depth is at most `target`. Used by
+// the Map Info dialog's Cancel button to revert any sky picks made during
+// the dialog session in one round-trip.
+func (a *App) UndoTo(target int) error {
+	return forge.Current.UndoTo(target)
+}
+
+// DiscardTo reverts commands above `target` AND drops them from history
+// entirely (no redo trail). Map Info Cancel uses this so a discarded picker
+// session leaves no breadcrumb in the undo/redo UI.
+func (a *App) DiscardTo(target int) error {
+	return forge.Current.DiscardTo(target)
 }
 
 // CanUndo / CanRedo report whether the corresponding action is currently

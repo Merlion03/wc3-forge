@@ -16,6 +16,8 @@ export function ClearSelection():Promise<main.SelectionDTO>;
 
 export function CloseMap():Promise<main.MapStatus>;
 
+export function DiscardTo(arg1:number):Promise<void>;
+
 export function EmitTestCommand(arg1:string):Promise<void>;
 
 export function EndUndoGroup():Promise<void>;
@@ -52,11 +54,15 @@ export function GetUnitTypeIndex():Promise<Record<string, main.UnitTypeInfo>>;
 
 export function HistoryList():Promise<forge.HistoryState>;
 
+export function HistoryUndoCount():Promise<number>;
+
 export function IsDirty():Promise<boolean>;
 
 export function LaunchInWC3():Promise<void>;
 
 export function ListDoodads():Promise<Array<main.DoodadDTO>>;
+
+export function ListSkyModels():Promise<Array<main.SkyModelOption>>;
 
 export function ListTilesets():Promise<Array<main.TilesetInfoDTO>>;
 
@@ -96,6 +102,8 @@ export function SetReforgedMode(arg1:boolean):Promise<boolean>;
 
 export function SetSelection(arg1:Array<main.SelectionItemDTO>):Promise<main.SelectionDTO>;
 
+export function SetSkyModel(arg1:string):Promise<string>;
+
 export function SetUnitAnimation(arg1:number,arg2:string):Promise<void>;
 
 export function Status():Promise<main.MapStatus>;
@@ -103,3 +111,5 @@ export function Status():Promise<main.MapStatus>;
 export function SwapTileset(arg1:main.SwapTilesetRequest):Promise<main.TerrainDTO>;
 
 export function Undo():Promise<void>;
+
+export function UndoTo(arg1:number):Promise<void>;

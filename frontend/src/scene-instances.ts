@@ -37,6 +37,8 @@ import {
 import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
 import { buildTerrain, type TerrainMesh } from './terrain'
 import { buildWater, type WaterMesh } from './water'
+import { buildSky, type SkyRenderer } from './sky'
+import { buildSkyGradient, type SkyGradient } from './sky-gradient'
 import { buildPathingOverlay, type PathingOverlay } from './pathing'
 import { createCamera, type RTSCamera } from './camera'
 import { computeCliffPlacements, renderCliffs, type CliffRendering } from './cliffs'
@@ -441,6 +443,17 @@ export interface SceneAPI {
    * their viewpoint).
    */
   loadMap(opts?: { keepCamera?: boolean }): Promise<void>
+  /**
+   * Rebuild the sky-model renderer using `path` (a normalized editor path
+   * like "environment/sky/.../....mdx", or "" to drop the dome entirely and
+   * fall through to the gradient backdrop). Disposes the prior sky cleanly
+   * before loading the new one. Idempotent on equal paths.
+   *
+   * Called by the Map Info → Sky picker after App.SetSkyModel so the user
+   * sees their pick immediately, without re-running loadMap() (which would
+   * rebuild terrain + every unit and doodad for what's a 1-mdx change).
+   */
+  reloadSky(path: string): Promise<void>
   /** Drop every instance we created. Models stay in the viewer cache. */
   clear(): void
   /** Stop the RAF loop and tear down listeners. */
@@ -666,6 +679,15 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   let terrain: TerrainMesh | null = null
   let water: WaterMesh | null = null
   let cliffs: CliffRendering | null = null
+  let sky: SkyRenderer | null = null
+  // Sky gradient is process-stable (doesn't depend on the map). Build once
+  // here; clearInstances doesn't touch it.
+  let skyGradient: SkyGradient | null = null
+  try {
+    skyGradient = buildSkyGradient((viewer as any).gl as WebGLRenderingContext, viewer as any)
+  } catch (e) {
+    flog('[sky-gradient] build failed:', e instanceof Error ? e.message : String(e))
+  }
   let slocRenderer: SlocRenderer | null = null
   let pathing: PathingOverlay | null = null
   // Pathing overlay visibility — toggled from the header pill. Default off
@@ -905,6 +927,18 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         gl.depthMask(true)
         gl.clearColor(bg[0], bg[1], bg[2], 1)
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+        // Sky stack:
+        //   1. Horizon gradient — always on, fills the void with our 3-stop
+        //      atmospheric backdrop. The flat bg clear above is redundant
+        //      once this draws but kept for the rare case the gradient
+        //      build failed (we still want SOMETHING in the framebuffer).
+        //   2. SetSkyModel mdx — if a script call resolved a path. Renders
+        //      ON TOP of the gradient so an authored sky still wins where
+        //      it covers pixels; gradient remains visible at the edges /
+        //      below the horizon for skies that are dome-only.
+        // Both passes leave depth state restored for terrain (next).
+        if (skyGradient) skyGradient.draw(scene)
+        if (sky) sky.draw(dtMs)
         if (terrain) terrain.draw(scene.camera.viewProjectionMatrix)
         // Cliffs render AFTER terrain (so terrain's depth buffer is up so cliff
         // back-faces clip correctly) but BEFORE viewer.render() (so MDX units
@@ -1243,6 +1277,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     if (pathing) {
       pathing.dispose()
       pathing = null
+    }
+    if (sky) {
+      sky.dispose()
+      sky = null
     }
   }
 
@@ -2118,10 +2156,49 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (!s || s.length < 3) return
       const inst = kind === 'unit' ? unitInstances.get(payload.id) : doodadInstances.get(payload.id)
       if (inst) applyScale(inst, s)
+    } else if (payload.field === 'sky_model' && kind === 'info') {
+      // Sky changed via undo/redo/discard (or any source — picker, MCP).
+      // The EntityChange payload doesn't carry a string, so refetch the
+      // resolved path and rebuild.
+      void reloadSkyFromGo()
     }
   })
 
+  async function reloadSkyFromGo() {
+    try {
+      const t = await GetTerrain()
+      const path = ((t as any)?.sky_model as string | undefined) ?? ''
+      if (sky) {
+        sky.dispose()
+        sky = null
+      }
+      if (path) {
+        const glLocal = (viewer as any).gl as WebGLRenderingContext
+        sky = await buildSky(glLocal, viewer as any, pathSolver, scene, path)
+      }
+    } catch (e) {
+      flog('[sky undo-refresh]', e instanceof Error ? e.message : String(e))
+    }
+  }
+
   return {
+    async reloadSky(path: string) {
+      if (sky) {
+        sky.dispose()
+        sky = null
+      }
+      if (path) {
+        try {
+          const glLocal = (viewer as any).gl as WebGLRenderingContext
+          sky = await buildSky(glLocal, viewer as any, pathSolver, scene, path)
+          if (sky) flog(`[sky] reloaded ${path}`)
+        } catch (e) {
+          flog('[sky reload]', e instanceof Error ? e.message : String(e))
+        }
+      } else {
+        flog('[sky] cleared (empty path → gradient only)')
+      }
+    },
     async loadMap(opts?: { keepCamera?: boolean }) {
       const keepCamera = !!opts?.keepCamera
       clearInstances()
@@ -2172,6 +2249,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         water = await buildWater(gl, viewer as any, pathSolver, t as unknown as any)
         if (water) {
           flog(`[water] ${water.triCount} triangles, ${water.frameCount} animation frames`)
+        }
+        // Sky dome — pulled from the resolved SkyModel path that Go shipped
+        // with the terrain payload (script SetSkyModel call wins; tileset
+        // default fallback). Empty string = no sky, flat clear remains.
+        const skyPath = (t as any).sky_model as string | undefined
+        if (skyPath) {
+          sky = await buildSky(gl, viewer as any, pathSolver, scene, skyPath)
+          if (sky) {
+            flog(`[sky] loaded ${skyPath} (${(t as any).sky_model_from_script ? 'script' : 'tileset default'})`)
+          }
         }
         // Pathing overlay. Built unconditionally so the toggle is
         // instant — the per-frame cost when invisible is one branch.

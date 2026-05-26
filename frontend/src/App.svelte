@@ -2016,7 +2016,11 @@
   <BridgeConsole bind:open={bridgeConsoleOpen} />
 
   {#if showMapInfoEditor}
-    <MapInfoEditor bind:open={showMapInfoEditor} onClose={closeMapInfoEditor} />
+    <MapInfoEditor
+      bind:open={showMapInfoEditor}
+      onClose={closeMapInfoEditor}
+      onSkyChanged={(path) => scene?.reloadSky(path)}
+    />
   {/if}
 
   {#if showObjectEditor}

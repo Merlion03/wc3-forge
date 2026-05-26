@@ -104,6 +104,38 @@ func (g *groupCmd) Affected(s *Session) []EntityChange {
 // restore both.
 // ---------------------------------------------------------------------------
 
+// setSkyModelCmd represents one picker-driven sky change. oldPath and newPath
+// are the pending-override pointer values BEFORE and AFTER the mutation:
+//   - nil      → no override (script's call wins, or gradient-only if absent)
+//   - non-nil  → explicit pending value (will commit to script on next Save)
+// Apply re-applies newPath; Revert restores oldPath. Both call into the lib's
+// non-recording setter so undo/redo doesn't pile new history entries on top
+// of each other.
+type setSkyModelCmd struct {
+	oldPath, newPath *string
+}
+
+func (c *setSkyModelCmd) Label() string { return "Change sky" }
+func (c *setSkyModelCmd) Apply(s *Session) error {
+	s.pendingSkyModel = clonePtr(c.newPath)
+	return nil
+}
+func (c *setSkyModelCmd) Revert(s *Session) error {
+	s.pendingSkyModel = clonePtr(c.oldPath)
+	return nil
+}
+func (c *setSkyModelCmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "info", ID: 0, Field: "sky_model"}}
+}
+
+func clonePtr(p *string) *string {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
 type moveUnitCmd struct {
 	cn             uint32
 	oldPos, newPos [3]float32
@@ -639,6 +671,86 @@ func (s *Session) CanRedo() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.redoStack) > 0 && s.groupDepth == 0
+}
+
+// HistoryUndoCount returns the current undo-stack depth. Used by modal
+// dialogs (Map Info Sky picker) to snapshot the depth at open-time and then
+// UndoTo that depth on Cancel — reverting any commands the dialog session
+// recorded without inventing a per-dialog group abstraction.
+func (s *Session) HistoryUndoCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.history)
+}
+
+// UndoTo undoes commands until the undo stack length is at most `target`.
+// No-op when the stack is already at or below target. Returns the first
+// error encountered (if any); successfully-undone commands stay reverted.
+//
+// Intended for modal "cancel reverts" flows where the dialog opened at
+// `target` and may have recorded N commands since. NOT a public undo API —
+// it can undo any commands recorded during the window, not just those from
+// one user surface; callers should ensure the only mutator during the
+// window is the one they're cancelling.
+func (s *Session) UndoTo(target int) error {
+	for {
+		s.mu.RLock()
+		n := len(s.history)
+		s.mu.RUnlock()
+		if n <= target {
+			return nil
+		}
+		if err := s.Undo(); err != nil {
+			return err
+		}
+	}
+}
+
+// DiscardTo reverts commands above `target` AND removes them from history
+// entirely — neither the undo stack nor the redo stack retains them. Use
+// for "cancel reverts" semantics where the user expects the dialog session
+// to vanish, not just be reversible. Mirrors UndoTo's loop but pops without
+// pushing to redo.
+//
+// Fires entity-changed events for each reverted command so the UI repaints,
+// and a single history-changed event at the end. Any sub-command Revert
+// failure stops the loop and returns the error; the partially-reverted
+// state is what the user sees.
+func (s *Session) DiscardTo(target int) error {
+	var anyReverted bool
+	for {
+		s.mu.Lock()
+		if len(s.history) <= target {
+			s.mu.Unlock()
+			if anyReverted {
+				s.notifyHistoryChanged()
+			}
+			return nil
+		}
+		cmd := s.history[len(s.history)-1]
+		s.history = s.history[:len(s.history)-1]
+		if err := cmd.Revert(s); err != nil {
+			// Restore stack ordering and bail. The cmd's state is partially
+			// reverted; that's the same compromise Undo() makes on Revert
+			// failure (it pushes back too).
+			s.history = append(s.history, cmd)
+			s.mu.Unlock()
+			if anyReverted {
+				s.notifyHistoryChanged()
+			}
+			return err
+		}
+		notifs := cmd.Affected(s)
+		// Defensive dirty mark — state changed in memory, may differ from disk.
+		// Save will recompute what to write.
+		s.dirtyUnits = true
+		s.dirtyDoodads = true
+		s.mu.Unlock()
+		for _, n := range notifs {
+			s.notifyEntityChanged(n)
+		}
+		anyReverted = true
+	}
 }
 
 // HistoryList returns a snapshot of both stacks for the UI to render.
