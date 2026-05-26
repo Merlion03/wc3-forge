@@ -248,6 +248,19 @@ func (a *App) OpenMapDialog() (string, error) {
 	})
 }
 
+// OpenMapFileDialog presents an OS file picker for packaged WC3 maps
+// (.w3x / .w3m / .mpq) and returns the selected file, or "" if cancelled.
+// MPQ-backed sessions are read-only — Save returns ErrMPQWriteNotImplemented.
+func (a *App) OpenMapFileDialog() (string, error) {
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select a Warcraft III map file",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Warcraft III maps (*.w3x; *.w3m; *.mpq)", Pattern: "*.w3x;*.w3m;*.mpq"},
+			{DisplayName: "All files (*.*)", Pattern: "*.*"},
+		},
+	})
+}
+
 // MapStatus mirrors the wire shape used by map.status / bridge.ping.
 type MapStatus struct {
 	Loaded    bool   `json:"loaded"`

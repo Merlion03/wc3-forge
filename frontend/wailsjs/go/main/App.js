@@ -158,6 +158,10 @@ export function OpenMapDialog() {
   return window['go']['main']['App']['OpenMapDialog']();
 }
 
+export function OpenMapFileDialog() {
+  return window['go']['main']['App']['OpenMapFileDialog']();
+}
+
 export function Redo() {
   return window['go']['main']['App']['Redo']();
 }

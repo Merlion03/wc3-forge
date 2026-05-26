@@ -3,7 +3,7 @@
 
   import { onMount, onDestroy } from 'svelte'
   import {
-    OpenMapDialog, OpenMap, CloseMap, ListUnits, ListDoodads, Status,
+    OpenMapDialog, OpenMapFileDialog, OpenMap, CloseMap, ListUnits, ListDoodads, Status,
     GetSelection, SetSelection, GetUnit,
     GetReforgedMode, SetReforgedMode,
     GetUnitTypeIndex, GetDoodadTypeIndex,
@@ -989,6 +989,20 @@
     }
   }
 
+  async function pickAndOpenFile() {
+    busy = true
+    try {
+      const path = await OpenMapFileDialog()
+      if (!path) { busy = false; return }
+      status = await OpenMap(path)
+      await reloadMap()
+    } catch (e) {
+      showToast('open failed: ' + String(e), 'error')
+    } finally {
+      busy = false
+    }
+  }
+
   async function reloadMap(opts?: { keepCamera?: boolean }) {
     units = await ListUnits()
     doodads = await ListDoodads()
@@ -1443,8 +1457,19 @@
         {/snippet}
       </DropdownMenu.Trigger>
       <DropdownMenu.Content class="min-w-[220px]" align="start">
-        <DropdownMenu.Item onSelect={runMenuAction(pickAndOpen)} disabled={busy}>
-          <span class="flex-1">Open Map…</span>
+        <DropdownMenu.Item
+          onSelect={runMenuAction(pickAndOpen)}
+          disabled={busy}
+          title="Open an extracted .w3x folder (editable)."
+        >
+          <span class="flex-1">Open Map Folder…</span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Item
+          onSelect={runMenuAction(pickAndOpenFile)}
+          disabled={busy}
+          title="Open a packaged .w3x / .w3m / .mpq archive (read-only; Save is disabled)."
+        >
+          <span class="flex-1">Open Map File…</span>
         </DropdownMenu.Item>
         <DropdownMenu.Item
           onSelect={runMenuAction(doSave)}

@@ -84,6 +84,8 @@ export function OpenMap(arg1:string):Promise<main.MapStatus>;
 
 export function OpenMapDialog():Promise<string>;
 
+export function OpenMapFileDialog():Promise<string>;
+
 export function Redo():Promise<void>;
 
 export function RotateDoodad(arg1:number,arg2:number):Promise<void>;
