@@ -1563,7 +1563,7 @@
         class="bg-emerald-600 font-semibold text-white hover:bg-emerald-700 disabled:bg-muted disabled:text-muted-foreground"
         title={testMapTooltip}
       >
-        ▶ Test Map
+        ▶ Play
       </Button>
     </div>
   </header>
