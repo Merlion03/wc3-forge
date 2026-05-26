@@ -23,6 +23,7 @@
   import ViewMenu from './ViewMenu.svelte'
   import AssetPreview from './AssetPreview.svelte'
   import MapInfoEditor from './MapInfoEditor.svelte'
+  import GameplayConstantsEditor from './GameplayConstantsEditor.svelte'
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
   import { showToast } from './toast'
@@ -181,6 +182,19 @@
   }
   function closeMapInfoEditor() {
     showMapInfoEditor = false
+  }
+
+  // ----- Gameplay Constants Editor modal -----
+  // Same lifecycle pattern as MapInfoEditor: conditional mount keeps the
+  // global keydown + focus-trap listeners scoped to when the modal is
+  // actually visible.
+  let showGameplayConstantsEditor: boolean = $state(false)
+  function openGameplayConstantsEditor() {
+    if (!status.loaded) return
+    showGameplayConstantsEditor = true
+  }
+  function closeGameplayConstantsEditor() {
+    showGameplayConstantsEditor = false
   }
 
   // ----- Minimap overlay (bottom-right of viewport) -----
@@ -1400,6 +1414,13 @@
           <span class="flex-1">Map Info…</span>
           <DropdownMenu.Shortcut>Ctrl+Shift+I</DropdownMenu.Shortcut>
         </DropdownMenu.Item>
+        <DropdownMenu.Item
+          onSelect={runMenuAction(openGameplayConstantsEditor)}
+          disabled={!status.loaded}
+          title="Edit per-map gameplay constants (war3mapMisc.txt)."
+        >
+          <span class="flex-1">Gameplay Constants…</span>
+        </DropdownMenu.Item>
         <DropdownMenu.Separator />
         <DropdownMenu.Item onSelect={runMenuAction(close)} disabled={!status.loaded || busy}>
           <span class="flex-1">Close</span>
@@ -1910,6 +1931,13 @@
 
   {#if showMapInfoEditor}
     <MapInfoEditor bind:open={showMapInfoEditor} onClose={closeMapInfoEditor} />
+  {/if}
+
+  {#if showGameplayConstantsEditor}
+    <GameplayConstantsEditor
+      bind:open={showGameplayConstantsEditor}
+      onClose={closeGameplayConstantsEditor}
+    />
   {/if}
 
   <!-- Unsaved-changes confirmation. Driven by the wc3-forge:close-requested

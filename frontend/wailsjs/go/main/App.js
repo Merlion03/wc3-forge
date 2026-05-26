@@ -34,6 +34,14 @@ export function ForceQuit() {
   return window['go']['main']['App']['ForceQuit']();
 }
 
+export function GameplayConstantsApply(arg1) {
+  return window['go']['main']['App']['GameplayConstantsApply'](arg1);
+}
+
+export function GameplayConstantsGet() {
+  return window['go']['main']['App']['GameplayConstantsGet']();
+}
+
 export function GetBridgeInfo() {
   return window['go']['main']['App']['GetBridgeInfo']();
 }

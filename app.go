@@ -10,6 +10,7 @@ import (
 
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/miscdata"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 	"github.com/StephenSHorton/wc3-forge/internal/wc3launch"
@@ -1277,5 +1278,101 @@ func (a *App) MapInfoApply(updates map[string]any) error {
 	}
 	return forge.Current.MutateInfo(func(info *w3i.Info) {
 		forge.ApplyInfoUpdates(info, updates)
+	})
+}
+
+// GameplayConstantRow is the JSON-friendly shape for one row in the
+// Gameplay Constants Editor. Carries the section the row belongs to (only
+// [Misc] in practice today) and the raw value as stored in war3mapMisc.txt
+// — for list-valued constants like DamageBonusNormal, that's the
+// comma-separated value verbatim ("1.00,2.00,1.00,...").
+type GameplayConstantRow struct {
+	Section string `json:"section"`
+	Key     string `json:"key"`
+	Value   string `json:"value"`
+}
+
+// GameplayConstantsGet returns the per-map gameplay-constants overrides
+// currently in memory (parsed from war3mapMisc.txt at Open, plus any
+// pending edits). Returns an empty slice (not an error) for maps that
+// don't ship any overrides — the editor lets the user add new ones from
+// there.
+//
+// Returns an error only when no map is loaded; the dialog gates open on
+// IsLoaded() so this is a programmer-error path, not a normal flow.
+func (a *App) GameplayConstantsGet() ([]GameplayConstantRow, error) {
+	if !forge.Current.IsLoaded() {
+		return nil, fmt.Errorf("no map loaded")
+	}
+	g := forge.Current.Gameplay()
+	if g == nil {
+		return []GameplayConstantRow{}, nil
+	}
+	out := make([]GameplayConstantRow, 0, 32)
+	for _, s := range g.Sections {
+		if s == nil {
+			continue
+		}
+		for _, e := range s.Entries {
+			if e == nil || e.Key == "" {
+				continue
+			}
+			out = append(out, GameplayConstantRow{
+				Section: s.Name,
+				Key:     e.Key,
+				Value:   e.Value,
+			})
+		}
+	}
+	return out, nil
+}
+
+// GameplayConstantsApply replaces the in-memory war3mapMisc.txt with a new
+// row set. The dialog's commit path sends the FULL post-edit row list (not
+// a diff) — the file is small and a snapshot replace is simpler than
+// diffing, while still letting the user freely add/edit/delete rows
+// without any binding-side state.
+//
+// Rows are written in the order received, so the editor's row order is
+// what ends up on disk. An empty `rows` slice clears all overrides
+// (leaving an empty [Misc] section on save).
+//
+// Returns the MutateGameplay error (e.g. no map loaded).
+func (a *App) GameplayConstantsApply(rows []GameplayConstantRow) error {
+	return forge.Current.MutateGameplay(func(f *miscdata.File) {
+		// Replace contents wholesale. Group rows by section, preserving
+		// first-seen order so the UI's order survives the round-trip.
+		f.Sections = f.Sections[:0]
+		sectionsByName := map[string]*miscdata.Section{}
+		var order []string
+		for _, r := range rows {
+			section := strings.TrimSpace(r.Section)
+			if section == "" {
+				section = "Misc"
+			}
+			key := strings.TrimSpace(r.Key)
+			if key == "" {
+				continue
+			}
+			s, ok := sectionsByName[section]
+			if !ok {
+				s = &miscdata.Section{Name: section}
+				sectionsByName[section] = s
+				order = append(order, section)
+			}
+			s.Entries = append(s.Entries, &miscdata.Entry{
+				Key:   key,
+				Value: r.Value,
+			})
+		}
+		for _, name := range order {
+			f.Sections = append(f.Sections, sectionsByName[name])
+		}
+		// Always guarantee a [Misc] section exists so a re-Get from the
+		// editor shows the canonical structure even when the user cleared
+		// every row.
+		if _, ok := sectionsByName["Misc"]; !ok {
+			f.Sections = append(f.Sections, &miscdata.Section{Name: "Misc"})
+		}
 	})
 }
