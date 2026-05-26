@@ -937,11 +937,15 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // Drawn LAST before the gizmo so the wireframe sits visually on top
         // of every other layer including water.
         if (cellHighlight) cellHighlight.draw(scene.camera.viewProjectionMatrix)
-        // Transform gizmo — Phase B move-only 3-axis arrows. Drawn LAST of
-        // all overlays. Always-on-top via gl.disable(DEPTH_TEST) in draw().
-        // Only draws when selection is non-empty. Passes the camera eye position
-        // (from our RTSCamera controller's getEye()) for fixed-screen-space scaling.
-        if (gizmo && gizmoSelectionItems.length > 0) {
+        // Transform gizmo — drawn LAST of all overlays. Always-on-top via
+        // gl.disable(DEPTH_TEST) in draw(). Always invoked (the gate used to
+        // be `gizmoSelectionItems.length > 0`) so that when selection clears,
+        // the gizmo's internal lastVisible/lastOrigin state gets cleared too —
+        // otherwise getMoveArrowTips() returns stale data and the X/Y/Z
+        // labels float at the previously-selected entity's position even
+        // though the gizmo itself isn't drawn. draw() short-circuits on
+        // empty selection internally (computeOrigin returns null → return).
+        if (gizmo) {
           gizmo.draw(
             (viewer as any).gl as WebGLRenderingContext,
             viewer, scene, canvas,
