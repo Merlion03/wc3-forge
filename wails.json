@@ -11,6 +11,7 @@
     "email": "4stephenhorton@gmail.com"
   },
   "postBuildHooks": {
-    "windows/*": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/postbuild-copy-dlls.ps1 ${bin}"
+    "windows/*": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/postbuild-copy-dlls.ps1 ${bin}",
+    "darwin/*": "bash ../../scripts/postbuild-copy-dylib.sh ${bin}"
   }
 }

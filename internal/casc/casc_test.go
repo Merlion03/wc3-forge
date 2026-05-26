@@ -2,12 +2,24 @@ package casc
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"unsafe"
+
+	"github.com/ebitengine/purego"
 )
 
-const wc3InstallDefault = `C:\Program Files (x86)\Warcraft III`
+// wc3InstallDefault is the canonical install root for the current OS. The
+// tests skip when nothing's found there (a fresh dev machine without WC3
+// is a normal state) — set WC3FORGE_WC3_PATH to override.
+var wc3InstallDefault = func() string {
+	if runtime.GOOS == "windows" {
+		return `C:\Program Files (x86)\Warcraft III`
+	}
+	return "/Applications/Warcraft III"
+}()
 
 func wc3InstallPath(t *testing.T) string {
 	t.Helper()
@@ -15,7 +27,9 @@ func wc3InstallPath(t *testing.T) string {
 	if p == "" {
 		p = wc3InstallDefault
 	}
-	if _, err := os.Stat(p + `\.build.info`); err != nil {
+	// .build.info is what CascLib looks for to recognize a CASC root; if
+	// it's missing, the test wouldn't get past Open anyway.
+	if _, err := os.Stat(filepath.Join(p, ".build.info")); err != nil {
 		t.Skipf("WC3 install not found at %q (set WC3FORGE_WC3_PATH to override)", p)
 	}
 	return p
@@ -39,10 +53,22 @@ func TestEnumerate(t *testing.T) {
 	}
 	defer s.Close()
 
-	dllOnce.Do(loadDLL)
-	procFindFirst := dll.NewProc("CascFindFirstFile")
-	procFindNext := dll.NewProc("CascFindNextFile")
-	procFindClose := dll.NewProc("CascFindClose")
+	// Enumeration isn't part of casc.go's public surface — we don't need
+	// it at runtime, only here to spot-check CASC contents. Register the
+	// three Find* symbols on the fly against the same handle the package
+	// already opened.
+	libOnce.Do(loadLib)
+	if libErr != nil {
+		t.Fatalf("loadLib: %v", libErr)
+	}
+	var (
+		cascFindFirstFile func(hStorage uintptr, szMask uintptr, pFindData uintptr, szListFile uintptr) uintptr
+		cascFindNextFile  func(hFind uintptr, pFindData uintptr) bool
+		cascFindClose     func(hFind uintptr) bool
+	)
+	purego.RegisterLibFunc(&cascFindFirstFile, libHandle, "CascFindFirstFile")
+	purego.RegisterLibFunc(&cascFindNextFile, libHandle, "CascFindNextFile")
+	purego.RegisterLibFunc(&cascFindClose, libHandle, "CascFindClose")
 
 	// CASC_FIND_DATA from CascLib.h — 0x1108 bytes (4360). Most of that
 	// is szFileName[MAX_PATH=0x400] which we read as our result.
@@ -50,7 +76,7 @@ func TestEnumerate(t *testing.T) {
 	mask := append([]byte("*"), 0)
 	listfileName := append([]byte(""), 0)
 
-	hFind, _, _ := procFindFirst.Call(
+	hFind := cascFindFirstFile(
 		s.handle,
 		uintptr(unsafe.Pointer(&mask[0])),
 		uintptr(unsafe.Pointer(&data[0])),
@@ -59,7 +85,7 @@ func TestEnumerate(t *testing.T) {
 	if hFind == 0 || hFind == ^uintptr(0) {
 		t.Fatalf("CascFindFirstFile failed (handle=%x)", hFind)
 	}
-	defer procFindClose.Call(hFind)
+	defer cascFindClose(hFind)
 
 	count := 0
 	for {
@@ -75,8 +101,7 @@ func TestEnumerate(t *testing.T) {
 			t.Logf("... (capped at %d entries)", count)
 			break
 		}
-		r1, _, _ := procFindNext.Call(hFind, uintptr(unsafe.Pointer(&data[0])))
-		if r1 == 0 {
+		if !cascFindNextFile(hFind, uintptr(unsafe.Pointer(&data[0]))) {
 			break
 		}
 	}

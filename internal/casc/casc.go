@@ -3,14 +3,16 @@
 // The Blizzard CASC format is non-trivial — multi-stage indirection from
 // game-relative paths → content keys → encoding keys → archive offsets,
 // plus the BLTE block-level encoding inside each archive. Rather than
-// porting all of it to Go (a 2-3k LOC project), we call Ladislav Zezula's
-// battle-tested CascLib via Windows' LoadLibrary, the same trick HiveWE's
-// scripts use for StormLib. No cgo, no toolchain — just the DLL next to
-// the binary.
+// porting all of it to Go (a 2-3k LOC project), we dlopen Ladislav
+// Zezula's battle-tested CascLib (same library HiveWE's scripts use for
+// StormLib).
 //
-// CascLib.dll must be present in the executable's directory (or anywhere
-// on the DLL search path). The official vcpkg-built copy lives in this
-// project's scripts/casclib/ for convenience.
+// We load via purego, not cgo: no toolchain needed at build time, and the
+// same code works on Windows (CascLib.dll) and macOS (libcasc.dylib). The
+// library must sit next to the executable, or anywhere on the OS's
+// dynamic loader search path. The project's scripts/casclib/ holds the
+// vendored Windows binaries; the macOS .dylib is built on demand by
+// scripts/build-casclib-macos.sh and is .gitignored.
 //
 // Thread-safety: a single Storage's operations are serialised by a mutex.
 // CascLib's storage handle is shared across reads internally; we keep
@@ -23,11 +25,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"unsafe"
+
+	"github.com/ebitengine/purego"
 )
 
-// Tiny indirection so locateDLL stays readable without importing
+// Tiny indirection so locateLib stays readable without importing
 // "os"+"path/filepath" in three places.
 var (
 	osExecutable = os.Executable
@@ -36,69 +39,103 @@ var (
 	filepathDir  = filepath.Dir
 )
 
-var (
-	dllOnce          sync.Once
-	dllErr           error
-	dll              *syscall.LazyDLL
-	procOpenStorage  *syscall.LazyProc
-	procCloseStorage *syscall.LazyProc
-	procOpenFile     *syscall.LazyProc
-	procCloseFile    *syscall.LazyProc
-	procReadFile     *syscall.LazyProc
-	procGetFileSize  *syscall.LazyProc
-
-	// Find* are used by ListByPrefix; loaded lazily on first call since most
-	// wc3-forge sessions never enumerate the storage and the symbols add to
-	// startup load time.
-	findLoadOnce      sync.Once
-	procFindFirstFile *syscall.LazyProc
-	procFindNextFile  *syscall.LazyProc
-	procFindClose     *syscall.LazyProc
-)
-
 // DLLPath, if non-empty, overrides the auto-locate. Set this before any
-// Open call to point at a specific CascLib.dll (e.g. for tests).
+// Open call to point at a specific CascLib library (e.g. for tests).
+// Despite the name, this is the path to the shared library on any OS —
+// CascLib.dll on Windows, libcasc.dylib on macOS.
 var DLLPath string
 
-func loadDLL() {
-	dllPath := DLLPath
-	if dllPath == "" {
-		dllPath = locateDLL()
+// CascLib symbols are loaded once at process startup via purego. Function
+// vars are assigned by RegisterLibFunc in loadLib; subsequent calls dispatch
+// through them. All path arguments are uintptr — the caller does the
+// platform-appropriate string conversion (UTF-16 on Windows, NUL-terminated
+// UTF-8/ASCII on macOS) before passing the pointer in.
+var (
+	libOnce   sync.Once
+	libErr    error
+	libHandle uintptr // exposed for in-package tests that need to look up rare CascLib symbols (e.g. enumeration) we don't surface as part of the public API.
+
+	// IMPORTANT: every parameter through which CascLib writes back into Go
+	// memory (handles, sizes, byte counts, the read buffer, the find-data
+	// struct) MUST be a typed pointer (*T / unsafe.Pointer), NOT uintptr.
+	// purego only keeps pointer-kind args alive across the foreign call
+	// (func.go addValue stores v.Pointer() in the live args slice); a
+	// `uintptr(unsafe.Pointer(&x))` arg is treated as a plain integer, so the
+	// compiler may keep `x` in a register and never reload CascLib's
+	// write-back — yielding garbage handles/sizes that fail flakily depending
+	// on optimization + GC timing. (This was the macOS "storage closed"/
+	// "CascGetFileSize64 failed" flake and the Windows empty-texture
+	// regression.) Opaque handles we only pass IN (hStorage/hFile/hFind) stay
+	// uintptr.
+	cascOpenStorage  func(szParams uintptr, dwLocaleMask uint32, phStorage *uintptr) bool
+	cascCloseStorage func(hStorage uintptr) bool
+	cascOpenFile     func(hStorage uintptr, pvFileName unsafe.Pointer, dwLocaleFlags uint32, dwOpenFlags uint32, phFile *uintptr) bool
+	cascCloseFile    func(hFile uintptr) bool
+	cascReadFile     func(hFile uintptr, lpBuffer unsafe.Pointer, dwToRead uint32, pdwRead *uint32) bool
+	cascGetFileSize  func(hFile uintptr, pSize *uint64) bool
+
+	// CASC enumeration (CascFindFirstFile/NextFile/Close), backing
+	// ListByPrefix. Returns an opaque find HANDLE; pFindData is an out-param
+	// CASC_FIND_DATA struct CascLib fills, so it's unsafe.Pointer (pinned).
+	cascFindFirstFile func(hStorage uintptr, szMask unsafe.Pointer, pFindData unsafe.Pointer, szListFile unsafe.Pointer) uintptr
+	cascFindNextFile  func(hFind uintptr, pFindData unsafe.Pointer) bool
+	cascFindClose     func(hFind uintptr) bool
+)
+
+func loadLib() {
+	path := DLLPath
+	if path == "" {
+		path = locateLib()
 	}
-	dll = syscall.NewLazyDLL(dllPath)
-	procOpenStorage = dll.NewProc("CascOpenStorage")
-	procCloseStorage = dll.NewProc("CascCloseStorage")
+	handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+	if err != nil {
+		libErr = fmt.Errorf("dlopen %s: %w", path, err)
+		return
+	}
+	libHandle = handle
 	// CascLib was built with _UNICODE on Windows. The lowercase symbol
 	// CascOpenFile is the ASCII variant (CascOpenFileW would be wide).
 	// File names within CASC are conventionally lowercase ASCII so we use
 	// the narrow flavour to avoid UTF-16 conversion per call.
-	procOpenFile = dll.NewProc("CascOpenFile")
-	procCloseFile = dll.NewProc("CascCloseFile")
-	procReadFile = dll.NewProc("CascReadFile")
+	//
+	// On macOS, names are not decorated (no W/A suffix); the symbols come
+	// out as plain CascOpenFile etc., matching what RegisterLibFunc looks
+	// up below.
+	purego.RegisterLibFunc(&cascOpenStorage, handle, "CascOpenStorage")
+	purego.RegisterLibFunc(&cascCloseStorage, handle, "CascCloseStorage")
+	purego.RegisterLibFunc(&cascOpenFile, handle, "CascOpenFile")
+	purego.RegisterLibFunc(&cascCloseFile, handle, "CascCloseFile")
+	purego.RegisterLibFunc(&cascReadFile, handle, "CascReadFile")
 	// Use the 64-bit size variant; the 32-bit CascGetFileSize is the
 	// legacy entry point and on this vcpkg build it returns
 	// INVALID_FILE_SIZE for valid files (no Win32 error set).
-	procGetFileSize = dll.NewProc("CascGetFileSize64")
-	// Probe Load to surface a clear error before any Open call.
-	dllErr = dll.Load()
+	purego.RegisterLibFunc(&cascGetFileSize, handle, "CascGetFileSize64")
+	// Enumeration symbols for ListByPrefix. Core CascLib API, always present
+	// in our vendored builds; registered up front (cheap) rather than lazily.
+	purego.RegisterLibFunc(&cascFindFirstFile, handle, "CascFindFirstFile")
+	purego.RegisterLibFunc(&cascFindNextFile, handle, "CascFindNextFile")
+	purego.RegisterLibFunc(&cascFindClose, handle, "CascFindClose")
 }
 
-// locateDLL searches a few standard places for CascLib.dll. Production
-// wc3-forge ships it alongside the executable; this helper also covers
-// `go test` (where the test binary lives in a temp dir) by walking up to
-// the repo's scripts/casclib/ for development convenience.
-func locateDLL() string {
-	const name = "CascLib.dll"
-	candidates := []string{name} // current dir / Windows DLL search path
+// locateLib searches a few standard places for the CASC shared library.
+// Production wc3-forge ships it alongside the executable; this helper also
+// covers `go test` (where the test binary lives in a temp dir) by walking
+// up to the repo's scripts/casclib/ for development convenience.
+//
+// libBaseName + the OS-specific filepath separator come from libname_*.go.
+func locateLib() string {
+	name := libFileName
+	sep := string(filepath.Separator)
+	candidates := []string{name} // current dir / OS loader search path
 
 	if exe, err := osExecutable(); err == nil {
-		candidates = append(candidates, filepathDir(exe)+"\\"+name)
+		candidates = append(candidates, filepathDir(exe)+sep+name)
 	}
 	if cwd, err := osGetwd(); err == nil {
-		// scripts/casclib/CascLib.dll relative to the project root.
+		// scripts/casclib/<libFileName> relative to the project root.
 		// Walk up a few levels because `go test` runs from the package dir.
 		for i, p := 0, cwd; i < 5; i, p = i+1, filepathDir(p) {
-			candidates = append(candidates, p+"\\scripts\\casclib\\"+name)
+			candidates = append(candidates, filepath.Join(p, "scripts", "casclib", name))
 		}
 	}
 
@@ -107,8 +144,8 @@ func locateDLL() string {
 			return c
 		}
 	}
-	// Fall through to the bare name and let Windows DLL search find it
-	// (or fail with a clear "not found" at first .Call()).
+	// Fall through to the bare name and let the OS loader find it
+	// (or fail with a clear "not found" at first call).
 	return name
 }
 
@@ -140,43 +177,42 @@ func (s *Storage) Reforged() bool {
 
 // Open returns a Storage for the install at the given path. The path
 // should be the install ROOT (the directory containing .build.info),
-// e.g. "C:\\Program Files (x86)\\Warcraft III". A CascLib product
-// suffix is appended automatically — `:w3` for the retail WC3 product.
-// Without the suffix, multi-product installs can open a storage handle
-// that returns 0 bytes for every file. CascLib's storage open is
-// expensive (scans the archive index files) — call once at startup,
-// reuse for the process lifetime, Close on shutdown.
+// e.g. "C:\\Program Files (x86)\\Warcraft III" or
+// "/Applications/Warcraft III". A CascLib product suffix is appended
+// automatically — `:w3` for the retail WC3 product. Without the suffix,
+// multi-product installs can open a storage handle that returns 0 bytes
+// for every file. CascLib's storage open is expensive (scans the archive
+// index files) — call once at startup, reuse for the process lifetime,
+// Close on shutdown.
 func Open(installPath string) (*Storage, error) {
-	dllOnce.Do(loadDLL)
-	if dllErr != nil {
-		return nil, fmt.Errorf("load CascLib.dll: %w", dllErr)
+	libOnce.Do(loadLib)
+	if libErr != nil {
+		return nil, fmt.Errorf("load CASC library: %w", libErr)
 	}
 
-	// CascOpenStorage(LPCTSTR) — TCHAR is wchar_t with _UNICODE.
 	// HiveWE passes the path WITH a trailing :w3 product specifier (e.g.
-	// "C:\\Program Files (x86)\\Warcraft III\\:w3"). The backslash is
-	// what their std::filesystem path-append produced; CascLib's parser
-	// understands the :<product> tail either way.
-	pathPtr, err := syscall.UTF16PtrFromString(installPath + `\:w3`)
+	// "C:\\Program Files (x86)\\Warcraft III\\:w3"). The separator before
+	// :w3 is what their std::filesystem path-append produced; CascLib's
+	// parser understands the :<product> tail either way. We use the
+	// platform-native separator so the path looks natural to the user
+	// in error messages.
+	fullPath := installPath + string(filepath.Separator) + ":w3"
+	pathPtr, free, err := encodeLibPath(fullPath)
 	if err != nil {
 		return nil, fmt.Errorf("convert path: %w", err)
 	}
+	defer free()
+
 	var handle uintptr
 	// IMPORTANT: dwLocaleMask = 0 means "NO locales accessible"; storage
 	// opens fine but every file read returns 0 bytes. CASC_LOCALE_ALL
 	// (0xFFFFFFFF) opens every locale. HiveWE's casc.ixx uses the same.
-	const cascLocaleAll = 0xFFFFFFFF
-	r1, _, _ := procOpenStorage.Call(
-		uintptr(unsafe.Pointer(pathPtr)),
-		uintptr(cascLocaleAll),
-		uintptr(unsafe.Pointer(&handle)),
-	)
-	if r1 == 0 {
-		// CascLib reports the cause through GetLastError. The Win32 error
-		// codes are CASC-specific in some cases (e.g. ERROR_FILE_CORRUPT
-		// when .build.info parsing fails); we surface the raw number plus
-		// path so the caller can diagnose.
-		return nil, fmt.Errorf("CascOpenStorage failed for %q (GetLastError=%d)", installPath, lastError())
+	const cascLocaleAll uint32 = 0xFFFFFFFF
+	if !cascOpenStorage(pathPtr, cascLocaleAll, &handle) {
+		// CascLib reports the cause through GetLastError (Windows) or
+		// errno (POSIX). We surface whichever the platform-specific
+		// lastError() returns plus the path so the caller can diagnose.
+		return nil, fmt.Errorf("CascOpenStorage failed for %q (err=%d)", installPath, lastError())
 	}
 	return &Storage{handle: handle}, nil
 }
@@ -188,10 +224,10 @@ func (s *Storage) Close() error {
 	if s.handle == 0 {
 		return nil
 	}
-	r1, _, _ := procCloseStorage.Call(s.handle)
+	ok := cascCloseStorage(s.handle)
 	s.handle = 0
-	if r1 == 0 {
-		return fmt.Errorf("CascCloseStorage failed (GetLastError=%d)", lastError())
+	if !ok {
+		return fmt.Errorf("CascCloseStorage failed (err=%d)", lastError())
 	}
 	return nil
 }
@@ -257,20 +293,6 @@ var hdCascPrefixes = []string{
 // Deprecated: use the Storage's reforged-aware ReadFile.
 var cascPrefixes = sdCascPrefixes
 
-// loadFindSymbols binds the CASC enumeration symbols on first use. Idempotent
-// + cheap when already loaded.
-func loadFindSymbols() {
-	findLoadOnce.Do(func() {
-		dllOnce.Do(loadDLL)
-		if dllErr != nil {
-			return
-		}
-		procFindFirstFile = dll.NewProc("CascFindFirstFile")
-		procFindNextFile = dll.NewProc("CascFindNextFile")
-		procFindClose = dll.NewProc("CascFindClose")
-	})
-}
-
 // ListByPrefix returns every CASC entry whose lowercased name starts with
 // prefix (forward-slash form). prefix MUST end with a "/" — e.g.
 // "replaceabletextures/commandbuttons/". The returned names are lowercased +
@@ -279,14 +301,14 @@ func loadFindSymbols() {
 // should cache the result.
 //
 // Returns an empty slice + nil error when no entries match; a real error
-// only when CASC enumeration fails outright (storage closed, missing
-// symbols on this build of CascLib).
+// only when CASC enumeration fails outright (storage closed, library load
+// failure).
 func (s *Storage) ListByPrefix(prefix string) ([]string, error) {
-	loadFindSymbols()
-	if dllErr != nil {
-		return nil, fmt.Errorf("load CASC library: %w", dllErr)
+	libOnce.Do(loadLib)
+	if libErr != nil {
+		return nil, fmt.Errorf("load CASC library: %w", libErr)
 	}
-	if procFindFirstFile == nil || procFindNextFile == nil || procFindClose == nil {
+	if cascFindFirstFile == nil || cascFindNextFile == nil || cascFindClose == nil {
 		return nil, fmt.Errorf("CASC enumeration symbols unavailable on this CascLib build")
 	}
 	s.mu.Lock()
@@ -296,23 +318,24 @@ func (s *Storage) ListByPrefix(prefix string) ([]string, error) {
 	}
 
 	// CASC_FIND_DATA layout from CascLib.h: 0x1108 bytes total. szFileName
-	// is at offset 0x18, MAX_PATH = 0x400 bytes wide.
+	// is at offset 0x18, MAX_PATH = 0x400 bytes wide. CascLib writes into
+	// this buffer, so it's passed as unsafe.Pointer (purego keeps it pinned;
+	// see the binding comment above).
 	var data [0x1108]byte
 	mask := append([]byte("*"), 0)
 	listfileName := append([]byte(""), 0)
-	hFindRet, _, _ := procFindFirstFile.Call(
+	hFind := cascFindFirstFile(
 		s.handle,
-		uintptr(unsafe.Pointer(&mask[0])),
-		uintptr(unsafe.Pointer(&data[0])),
-		uintptr(unsafe.Pointer(&listfileName[0])),
+		unsafe.Pointer(&mask[0]),
+		unsafe.Pointer(&data[0]),
+		unsafe.Pointer(&listfileName[0]),
 	)
-	hFind := hFindRet
 	if hFind == 0 || hFind == ^uintptr(0) {
 		// Empty storage or no listfile entries — treat as "no matches" rather
 		// than an error. CascLib doesn't distinguish these.
 		return nil, nil
 	}
-	defer procFindClose.Call(hFind)
+	defer cascFindClose(hFind)
 
 	prefixLC := strings.ToLower(prefix)
 	out := make([]string, 0, 256)
@@ -326,8 +349,7 @@ func (s *Storage) ListByPrefix(prefix string) ([]string, error) {
 		if strings.HasPrefix(lname, prefixLC) {
 			out = append(out, lname)
 		}
-		nextRet, _, _ := procFindNextFile.Call(hFind, uintptr(unsafe.Pointer(&data[0])))
-		if nextRet == 0 {
+		if !cascFindNextFile(hFind, unsafe.Pointer(&data[0])) {
 			break
 		}
 	}
@@ -348,6 +370,12 @@ func readCStringFromBuf(b []byte) string {
 
 // openOne does the raw open-read-close for a single fully-qualified
 // CASC path. Caller assembles the path.
+//
+// pvFileName is `const void *` in CascLib's signature; for string lookups
+// it's a null-terminated ASCII (or UTF-8) C-string regardless of OS —
+// even on Windows where the storage path uses TCHAR, file names are
+// narrow. So we always pass a UTF-8 byte slice here, not the platform-
+// specific encoded form.
 func (s *Storage) openOne(name string) ([]byte, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -355,35 +383,34 @@ func (s *Storage) openOne(name string) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("storage closed")
 	}
 
-	// CascOpenFile takes a const void* file name. For string lookups it's
-	// a null-terminated ASCII (or UTF-8) C-string. Empty + null terminator.
 	nameBytes := append([]byte(name), 0)
 
 	var fileHandle uintptr
-	r1, _, _ := procOpenFile.Call(
+	ok := cascOpenFile(
 		s.handle,
-		uintptr(unsafe.Pointer(&nameBytes[0])),
-		uintptr(0), // dwLocaleFlags
-		uintptr(0), // dwOpenFlags
-		uintptr(unsafe.Pointer(&fileHandle)),
+		unsafe.Pointer(&nameBytes[0]),
+		0, // dwLocaleFlags
+		0, // dwOpenFlags
+		&fileHandle,
 	)
-	if r1 == 0 {
+	if !ok {
 		// ERROR_FILE_NOT_FOUND (2) and ERROR_PATH_NOT_FOUND (3) are the
-		// common "not in CASC" cases. Anything else is unexpected and
-		// worth surfacing.
+		// common "not in CASC" cases on Windows; ENOENT (2) on POSIX
+		// collapses to the same numeric value. Anything else is
+		// unexpected and worth surfacing.
 		errno := lastError()
 		if errno == 2 || errno == 3 {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("CascOpenFile(%q) failed (GetLastError=%d)", name, errno)
+		return nil, false, fmt.Errorf("CascOpenFile(%q) failed (err=%d)", name, errno)
 	}
-	defer procCloseFile.Call(fileHandle)
+	defer cascCloseFile(fileHandle)
 
 	// CascGetFileSize64 takes an out-param uint64*. Bool return.
 	var size64 uint64
-	r1, _, _ = procGetFileSize.Call(fileHandle, uintptr(unsafe.Pointer(&size64)))
-	if r1 == 0 {
-		return nil, false, fmt.Errorf("CascGetFileSize64 failed for %q (GetLastError=%d)", name, lastError())
+	ok = cascGetFileSize(fileHandle, &size64)
+	if !ok {
+		return nil, false, fmt.Errorf("CascGetFileSize64 failed for %q (err=%d)", name, lastError())
 	}
 	if size64 == 0 {
 		return []byte{}, true, nil
@@ -398,25 +425,14 @@ func (s *Storage) openOne(name string) ([]byte, bool, error) {
 
 	buf := make([]byte, size)
 	var bytesRead uint32
-	r1, _, _ = procReadFile.Call(
+	ok = cascReadFile(
 		fileHandle,
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(size),
-		uintptr(unsafe.Pointer(&bytesRead)),
+		unsafe.Pointer(&buf[0]),
+		size,
+		&bytesRead,
 	)
-	if r1 == 0 {
-		return nil, false, fmt.Errorf("CascReadFile(%q) failed (GetLastError=%d)", name, lastError())
+	if !ok {
+		return nil, false, fmt.Errorf("CascReadFile(%q) failed (err=%d)", name, lastError())
 	}
 	return buf[:bytesRead], true, nil
-}
-
-func lastError() uint32 {
-	// syscall.GetLastError returns a Go error; we want the raw Win32 code.
-	// On Windows, errno is the LastError DWORD.
-	if e := syscall.GetLastError(); e != nil {
-		if errno, ok := e.(syscall.Errno); ok {
-			return uint32(errno)
-		}
-	}
-	return 0
 }
