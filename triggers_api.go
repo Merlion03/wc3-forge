@@ -114,7 +114,11 @@ func (a *App) GetTrigger(id int32) (*TriggerDetailDTO, error) {
 	}
 	for i := range t.Triggers {
 		if t.Triggers[i].ID == id {
-			return &TriggerDetailDTO{Kind: triggerKindMain(t.Triggers[i]), Trigger: &t.Triggers[i]}, nil
+			// Match MCP triggers.get: enrich Parameter.ResolvedDisplay with
+			// resolved unit/destructible names. Deep-copies the trigger so
+			// the cached struct stays byte-faithful for Phase 2a's encoder.
+			enriched := forge.EnrichTriggerWithResolvedNames(forge.Current, &t.Triggers[i])
+			return &TriggerDetailDTO{Kind: triggerKindMain(t.Triggers[i]), Trigger: enriched}, nil
 		}
 	}
 	for i := range t.Variables {

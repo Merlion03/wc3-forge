@@ -80,6 +80,17 @@ type Parameter struct {
 	Unknown         uint32     `json:"unknown,omitempty"` // sub_version 7 only, when HasSubParameter
 	IsArray         bool       `json:"is_array,omitempty"`
 	ArrayIndex      *Parameter `json:"array_index,omitempty"`
+
+	// ResolvedDisplay is a UI-only enrichment set by the Session layer's
+	// triggers.get path — never read by Parse and never written by Encode.
+	// Carries the human-readable display string for codegen-generated
+	// references like gg_unit_Hpal_0001 → "Paladin (1)". Empty when Value
+	// is not a recognized entity reference or the entity can't be found.
+	//
+	// MUST stay out of the byte-level round-trip path: Phase 2a's Encode
+	// reads Value verbatim. This field is allowed to lag/desync after a
+	// session mutates the underlying entity (the next triggers.get re-resolves).
+	ResolvedDisplay string `json:"resolved_display,omitempty"`
 }
 
 // ECA is a single Event / Condition / Action / Call row inside a trigger.

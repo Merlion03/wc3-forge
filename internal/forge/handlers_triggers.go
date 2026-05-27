@@ -203,7 +203,13 @@ func handleTriggersGet(params json.RawMessage) (any, error) {
 	}
 	for i := range t.Triggers {
 		if t.Triggers[i].ID == p.ID {
-			return TriggerDetail{Kind: triggerKind(t.Triggers[i]), Trigger: &t.Triggers[i]}, nil
+			// Enrich every Parameter.ResolvedDisplay with the human-readable
+			// name for gg_unit_/gg_dest_ references before returning. Deep
+			// copies so the cached *wtg.Triggers stays byte-faithful for
+			// Phase 2a's encoder. enrichTriggerWithResolvedNames is a
+			// no-op when the trigger has no ECAs (script + comment kinds).
+			enriched := enrichTriggerWithResolvedNames(Current, &t.Triggers[i])
+			return TriggerDetail{Kind: triggerKind(t.Triggers[i]), Trigger: enriched}, nil
 		}
 	}
 	for i := range t.Variables {
