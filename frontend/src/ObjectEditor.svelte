@@ -31,6 +31,7 @@
   import { Button } from '$lib/components/ui/button'
   import { loadIconURL } from './icon-loader'
   import AssetPreview from './AssetPreview.svelte'
+  import { parseWC3Color } from './wc3color'
 
   let {
     open = $bindable(false),
@@ -426,6 +427,25 @@
     return out
   })
 
+  // Field IDs currently in edit-mode (focused input). Display-mode renders
+  // colored segments via wc3color; edit-mode flips to a raw <input> so the
+  // user can see + modify the literal |cAARRGGBB ... |r codes. Using a Set
+  // keyed by metadata FourCC because the underlying object can re-render
+  // (e.g. on entity-changed) without losing focus state.
+  let editingFields: Set<string> = $state(new Set())
+
+  function startEdit(id: string) {
+    if (editingFields.has(id)) return
+    editingFields = new Set([...editingFields, id])
+  }
+
+  function stopEdit(id: string) {
+    if (!editingFields.has(id)) return
+    const next = new Set(editingFields)
+    next.delete(id)
+    editingFields = next
+  }
+
   function inputTypeFor(t: string): 'bool' | 'int' | 'real' | 'text' {
     switch (t) {
       case 'bool':
@@ -733,21 +753,45 @@
                                 if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
                               }}
                             />
-                          {:else}
+                          {:else if editingFields.has(f.id)}
                             <input
                               type="text"
                               class="oe-edit w-full bg-background border border-border rounded px-1.5 py-0.5 text-xs font-mono"
                               value={f.value}
-                              onblur={(e) =>
+                              autofocus
+                              onblur={(e) => {
                                 commitField(
                                   f,
                                   (e.currentTarget as HTMLInputElement).value,
                                 )
-                              }
+                                stopEdit(f.id)
+                              }}
                               onkeydown={(e) => {
                                 if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
+                                else if (e.key === 'Escape') stopEdit(f.id)
                               }}
                             />
+                          {:else}
+                            <!-- Display mode: render WC3 color codes as inline
+                                 colored spans (parser preserves segment
+                                 boundaries even for unterminated |c). Click
+                                 to enter edit mode, which flips to a raw
+                                 input so the user can edit the codes. -->
+                            <button
+                              type="button"
+                              class="oe-edit oe-display w-full text-left bg-background border border-transparent rounded px-1.5 py-0.5 text-xs font-mono hover:border-border"
+                              onclick={() => startEdit(f.id)}
+                              title={f.value}
+                            >
+                              {#if f.value}
+                                {#each parseWC3Color(f.display_raw || f.display || f.value) as seg, i (i)}
+                                  <span style={seg.color ? `color: ${seg.color}` : undefined}
+                                  >{seg.text}</span>
+                                {/each}
+                              {:else}
+                                <span class="text-muted-foreground">—</span>
+                              {/if}
+                            </button>
                           {/if}
                         </td>
                       </tr>

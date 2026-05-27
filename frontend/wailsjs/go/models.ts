@@ -523,12 +523,13 @@ export namespace main {
 	    type: string;
 	    value: string;
 	    display: string;
+	    display_raw: string;
 	    overridden: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new UnitObjectField(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -538,6 +539,7 @@ export namespace main {
 	        this.type = source["type"];
 	        this.value = source["value"];
 	        this.display = source["display"];
+	        this.display_raw = source["display_raw"];
 	        this.overridden = source["overridden"];
 	    }
 	}

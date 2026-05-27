@@ -1517,7 +1517,11 @@ type UnitObjectField struct {
 	Type        string `json:"type"`
 	Value       string `json:"value"`
 	Display     string `json:"display"`
-	Overridden  bool   `json:"overridden"`
+	// DisplayRaw is the resolved value with WC3 color codes preserved
+	// (|cAARRGGBB ... |r). Frontend renders this through wc3color.ts for
+	// inline-colored display while keeping Display as the stripped fallback.
+	DisplayRaw string `json:"display_raw"`
+	Overridden bool   `json:"overridden"`
 }
 
 // UnitObjectDetail mirrors handlers_objects.go's objectsUnitsGetResult.

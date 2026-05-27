@@ -61,13 +61,30 @@ func resolveDisplay(raw string, mapStrings wts.Strings) string {
 	if raw == "" {
 		return ""
 	}
+	return strings.TrimSpace(wts.StripColorCodes(resolveDisplayKeepColors(raw, mapStrings)))
+}
+
+// resolveDisplayKeepColors performs the same TRIGSTR_*/WESTRING_* deref
+// resolveDisplay does, but leaves inline WC3 color codes (|cAARRGGBB ... |r)
+// intact. The frontend's wc3color.ts parses those into colored segments for
+// inline rendering. Trims surrounding whitespace but otherwise keeps the
+// resolved string verbatim.
+//
+// Used by the Object Editor's field-table `display_raw` to give the UI the
+// information it needs to color tooltip text — units like the Orc Shadow
+// Hunter have names like "|cFFFFCC00Shadow|r Hunter" that should render with
+// the leading "Shadow" word in yellow.
+func resolveDisplayKeepColors(raw string, mapStrings wts.Strings) string {
+	if raw == "" {
+		return ""
+	}
 	v := raw
 	if strings.HasPrefix(v, "TRIGSTR_") {
-		v = mapStrings.Display(v)
+		v = mapStrings.Resolve(v)
 	} else if strings.HasPrefix(v, "WESTRING_") {
 		v = loadWES().Resolve(v)
 	}
-	return strings.TrimSpace(wts.StripColorCodes(v))
+	return strings.TrimSpace(v)
 }
 
 // titleRace turns the lowercase race tag in SLK ("human", "nightelf",
@@ -208,8 +225,13 @@ type objectsUnitsField struct {
 	Category    string `json:"category"`     // "stats" | "combat" | "text" | ...
 	Type        string `json:"type"`         // "int" | "string" | "bool" | ...
 	Value       string `json:"value"`        // raw cell value
-	Display     string `json:"display"`      // value with TRIGSTR/WESTRING/color codes resolved
-	Overridden  bool   `json:"overridden"`   // true if this came from the per-map shadow
+	Display     string `json:"display"`      // value with TRIGSTR/WESTRING resolved AND color codes stripped (legacy)
+	// DisplayRaw is the resolved value WITH inline WC3 color codes preserved
+	// (|cAARRGGBB ... |r). The client parses these for inline rendering. Always
+	// safe to fall back to Display when an old client doesn't know about this
+	// field. Empty when Value is empty.
+	DisplayRaw string `json:"display_raw"`
+	Overridden bool   `json:"overridden"`   // true if this came from the per-map shadow
 }
 
 type objectsUnitsGetResult struct {
@@ -355,6 +377,7 @@ func getObject(cfg *KindConfig, id string) (*objectsUnitsGetResult, error) {
 			Type:        f.Type,
 			Value:       val,
 			Display:     resolveDisplay(val, mapStrings),
+			DisplayRaw:  resolveDisplayKeepColors(val, mapStrings),
 			Overridden:  u.Overridden[col],
 		})
 	}
