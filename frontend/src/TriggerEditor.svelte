@@ -29,6 +29,7 @@
     type TriggerFunctionMeta,
     type TriggerFunctionsMeta,
   } from './trigger-editor-bindings'
+  import { parseWC3Color } from './wc3color'
   import * as Dialog from '$lib/components/ui/dialog'
 
   let {
@@ -350,6 +351,41 @@
     return out.join('\n')
   }
 
+  // renderColoredLabel converts an ECA label string with embedded WC3 color
+  // codes (|cAARRGGBB…|r) into HTML with one <span> per color run. Pure-text
+  // labels (no |c tokens) round-trip as a single HTML-escaped span — the
+  // overhead is one parseWC3Color call per visible row, which is negligible
+  // versus the cost of the surrounding Svelte each-block.
+  //
+  // Returns {@html}-safe HTML — all text is HTML-escaped before being wrapped
+  // in style="color: ..." spans, so script injection from a malicious wts /
+  // mod can't escape the span boundary.
+  function renderColoredLabel(label: string): string {
+    const segs = parseWC3Color(label)
+    let out = ''
+    for (const s of segs) {
+      if (!s.text) continue
+      const esc = escapeHTML(s.text)
+      if (s.color) {
+        out += `<span style="color: ${s.color}">${esc}</span>`
+      } else {
+        out += esc
+      }
+    }
+    return out
+  }
+
+  // escapeHTML keeps the rendered label safe from injection — user-authored
+  // map text (unit names, tooltips, custom triggers) can contain `<`/`&`/`"`
+  // and we never want the browser to interpret those as markup.
+  function escapeHTML(s: string): string {
+    return s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
   function onClickClose() {
     onClose?.()
   }
@@ -474,7 +510,7 @@
                     class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}"
                     style="padding-left: {r.depth * 16}px"
                     title={r.hint || undefined}
-                  >{r.label}</div>
+                  >{@html renderColoredLabel(r.label)}</div>
                 {/each}
                 {#if parts.events.length === 0}
                   <div class="te-eca-empty">(none)</div>
@@ -490,7 +526,7 @@
                     class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}"
                     style="padding-left: {r.depth * 16}px"
                     title={r.hint || undefined}
-                  >{r.label}</div>
+                  >{@html renderColoredLabel(r.label)}</div>
                 {/each}
                 {#if parts.conditions.length === 0}
                   <div class="te-eca-empty">(none)</div>
@@ -506,7 +542,7 @@
                     class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}"
                     style="padding-left: {r.depth * 16}px"
                     title={r.hint || undefined}
-                  >{r.label}</div>
+                  >{@html renderColoredLabel(r.label)}</div>
                 {/each}
                 {#if parts.actions.length === 0}
                   <div class="te-eca-empty">(none)</div>

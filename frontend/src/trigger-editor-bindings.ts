@@ -37,6 +37,13 @@ export interface TriggerTree {
 // One ECA parameter. SubParameter is recursive (a sub-function call's
 // parameters are themselves Parameters). ArrayIndex carries the index
 // expression for variable[expr] references.
+//
+// ResolvedDisplay is a UI-only enrichment populated server-side by the
+// Trigger Editor's GET path — present when `value` is a recognized
+// codegen-generated entity reference (gg_unit_*, gg_dest_*) that resolved
+// to a placed entity's display name. Empty / absent otherwise. The frontend
+// prefers it over `value` for display, but the literal `value` stays
+// canonical for round-trip / copy-paste.
 export interface TriggerParameter {
   type: number // ParamType: -1 invalid, 0 preset, 1 variable, 2 function, 3 string
   value: string
@@ -45,6 +52,7 @@ export interface TriggerParameter {
   unknown?: number
   is_array?: boolean
   array_index?: TriggerParameter
+  resolved_display?: string
 }
 
 // One Event / Condition / Action / Call row inside a trigger.
@@ -166,9 +174,17 @@ export function paramLabel(p: TriggerParameter | undefined | null): string {
     return `${sub.name}(${args.join(', ')})`
   }
   if (p.type === 3 /* ParamString */) {
-    return JSON.stringify(p.value)
+    // String params show with surrounding quotes so the user can tell them
+    // apart from preset / variable references. Color codes (|c…|r) inside
+    // the value stay intact — the downstream renderer parses the whole
+    // labelled string for color tokens, and double-quote chars never appear
+    // in a color tag so the parse is unambiguous.
+    return JSON.stringify(p.resolved_display || p.value)
   }
-  return p.value || '(unset)'
+  // For non-string params, prefer the resolved display when present (it's
+  // the entity's human-readable name) but keep the raw value as the source
+  // of truth for any caller that needs canonical bytes.
+  return p.resolved_display || p.value || '(unset)'
 }
 
 // Render an ECA's display label by walking its parameters_template (from
