@@ -116,6 +116,11 @@ func RegisterAll(b *bridge.Bridge) {
 	// pairs via Session.ConvertObject's whitelist). Single MCP route since the
 	// shape is symmetric — caller names src/dst kinds in params.
 	reg("objects.convert", handleObjectsConvert)
+	// Trigger Editor (Phase 1a — read-only). Three handlers:
+	// triggers.tree (full hierarchy in one shot), triggers.get (full ECA +
+	// custom_text for one node), triggers.functions_meta (TriggerData.txt
+	// vocabulary for client-side label templating).
+	registerTriggerHandlers(reg)
 }
 
 // handleUISendCommand forwards a raw test-driver command string. Used by
