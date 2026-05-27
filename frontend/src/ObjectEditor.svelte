@@ -33,6 +33,7 @@
   import AssetPreview from './AssetPreview.svelte'
   import { parseWC3Color } from './wc3color'
   import IconPicker from './IconPicker.svelte'
+  import ObjectSearchPalette from './ObjectSearchPalette.svelte'
 
   let {
     open = $bindable(false),
@@ -137,9 +138,11 @@
         }
       }
     })
+    window.addEventListener('keydown', onWindowKeydown)
   })
   onDestroy(() => {
     EventsOff(ENTITY_EVENT)
+    window.removeEventListener('keydown', onWindowKeydown)
   })
 
   async function reload() {
@@ -445,6 +448,54 @@
     const next = new Set(editingFields)
     next.delete(id)
     editingFields = next
+  }
+
+  // Global search palette (Cmd+P / Ctrl+P / double-Shift). State is local —
+  // mounted at the bottom of this component since the dialog is what hosts
+  // global keyboard while the user is editing objects.
+  let searchPaletteOpen: boolean = $state(false)
+  let lastShiftAt = 0
+  const DOUBLE_SHIFT_MS = 300
+
+  // window-level keydown listener — only fires while the editor dialog is open
+  // so the shortcuts don't bleed into the rest of the app. Cmd+P / Ctrl+P
+  // override the browser's print dialog (preventDefault). Double-Shift mirrors
+  // HiveWE's "double-shift" behaviour, with a 300ms window.
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (!open) return
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'p' || e.key === 'P')) {
+      e.preventDefault()
+      searchPaletteOpen = true
+      return
+    }
+    if (e.key === 'Shift') {
+      // Standalone shift press (no other modifier) — detect double-tap.
+      if (e.ctrlKey || e.altKey || e.metaKey) return
+      const now = performance.now()
+      if (now - lastShiftAt <= DOUBLE_SHIFT_MS) {
+        searchPaletteOpen = true
+        lastShiftAt = 0
+        return
+      }
+      lastShiftAt = now
+    }
+  }
+
+  function onPaletteResult(kind: ObjectKind, id: string) {
+    // Switch tab + select. switchKind drops the existing selection then the
+    // $effect-driven reload populates rows; we then selectObject by id. We
+    // intentionally don't await reload(); switchKind already triggers it.
+    searchPaletteOpen = false
+    if (kind !== currentKind) {
+      currentKind = kind
+      // Wait for the tab-switch reload to populate `rows` before selecting,
+      // otherwise the tree pane shows the right object but the row appears
+      // unhighlighted until the next render tick. selectObject only needs the
+      // id; it fetches detail itself.
+      void reload().then(() => selectObject(id))
+    } else {
+      void selectObject(id)
+    }
   }
 
   // Icon-picker state. Open the modal with `openIconPicker(field)` from any
@@ -887,6 +938,11 @@
   currentValue={iconPickerField?.value ?? ''}
   onPick={onIconPicked}
   onClose={onIconPickerClose}
+/>
+
+<ObjectSearchPalette
+  bind:open={searchPaletteOpen}
+  onPick={onPaletteResult}
 />
 
 {#snippet objectRow(u: main.UnitObjectListEntity)}
