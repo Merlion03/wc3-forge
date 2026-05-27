@@ -23,8 +23,10 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3e"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3objmod"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/wct"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wpm"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wts"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/wtg"
 )
 
 // fileSource abstracts "where does a file's bytes come from" so the same
@@ -132,6 +134,19 @@ type Session struct {
 	pathingMap       *wpm.File      // war3map.wpm
 	strings          wts.Strings    // war3map.wts, for TRIGSTR_<n> resolution
 	gameplay         *miscdata.File // war3mapMisc.txt — per-map gameplay-constants overrides
+
+	// Trigger Editor data — Phase 1a (read-only). war3map.wtg is the GUI
+	// trigger tree (categories + variables + triggers + ECAs); war3map.wct
+	// holds the per-trigger custom-script blobs and the global JASS header.
+	// Open binds .wct entries onto their owning Trigger.CustomText via
+	// triggers.go's bindCustomTexts. For hand-rolled-script maps (no .wtg,
+	// only war3map.lua/.j), the loader synthesizes a synthetic "Map Header"
+	// script trigger holding the raw script text.
+	//
+	// Either can be nil — both are optional. The Trigger Editor handles nil
+	// gracefully (empty tree). Mutation lands in Phase 2a; no dirty flag yet.
+	triggers    *wtg.Triggers
+	triggersWct *wct.File
 
 	selection      SelectionState
 	listeners      []func(SelectionState)
@@ -424,6 +439,13 @@ func (s *Session) Open(path string) error {
 		gameplay = &miscdata.File{}
 	}
 
+	// war3map.wtg + war3map.wct — OPTIONAL. The trigger loader handles both
+	// the "neither present" + "hand-rolled-script only" cases internally;
+	// errors are logged but never fail the open (a malformed .wtg shouldn't
+	// block access to the rest of the map). We pass info.Lua so the
+	// hand-rolled-script synth picks the right script file when needed.
+	triggers, triggersWct := loadTriggersForOpen(src, info != nil && info.Lua)
+
 	// Atomically swap state; close any previously-held source before stomping it.
 	s.mu.Lock()
 	prevSource := s.source
@@ -446,6 +468,8 @@ func (s *Session) Open(path string) error {
 	s.pathingMap = pathingMap
 	s.strings = wtsStrings
 	s.gameplay = gameplay
+	s.triggers = triggers
+	s.triggersWct = triggersWct
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	wasDirty := s.anyDirtyLocked()
 	s.dirtyUnits = false
@@ -526,6 +550,8 @@ func (s *Session) Close() {
 	s.pathingMap = nil
 	s.strings = nil
 	s.gameplay = nil
+	s.triggers = nil
+	s.triggersWct = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	wasDirty := s.anyDirtyLocked()
 	s.dirtyUnits = false
