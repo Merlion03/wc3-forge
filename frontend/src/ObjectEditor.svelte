@@ -1,28 +1,28 @@
 <script lang="ts">
-  // Object Editor (Phase 1b — write-side). Shadcn-svelte Dialog hosts the
-  // two-pane layout (left: Race → Kind → Unit tree; right: per-field table
-  // for the selected unit grouped by Category).
+  // Object Editor (Phase 2b — all seven kinds). Shadcn-svelte Dialog hosts a
+  // three-pane layout: leftmost narrow sidebar with kind tabs (HiveWE-style),
+  // middle pane with the per-kind tree, right pane with the per-field table
+  // for the selected object.
   //
-  // Reads: ListUnitObjects + GetUnitObject (Wails-bound) wrap the same
-  // forge.MergedUnits view the MCP bridge exposes through objects.units.list
-  // and objects.units.get — same merged base+w3u shadow.
+  // Reads + writes go through the generic Wails surface
+  // (ListObjects/GetObject/SetObjectField/CreateCustomObject/DeleteCustomObject),
+  // which dispatches via KindConfig on the Go side. Per-kind tree-building
+  // is data-driven from each row's `category` field; tree depth and grouping
+  // varies per kind (units use race→kind, items group by class, etc).
   //
-  // Writes (Phase 1b):
-  //   - inline editor per field (Enter/blur commits via SetUnitObjectField);
-  //   - "Add Custom Unit" button above the tree opens a small picker that
-  //     calls CreateCustomUnit;
-  //   - per-row delete (×) on custom units calls DeleteCustomUnit.
-  //
-  // Refresh: subscribes to wc3-forge:entity-changed with Kind==='unit_mod'
-  // so external mutations (MCP, undo/redo) re-pull the tree + current detail.
+  // Refresh: subscribes to wc3-forge:entity-changed with kind === current
+  // kind + '_mod' (e.g. 'units_mod') so external mutations from MCP or
+  // undo/redo re-pull the tree + current detail.
 
   import { onMount, onDestroy } from 'svelte'
-  import { ListUnitObjects, GetUnitObject } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import {
-    SetUnitObjectField,
-    CreateCustomUnit,
-    DeleteCustomUnit,
+    ListObjects,
+    GetObject,
+    SetObjectField,
+    CreateCustomObject,
+    DeleteCustomObject,
+    type ObjectKind,
   } from './object-editor-bindings'
   import type { main } from '../wailsjs/go/models'
   import * as Dialog from '$lib/components/ui/dialog'
@@ -35,14 +35,39 @@
     open = $bindable(false),
     onClose,
     initialId,
+    initialKind = 'units',
     reforged = false,
   }: {
     open?: boolean
     onClose?: () => void
     initialId?: string | null
+    initialKind?: ObjectKind
     reforged?: boolean
   } = $props()
 
+  // Wire-stable per-kind ordering for the sidebar — mirrors HiveWE's left
+  // tab strip. The kinds map to the registered KindConfig names on the Go
+  // side; renaming here without renaming there breaks the bridge.
+  interface KindTab {
+    kind: ObjectKind
+    label: string
+    short: string // single-letter shortcut shown in the narrow tab strip
+  }
+  const KIND_TABS: KindTab[] = [
+    { kind: 'units', label: 'Units', short: 'U' },
+    { kind: 'items', label: 'Items', short: 'I' },
+    { kind: 'doodads', label: 'Doodads', short: 'D' },
+    { kind: 'destructables', label: 'Destructables', short: 'B' },
+    { kind: 'abilities', label: 'Abilities', short: 'A' },
+    { kind: 'buffs', label: 'Buffs', short: 'F' },
+    { kind: 'upgrades', label: 'Upgrades', short: 'G' },
+  ]
+
+  // currentKind tracks the active sidebar tab. Default-initialized to
+  // 'units'; the initialKind prop is applied via $effect on mount/open so
+  // the lint doesn't flag a $state() seeded directly from a prop.
+  let currentKind: ObjectKind = $state('units')
+  let initialKindApplied = false
   let rows: main.UnitObjectListEntity[] = $state([])
   let selectedId: string = $state('')
   let detail: main.UnitObjectDetail | null = $state(null)
@@ -50,22 +75,36 @@
   let detailLoading: boolean = $state(false)
   let search: string = $state('')
   let errorMsg: string = $state('')
-  // "Add Custom Unit" inline picker state. open === false hides the panel;
-  // when true the user picks a base + optional id, and CreateCustomUnit is
-  // called on confirm.
   let showAddCustom: boolean = $state(false)
   let addCustomBaseID: string = $state('')
   let addCustomNewID: string = $state('')
 
-  // Reload whenever the dialog opens — the underlying merged view is
-  // map-state-dependent and the entity-changed bus may have fired while
-  // closed. Cheap enough to refresh unconditionally.
+  // Reload whenever the dialog opens OR the kind tab changes. Cheap enough
+  // to refresh unconditionally — the per-kind base SLK is lazily cached on
+  // the Go side, so subsequent loads are fast.
+  //
+  // Capture initialKind's first value once via a derived so the dialog-open
+  // initial-id selection only triggers on the matching kind (and Svelte 5
+  // doesn't warn about reading a $props default inside an effect).
+  let initialKindFrozen = $derived(initialKind)
   $effect(() => {
+    // Track open + currentKind explicitly.
+    const _ = [open, currentKind]
     if (open) {
+      // Apply initialKind ONCE on first open so subsequent tab switches don't
+      // get overridden if the parent re-renders the prop.
+      if (!initialKindApplied) {
+        initialKindApplied = true
+        if (initialKindFrozen !== currentKind) {
+          currentKind = initialKindFrozen
+          return // $effect re-fires with the new currentKind
+        }
+      }
       reload().then(() => {
-        if (initialId) selectUnit(initialId)
+        if (initialId && currentKind === initialKindFrozen) selectObject(initialId)
       })
     } else {
+      initialKindApplied = false
       selectedId = ''
       detail = null
       search = ''
@@ -74,23 +113,22 @@
     }
   })
 
-  // Subscribe to the entity-changed bus while the dialog is open. unit_mod
-  // events fire when SetUnitField / AddCustomUnit / DeleteCustomUnit run
-  // (from this UI OR from MCP OR from undo/redo); we refresh the tree + the
-  // currently-selected detail in response.
+  // Subscribe to the entity-changed bus while the dialog is open.
+  // <kind>_mod events fire when SetObjectField / AddCustomObject /
+  // DeleteCustomObject run (from this UI OR from MCP OR from undo/redo); we
+  // refresh the tree + the currently-selected detail in response. The bus is
+  // kind-tagged so we only react to mutations on the kind we're showing.
   const ENTITY_EVENT = 'wc3-forge:entity-changed'
   onMount(() => {
     EventsOn(ENTITY_EVENT, async (payload: { kind: string; field?: string }) => {
-      if (!payload || payload.kind !== 'unit_mod') return
-      // Either an "edit" (Field='unam' etc.) or a "customs" event. Both
-      // need the tree refreshed (custom counts change; edited flag may
-      // flip on a stock unit). Detail also re-pulled if a unit is selected.
+      if (!payload) return
+      const want = currentKind + '_mod'
+      if (payload.kind !== want) return
       await reload()
       if (selectedId) {
         try {
-          detail = await GetUnitObject(selectedId)
+          detail = await GetObject(currentKind, selectedId)
         } catch {
-          /* selected unit may have been deleted; clear */
           detail = null
           selectedId = ''
         }
@@ -104,58 +142,61 @@
   async function reload() {
     loading = true
     try {
-      rows = await ListUnitObjects()
+      rows = await ListObjects(currentKind)
     } catch (e) {
-      console.error('ListUnitObjects failed', e)
+      console.error('ListObjects failed', e)
       rows = []
     } finally {
       loading = false
     }
   }
 
-  async function selectUnit(id: string) {
+  async function selectObject(id: string) {
     selectedId = id
     detailLoading = true
     try {
-      detail = await GetUnitObject(id)
+      detail = await GetObject(currentKind, id)
     } catch (e) {
-      console.error('GetUnitObject failed', e)
+      console.error('GetObject failed', e)
       detail = null
     } finally {
       detailLoading = false
     }
   }
 
-  // Commit one field edit. value is the raw string from the input — server
-  // infers wire-type (int/float/string) at Encode time based on the parse
-  // result. Updates detail in-place from the returned payload so the
-  // Overridden flag re-flags without a second round-trip.
+  function switchKind(kind: ObjectKind) {
+    if (kind === currentKind) return
+    currentKind = kind
+    selectedId = ''
+    detail = null
+    search = ''
+    showAddCustom = false
+    errorMsg = ''
+    // reload runs via $effect when currentKind changes.
+  }
+
   async function commitField(field: main.UnitObjectField, raw: string) {
     if (!detail) return
     if (raw === field.value) return // no-op
     errorMsg = ''
     try {
-      const updated = await SetUnitObjectField(detail.id, field.field, raw)
+      const updated = await SetObjectField(currentKind, detail.id, field.field, raw)
       if (updated) detail = updated
     } catch (e) {
       errorMsg = String(e)
-      console.error('SetUnitObjectField failed', e)
+      console.error('SetObjectField failed', e)
     }
   }
 
-  // Build the bool-checkbox commit: WC3 stores bools as 1/0 strings.
   async function commitBoolField(field: main.UnitObjectField, checked: boolean) {
     return commitField(field, checked ? '1' : '0')
   }
 
   function openAddCustom() {
     addCustomNewID = ''
-    // Default base: currently-selected unit if any; else first stock unit
-    // in the tree (alphabetical by name).
     if (selectedId) {
       addCustomBaseID = selectedId
     } else if (rows.length > 0) {
-      // Pick the first non-custom row alphabetically.
       const stock = rows.filter((r) => !r.is_custom)
       addCustomBaseID = stock[0]?.id ?? ''
     } else {
@@ -166,31 +207,28 @@
 
   async function confirmAddCustom() {
     if (!addCustomBaseID) {
-      errorMsg = 'pick a base unit'
+      errorMsg = 'pick a base'
       return
     }
     errorMsg = ''
     try {
-      const res = await CreateCustomUnit(addCustomBaseID, addCustomNewID)
+      const res = await CreateCustomObject(currentKind, addCustomBaseID, addCustomNewID)
       showAddCustom = false
       if (res?.id) {
-        // Reload tree + select the new id. The entity-changed event will
-        // also fire reload as a backstop; harmless duplicate work.
         await reload()
-        await selectUnit(res.id)
+        await selectObject(res.id)
       }
     } catch (e) {
       errorMsg = String(e)
-      console.error('CreateCustomUnit failed', e)
+      console.error('CreateCustomObject failed', e)
     }
   }
 
   async function deleteCustom(id: string) {
-    if (!confirm(`Delete custom unit ${id}?`)) return
+    if (!confirm(`Delete custom ${currentKind.replace(/s$/, '')} ${id}?`)) return
     errorMsg = ''
     try {
-      await DeleteCustomUnit(id)
-      // Clear selection if the deleted id was selected.
+      await DeleteCustomObject(currentKind, id)
       if (selectedId === id) {
         selectedId = ''
         detail = null
@@ -198,11 +236,10 @@
       await reload()
     } catch (e) {
       errorMsg = String(e)
-      console.error('DeleteCustomUnit failed', e)
+      console.error('DeleteCustomObject failed', e)
     }
   }
 
-  // Filter rows by search. Substring match against id, name, and category.
   let filteredRows = $derived.by(() => {
     const q = search.trim().toLowerCase()
     if (!q) return rows
@@ -214,57 +251,93 @@
     )
   })
 
-  // Stock units only — for the Add Custom Unit base picker. Customs can't
-  // be a base (we don't support multi-level inheritance) and showing them
-  // would clutter the dropdown.
   let stockRows = $derived.by(() => rows.filter((r) => !r.is_custom))
 
-  const KIND_ORDER: Record<string, number> = {
+  // Per-kind tree structure. Units use a two-level race→kind tree; the
+  // other six kinds use a single-level category grouping (HiveWE matches
+  // this for items/doodads/destructables/abilities/buffs/upgrades).
+  const UNIT_KIND_ORDER: Record<string, number> = {
     unit: 0,
     hero: 1,
     building: 2,
     special: 3,
   }
-  const KIND_LABEL: Record<string, string> = {
+  const UNIT_KIND_LABEL: Record<string, string> = {
     unit: 'Units',
     hero: 'Heroes',
     building: 'Buildings',
     special: 'Special',
   }
+  const ABILITY_KIND_LABEL: Record<string, string> = {
+    unit: 'Unit Abilities',
+    hero: 'Hero Abilities',
+    item: 'Item Abilities',
+  }
+  const ABILITY_KIND_ORDER: Record<string, number> = { hero: 0, unit: 1, item: 2 }
 
   interface KindBucket {
     kind: string
     label: string
     rows: main.UnitObjectListEntity[]
   }
-  interface RaceBucket {
-    race: string
+  interface CategoryBucket {
+    category: string
     label: string
     kinds: KindBucket[]
   }
 
-  let tree = $derived.by<RaceBucket[]>(() => {
-    const byRace = new Map<string, RaceBucket>()
+  // Tree shape varies per object kind. Units / abilities use a two-level
+  // race→kind grouping; the rest collapse to a flat per-category list.
+  let tree = $derived.by<CategoryBucket[]>(() => {
+    if (currentKind === 'units' || currentKind === 'abilities') {
+      const byRace = new Map<string, CategoryBucket>()
+      const kindLabel = currentKind === 'units' ? UNIT_KIND_LABEL : ABILITY_KIND_LABEL
+      const kindOrder = currentKind === 'units' ? UNIT_KIND_ORDER : ABILITY_KIND_ORDER
+      for (const r of filteredRows) {
+        let rb = byRace.get(r.race)
+        if (!rb) {
+          rb = {
+            category: r.race,
+            label: r.race_label || r.race || 'Other',
+            kinds: [],
+          }
+          byRace.set(r.race, rb)
+        }
+        let kb = rb.kinds.find((k) => k.kind === r.kind)
+        if (!kb) {
+          kb = { kind: r.kind, label: kindLabel[r.kind] ?? r.kind, rows: [] }
+          rb.kinds.push(kb)
+        }
+        kb.rows.push(r)
+      }
+      const out = Array.from(byRace.values())
+      out.sort((a, b) => a.label.localeCompare(b.label))
+      for (const r of out) {
+        r.kinds.sort(
+          (a, b) => (kindOrder[a.kind] ?? 99) - (kindOrder[b.kind] ?? 99),
+        )
+      }
+      return out
+    }
+    // Single-level per-category tree for items/doodads/destructables/buffs/
+    // upgrades. The KindConfig.CategoryFn produced the human-readable
+    // category string at list time; we just bucket on it.
+    const byCat = new Map<string, CategoryBucket>()
     for (const r of filteredRows) {
-      let rb = byRace.get(r.race)
-      if (!rb) {
-        rb = { race: r.race, label: r.race_label || r.race, kinds: [] }
-        byRace.set(r.race, rb)
+      const key = r.category || 'Miscellaneous'
+      let cb = byCat.get(key)
+      if (!cb) {
+        cb = {
+          category: key,
+          label: key,
+          kinds: [{ kind: 'all', label: '', rows: [] }],
+        }
+        byCat.set(key, cb)
       }
-      let kb = rb.kinds.find((k) => k.kind === r.kind)
-      if (!kb) {
-        kb = { kind: r.kind, label: KIND_LABEL[r.kind] ?? r.kind, rows: [] }
-        rb.kinds.push(kb)
-      }
-      kb.rows.push(r)
+      cb.kinds[0].rows.push(r)
     }
-    const out = Array.from(byRace.values())
+    const out = Array.from(byCat.values())
     out.sort((a, b) => a.label.localeCompare(b.label))
-    for (const r of out) {
-      r.kinds.sort(
-        (a, b) => (KIND_ORDER[a.kind] ?? 99) - (KIND_ORDER[b.kind] ?? 99),
-      )
-    }
     return out
   })
 
@@ -274,11 +347,12 @@
     stats: 2,
     combat: 3,
     abil: 4,
-    move: 5,
-    path: 6,
-    sound: 7,
-    tech: 8,
-    editor: 9,
+    data: 5,
+    move: 6,
+    path: 7,
+    sound: 8,
+    tech: 9,
+    editor: 10,
   }
   const CATEGORY_LABEL: Record<string, string> = {
     text: 'Text',
@@ -286,6 +360,7 @@
     stats: 'Stats',
     combat: 'Combat',
     abil: 'Abilities',
+    data: 'Data',
     move: 'Movement',
     path: 'Pathing',
     sound: 'Sound',
@@ -323,8 +398,6 @@
     return out
   })
 
-  // Field-type → input-widget categorization. We don't enumerate enum
-  // values yet (Phase 3 polish); enums get a plain text input.
   function inputTypeFor(t: string): 'bool' | 'int' | 'real' | 'text' {
     switch (t) {
       case 'bool':
@@ -336,7 +409,6 @@
       case 'unreal':
         return 'real'
       default:
-        // string, model, icon, abilityList, all enums, … → text
         return 'text'
     }
   }
@@ -347,14 +419,26 @@
     }
     open = o
   }
+
+  // Dialog title reflects the current kind so the user always knows which
+  // editor they're in. Titlecasing is mechanical — kinds are lowercase
+  // wire-stable identifiers, the UI shows them capitalized.
+  let dialogTitle = $derived.by(() => {
+    const label = KIND_TABS.find((t) => t.kind === currentKind)?.label ?? currentKind
+    return `Object Editor — ${label}`
+  })
+
+  // Singular-form noun used in the empty-state, add-custom button title,
+  // and "stock" picker placeholder. Cheap rule: drop trailing 's'.
+  let kindSingular = $derived.by(() => currentKind.replace(/s$/, ''))
 </script>
 
 <Dialog.Root bind:open={open} onOpenChange={closeAndNotify}>
-  <Dialog.Content class="!max-w-[1200px] !w-[95vw] h-[85vh] flex flex-col p-0 gap-0">
+  <Dialog.Content class="!max-w-[1280px] !w-[95vw] h-[85vh] flex flex-col p-0 gap-0">
     <Dialog.Header class="px-4 py-3 border-b border-border">
-      <Dialog.Title>Object Editor — Units</Dialog.Title>
+      <Dialog.Title>{dialogTitle}</Dialog.Title>
       <Dialog.Description class="text-xs text-muted-foreground">
-        Edit unit fields; add or delete custom units. Edits persist on Save.
+        Edit fields, add or delete custom objects. Edits persist on Save.
       </Dialog.Description>
     </Dialog.Header>
 
@@ -365,13 +449,30 @@
     {/if}
 
     <div class="flex flex-1 min-h-0">
-      <!-- Left pane: tree + add-custom button -->
+      <!-- Leftmost: kind-picker sidebar (HiveWE-style vertical tab strip) -->
+      <nav class="oe-kindbar border-r border-border bg-muted/20 flex flex-col">
+        {#each KIND_TABS as t (t.kind)}
+          <button
+            class="oe-kindtab"
+            class:oe-kindtab-active={currentKind === t.kind}
+            onclick={() => switchKind(t.kind)}
+            title={t.label}
+            aria-label={t.label}
+            aria-current={currentKind === t.kind ? 'page' : undefined}
+          >
+            <span class="oe-kindtab-short">{t.short}</span>
+            <span class="oe-kindtab-label">{t.label}</span>
+          </button>
+        {/each}
+      </nav>
+
+      <!-- Middle: tree + add-custom button -->
       <aside class="w-80 flex-none border-r border-border flex flex-col min-h-0">
         <div class="p-2 border-b border-border flex flex-col gap-2">
           <div class="flex gap-2">
             <Input
               type="search"
-              placeholder="Search units…"
+              placeholder={`Search ${currentKind}…`}
               bind:value={search}
               class="h-8 text-sm flex-1"
             />
@@ -380,12 +481,14 @@
               variant="outline"
               class="h-8 text-xs px-2"
               onclick={openAddCustom}
-              title="Add a new custom unit derived from a stock base"
+              title={`Add a new custom ${kindSingular} derived from a stock base`}
             >+ Custom</Button>
           </div>
           {#if showAddCustom}
             <div class="p-2 rounded border border-border bg-muted/30 flex flex-col gap-1.5">
-              <div class="text-xs text-muted-foreground">New custom unit</div>
+              <div class="text-xs text-muted-foreground">
+                New custom {kindSingular}
+              </div>
               <label class="text-xs block">
                 Base:
                 <select
@@ -424,10 +527,18 @@
             <div class="p-3 text-muted-foreground">Loading…</div>
           {:else if tree.length === 0}
             <div class="p-3 text-muted-foreground">
-              {search ? 'No matches.' : 'No units. Open a map first.'}
+              {#if search}
+                No matches.
+              {:else if rows.length === 0}
+                No {currentKind}. Metadata not loaded (open a map first or
+                check that the WC3 install is reachable for the kind's
+                MetaData.slk).
+              {:else}
+                Empty.
+              {/if}
             </div>
           {:else}
-            {#each tree as r (r.race)}
+            {#each tree as r (r.category)}
               <details open class="group">
                 <summary class="px-2 py-1 cursor-pointer select-none font-medium hover:bg-accent">
                   {r.label}
@@ -436,60 +547,26 @@
                   </span>
                 </summary>
                 {#each r.kinds as k (k.kind)}
-                  <details open class="ml-2">
-                    <summary class="px-2 py-0.5 cursor-pointer select-none text-xs text-muted-foreground hover:bg-accent">
-                      {k.label}
-                      <span class="ml-1">({k.rows.length})</span>
-                    </summary>
-                    <ul class="ml-4">
+                  {#if k.label}
+                    <details open class="ml-2">
+                      <summary class="px-2 py-0.5 cursor-pointer select-none text-xs text-muted-foreground hover:bg-accent">
+                        {k.label}
+                        <span class="ml-1">({k.rows.length})</span>
+                      </summary>
+                      <ul class="ml-4">
+                        {#each k.rows as u (u.id)}
+                          {@render objectRow(u)}
+                        {/each}
+                      </ul>
+                    </details>
+                  {:else}
+                    <!-- Flat kind: render rows directly under the category -->
+                    <ul class="ml-2">
                       {#each k.rows as u (u.id)}
-                        <li>
-                          <div
-                            class="oe-row flex items-center gap-1.5 hover:bg-accent"
-                            class:bg-accent={selectedId === u.id}
-                          >
-                            <button
-                              class="flex-1 text-left px-2 py-0.5 truncate flex items-center gap-1.5"
-                              onclick={() => selectUnit(u.id)}
-                              title={`${u.id} — ${u.category}`}
-                            >
-                              {#if u.icon_art}
-                                {#await loadIconURL(u.icon_art) then iconURL}
-                                  {#if iconURL}
-                                    <img class="oe-icon" src={iconURL} alt="" />
-                                  {:else}
-                                    <span class="oe-icon oe-icon-placeholder" aria-hidden="true"></span>
-                                  {/if}
-                                {/await}
-                              {:else}
-                                <span class="oe-icon oe-icon-placeholder" aria-hidden="true"></span>
-                              {/if}
-                              <span class="truncate flex-1">{u.name}</span>
-                              {#if u.is_custom}
-                                <span
-                                  class="text-[10px] px-1 rounded bg-emerald-700/30 text-emerald-300"
-                                  title="Custom unit"
-                                >C</span>
-                              {:else if u.is_edited}
-                                <span
-                                  class="text-[10px] px-1 rounded bg-violet-700/30 text-violet-300"
-                                  title="Stock unit with edits"
-                                >M</span>
-                              {/if}
-                            </button>
-                            {#if u.is_custom}
-                              <button
-                                class="oe-delete-btn text-xs text-muted-foreground hover:text-red-400 px-1.5"
-                                onclick={() => deleteCustom(u.id)}
-                                title="Delete custom unit"
-                                aria-label="Delete custom unit"
-                              >×</button>
-                            {/if}
-                          </div>
-                        </li>
+                        {@render objectRow(u)}
                       {/each}
                     </ul>
-                  </details>
+                  {/if}
                 {/each}
               </details>
             {/each}
@@ -503,7 +580,7 @@
           <div class="p-4 text-muted-foreground">Loading…</div>
         {:else if !detail}
           <div class="p-4 text-muted-foreground">
-            Select a unit from the tree.
+            Select a {kindSingular} from the tree.
           </div>
         {:else}
           <header class="p-3 border-b border-border flex items-center gap-3">
@@ -645,7 +722,93 @@
   </Dialog.Content>
 </Dialog.Root>
 
+{#snippet objectRow(u: main.UnitObjectListEntity)}
+  <li>
+    <div
+      class="oe-row flex items-center gap-1.5 hover:bg-accent"
+      class:bg-accent={selectedId === u.id}
+    >
+      <button
+        class="flex-1 text-left px-2 py-0.5 truncate flex items-center gap-1.5"
+        onclick={() => selectObject(u.id)}
+        title={`${u.id} — ${u.category}`}
+      >
+        {#if u.icon_art}
+          {#await loadIconURL(u.icon_art) then iconURL}
+            {#if iconURL}
+              <img class="oe-icon" src={iconURL} alt="" />
+            {:else}
+              <span class="oe-icon oe-icon-placeholder" aria-hidden="true"></span>
+            {/if}
+          {/await}
+        {:else}
+          <span class="oe-icon oe-icon-placeholder" aria-hidden="true"></span>
+        {/if}
+        <span class="truncate flex-1">{u.name}</span>
+        {#if u.is_custom}
+          <span
+            class="text-[10px] px-1 rounded bg-emerald-700/30 text-emerald-300"
+            title="Custom"
+          >C</span>
+        {:else if u.is_edited}
+          <span
+            class="text-[10px] px-1 rounded bg-violet-700/30 text-violet-300"
+            title="Edited stock object"
+          >M</span>
+        {/if}
+      </button>
+      {#if u.is_custom}
+        <button
+          class="oe-delete-btn text-xs text-muted-foreground hover:text-red-400 px-1.5"
+          onclick={() => deleteCustom(u.id)}
+          title="Delete custom"
+          aria-label="Delete custom"
+        >×</button>
+      {/if}
+    </div>
+  </li>
+{/snippet}
+
 <style>
+  .oe-kindbar {
+    width: 90px;
+    flex: none;
+  }
+  .oe-kindtab {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 8px 4px;
+    border: 0;
+    background: transparent;
+    color: rgb(var(--muted-foreground));
+    font-size: 0.7rem;
+    cursor: pointer;
+    border-bottom: 1px solid rgb(var(--border));
+  }
+  .oe-kindtab:hover {
+    background: rgb(var(--accent));
+    color: rgb(var(--foreground));
+  }
+  .oe-kindtab-active {
+    background: rgb(var(--accent));
+    color: rgb(var(--foreground));
+    box-shadow: inset 2px 0 0 rgb(var(--primary));
+  }
+  .oe-kindtab-short {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .oe-kindtab-label {
+    font-size: 0.65rem;
+    letter-spacing: 0.02em;
+    text-align: center;
+    word-break: break-word;
+    line-height: 1.1;
+  }
   .oe-icon {
     width: 18px;
     height: 18px;
@@ -670,8 +833,6 @@
     flex: none;
     padding: 8px 12px;
   }
-  /* Delete button hidden until hover keeps the row visually clean — the
-     usual editor convention for destructive per-row actions. */
   .oe-delete-btn {
     opacity: 0;
     transition: opacity 0.12s;
@@ -679,8 +840,6 @@
   .oe-row:hover .oe-delete-btn {
     opacity: 1;
   }
-  /* Compact edit input shouldn't visually shout — keep the same row
-     height the read-only display had. */
   .oe-edit {
     height: 1.6em;
   }

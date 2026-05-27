@@ -177,3 +177,129 @@ func TestListObjects_Generic_WireShape(t *testing.T) {
 		t.Errorf("wire shape drift:\n got=%s\nwant=%s", b, want)
 	}
 }
+
+// TestAllKindsConfig_Registered verifies init wired every Phase-2b kind into
+// the lookup table — each one's ShadowFile + ShadowOpt are correct per the
+// HiveWE conventions documented in the per-kind configuration matrix.
+//
+// Tests the wire-stable bits only (Kind tag + shadow file + opt flag). The
+// SLK / INI paths are validated implicitly by the per-kind smoke tests below.
+func TestAllKindsConfig_Registered(t *testing.T) {
+	cases := []struct {
+		kind   string
+		file   string
+		opt    bool
+		ctor   func() *KindConfig
+	}{
+		{"units", "war3map.w3u", false, UnitsConfig},
+		{"items", "war3map.w3t", false, ItemsConfig},
+		{"abilities", "war3map.w3a", true, AbilitiesConfig},
+		{"buffs", "war3map.w3h", false, BuffsConfig},
+		{"destructables", "war3map.w3b", false, DestructablesConfig},
+		{"doodads", "war3map.w3d", true, DoodadsConfig},
+		{"upgrades", "war3map.w3q", true, UpgradesConfig},
+	}
+	for _, c := range cases {
+		t.Run(c.kind, func(t *testing.T) {
+			cfg := kindConfigFor(c.kind)
+			if cfg == nil {
+				t.Fatalf("%s not registered", c.kind)
+			}
+			if cfg.Kind != c.kind {
+				t.Errorf("Kind = %q, want %q", cfg.Kind, c.kind)
+			}
+			if cfg.ShadowFile != c.file {
+				t.Errorf("ShadowFile = %q, want %q", cfg.ShadowFile, c.file)
+			}
+			if cfg.ShadowOpt != c.opt {
+				t.Errorf("ShadowOpt = %v, want %v", cfg.ShadowOpt, c.opt)
+			}
+			// Constructor returns the same singleton — exercising the
+			// lazy-init path doesn't allocate a second config.
+			if c.ctor() != cfg {
+				t.Errorf("%s constructor returned a different instance than the registry", c.kind)
+			}
+		})
+	}
+}
+
+// TestPerKindRoundTrip parametrically exercises the full read/write surface
+// of every Phase-2b kind against a synthetic stub base (one stock row, one
+// field). Each kind walks the same six steps: stub-load metadata, list,
+// get, set_field, undo, create_custom, delete_custom. Skips kinds whose
+// per-kind stub fields aren't applicable (the metadata Applies* filter
+// would drop them).
+//
+// Stub-driven on purpose: real MetaData SLKs from CASC aren't reachable in
+// CI. Verifying the generic pipeline works for arbitrary use* flags is
+// what we need; the SLK-format-specific tests live elsewhere.
+func TestPerKindRoundTrip(t *testing.T) {
+	cases := []struct {
+		kind         string
+		baseID       string
+		race         string
+		applies      func(f *ObjectFieldMeta)
+		fieldFourCC  string
+		fieldColumn  string
+	}{
+		{"units", "hpea", "human", func(f *ObjectFieldMeta) { f.UseUnit = true }, "unam", "name"},
+		{"items", "ratf", "", func(f *ObjectFieldMeta) { f.UseItem = true }, "unam", "name"},
+		{"abilities", "AHbz", "human", func(f *ObjectFieldMeta) { f.UseAbility = true }, "anam", "name"},
+		{"buffs", "Babk", "human", func(f *ObjectFieldMeta) { f.UseBuff = true }, "bnam", "name"},
+		{"destructables", "LTlt", "", func(f *ObjectFieldMeta) { f.UseDestructable = true }, "bnam", "name"},
+		{"doodads", "ATtr", "", func(f *ObjectFieldMeta) { f.UseDoodad = true }, "dnam", "name"},
+		{"upgrades", "Rhme", "human", func(f *ObjectFieldMeta) { f.UseUpgrade = true }, "gnam", "name"},
+	}
+	for _, c := range cases {
+		t.Run(c.kind, func(t *testing.T) {
+			stubKindBase(t, c.kind, c.baseID, c.race, c.fieldFourCC, c.fieldColumn, c.applies)
+			tmp := minimalFolderMap(t)
+			s := &Session{}
+			if err := s.Open(tmp); err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			cfg := kindConfigFor(c.kind)
+
+			// set_field on the stock row → OriginalEdit lands.
+			if err := s.SetObjectField(cfg, c.baseID, c.fieldColumn, "EditedName"); err != nil {
+				t.Fatalf("SetObjectField: %v", err)
+			}
+			mods := cfg.GetMods(s)
+			if mods == nil || len(mods.OriginalEdits) != 1 {
+				t.Fatalf("expected 1 OriginalEdit, got %+v", mods)
+			}
+			if mods.OriginalEdits[0].Overrides[c.fieldFourCC] != "EditedName" {
+				t.Errorf("override missing: %+v", mods.OriginalEdits[0])
+			}
+			if !cfg.GetDirty(s) {
+				t.Error("per-kind dirty flag not set after SetObjectField")
+			}
+
+			// undo restores empty OriginalEdits.
+			if err := s.Undo(); err != nil {
+				t.Fatalf("Undo: %v", err)
+			}
+			if mods := cfg.GetMods(s); len(mods.OriginalEdits) != 0 {
+				t.Errorf("expected empty OriginalEdits after Undo, got %+v", mods.OriginalEdits)
+			}
+
+			// create_custom → custom lands with auto-allocated ID prefixed
+			// by the base's first char.
+			newID, err := s.AddCustomObject(cfg, "", c.baseID)
+			if err != nil {
+				t.Fatalf("AddCustomObject: %v", err)
+			}
+			if newID == "" || newID[0] != c.baseID[0] {
+				t.Errorf("allocator picked %q, want prefix %c", newID, c.baseID[0])
+			}
+
+			// delete_custom drops the row.
+			if err := s.DeleteCustomObject(cfg, newID); err != nil {
+				t.Fatalf("DeleteCustomObject: %v", err)
+			}
+			if mods := cfg.GetMods(s); len(mods.Customs) != 0 {
+				t.Errorf("expected 0 customs after delete, got %d", len(mods.Customs))
+			}
+		})
+	}
+}

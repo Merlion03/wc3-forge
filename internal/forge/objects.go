@@ -65,11 +65,13 @@ type KindConfig struct {
 	// AppliesFn filters metadata rows so a field shared across kinds (the
 	// units+items metadata table for instance) only surfaces in the editor
 	// that should host it.
-	AppliesFn func(UnitFieldMeta) bool
+	AppliesFn func(ObjectFieldMeta) bool
 
 	// ClassifyFn returns the leaf tree-bucket for a row (e.g. "hero" |
-	// "building" | "special" | "unit" for units). Wire-stable strings —
-	// the JS Object Editor switches on them.
+	// "building" | "special" | "unit" for units; item class for items;
+	// category for destructables/doodads; "hero"/"item"/"unit" for
+	// abilities). Wire-stable strings — the JS Object Editor switches on
+	// them. May be nil for kinds that flat-list everything.
 	ClassifyFn func(id string, fields map[string]string) string
 
 	// FilterListRow returns true if a row should appear in the list response.
@@ -81,6 +83,18 @@ type KindConfig struct {
 	// list response. For units it's `titleRace(race) + " " + kindSuffix`; for
 	// items it'd be the item-class label. Returns the display string.
 	CategoryFn func(race, kind string) string
+
+	// IconArtFn resolves the per-row icon path the editor tree shows. nil =
+	// "no icon" (the tree renders a placeholder square). Units, items, and
+	// abilities all have unitSkin-style `art:hd`/`art:sd` variants; doodads
+	// and destructables use a single `art` column.
+	IconArtFn func(fields map[string]string) string
+
+	// ModelPathFn resolves the primary .mdx + fallback .mdl paths for the
+	// kind's 3D preview pane. Returns ("", nil) when the row has no model;
+	// the preview pane stays empty. Units use the `file` column; doodads
+	// also use `file`; abilities/upgrades/buffs have no model.
+	ModelPathFn func(fields map[string]string) (string, []string)
 
 	// GetMods returns the *w3objmod.File for this kind on the given session.
 	// Returns nil when the session has no shadow for this kind (fresh map,
@@ -136,7 +150,7 @@ func kindConfigFor(kind string) *KindConfig {
 type objectBaseCache struct {
 	once sync.Once
 	base *slk.Mapped
-	meta *UnitMetadata
+	meta *ObjectMetadata
 	err  error
 }
 
@@ -166,7 +180,7 @@ func getObjectBaseCache(kind string) *objectBaseCache {
 // a usable (if incomplete) editor. UnitMetaData missing collapses to an
 // empty metadata table so the editor renders an empty field list rather
 // than crashing.
-func loadObjectBase(cfg *KindConfig) (*slk.Mapped, *UnitMetadata, error) {
+func loadObjectBase(cfg *KindConfig) (*slk.Mapped, *ObjectMetadata, error) {
 	cache := getObjectBaseCache(cfg.Kind)
 	cache.once.Do(func() {
 		base := slk.New()
@@ -195,14 +209,14 @@ func loadObjectBase(cfg *KindConfig) (*slk.Mapped, *UnitMetadata, error) {
 		metaData, ok, err := readBaseAsset(cfg.MetaDataFile)
 		if err != nil || !ok {
 			log.Printf("objects[%s]: %s missing: ok=%v err=%v", cfg.Kind, cfg.MetaDataFile, ok, err)
-			cache.meta = &UnitMetadata{ByID: map[string]*UnitFieldMeta{}}
+			cache.meta = &ObjectMetadata{ByID: map[string]*ObjectFieldMeta{}}
 			return
 		}
-		meta, err := ParseUnitMetadata(metaData)
+		meta, err := ParseObjectMetadata(metaData)
 		if err != nil {
 			log.Printf("objects[%s]: parse %s: %v", cfg.Kind, cfg.MetaDataFile, err)
 			cache.err = err
-			cache.meta = &UnitMetadata{ByID: map[string]*UnitFieldMeta{}}
+			cache.meta = &ObjectMetadata{ByID: map[string]*ObjectFieldMeta{}}
 			return
 		}
 		cache.meta = meta
@@ -232,7 +246,7 @@ func resetObjectBaseCacheForTest(kind string) {
 // for the given kind, bypassing the sync.Once-guarded loader. Test-only
 // helper used by stubUnitsBase + friends in objects_mods_test.go so tests
 // don't have to drive the real CASC mount.
-func setObjectBaseForTest(kind string, base *slk.Mapped, meta *UnitMetadata) {
+func setObjectBaseForTest(kind string, base *slk.Mapped, meta *ObjectMetadata) {
 	cache := getObjectBaseCache(kind)
 	// Consume the sync.Once with a no-op load so the public loadObjectBase
 	// path returns our stub on every subsequent call (and so subsequent test
@@ -266,7 +280,7 @@ type MergedUnit = MergedObject
 //
 // The returned map is freshly built; callers can mutate it without affecting
 // the cache.
-func MergedObjects(cfg *KindConfig) (map[string]*MergedObject, *UnitMetadata, error) {
+func MergedObjects(cfg *KindConfig) (map[string]*MergedObject, *ObjectMetadata, error) {
 	base, meta, err := loadObjectBase(cfg)
 	if err != nil {
 		return nil, meta, err
@@ -328,7 +342,7 @@ func MergedObjects(cfg *KindConfig) (map[string]*MergedObject, *UnitMetadata, er
 // MergedUnits is the Phase-1b read entry point, preserved verbatim as a thin
 // wrapper around the generic. Existing callers (the units-API + handlers)
 // keep working.
-func MergedUnits() (map[string]*MergedObject, *UnitMetadata, error) {
+func MergedUnits() (map[string]*MergedObject, *ObjectMetadata, error) {
 	return MergedObjects(UnitsConfig())
 }
 
@@ -336,7 +350,7 @@ func MergedUnits() (map[string]*MergedObject, *UnitMetadata, error) {
 // writes the values into the merged object's column-name-keyed Fields map.
 // Identical to Phase 1b — kept on the generic since every kind merges the
 // same way (FourCC → metadata column lookup → write into Fields).
-func applyOverrides(u *MergedObject, ov w3objmod.Overrides, meta *UnitMetadata) {
+func applyOverrides(u *MergedObject, ov w3objmod.Overrides, meta *ObjectMetadata) {
 	if len(ov) == 0 {
 		return
 	}
@@ -414,7 +428,7 @@ func UnitsConfig() *KindConfig {
 			},
 			ShadowFile: "war3map.w3u",
 			ShadowOpt:  false,
-			AppliesFn: func(f UnitFieldMeta) bool {
+			AppliesFn: func(f ObjectFieldMeta) bool {
 				return f.AppliesToUnits()
 			},
 			ClassifyFn: classifyUnitKind,
@@ -436,10 +450,12 @@ func UnitsConfig() *KindConfig {
 				}
 				return cat
 			},
-			GetMods:  func(s *Session) *w3objmod.File { return s.unitMods },
-			SetMods:  func(s *Session, f *w3objmod.File) { s.unitMods = f },
-			GetDirty: func(s *Session) bool { return s.dirtyUnitMods },
-			SetDirty: func(s *Session, v bool) { s.dirtyUnitMods = v },
+			IconArtFn:   unitIconArt,
+			ModelPathFn: unitModelPath,
+			GetMods:     func(s *Session) *w3objmod.File { return s.unitMods },
+			SetMods:     func(s *Session, f *w3objmod.File) { s.unitMods = f },
+			GetDirty:    func(s *Session) bool { return s.dirtyUnitMods },
+			SetDirty:    func(s *Session, v bool) { s.dirtyUnitMods = v },
 		}
 		registerKindConfig(unitsConfigCfg)
 	})
@@ -463,8 +479,413 @@ func classifyUnitKind(id string, fields map[string]string) string {
 	return "unit"
 }
 
-// init prebuilds the units KindConfig + registers it so commands that
-// reference Kind="units" can resolve without an explicit UnitsConfig() call.
+// init prebuilds every KindConfig + registers it so commands that reference
+// Kind="<x>" can resolve without an explicit XConfig() call. Each builder
+// is a lazy sync.Once internally, so calling them here is the same as the
+// first user access.
 func init() {
 	_ = UnitsConfig()
+	_ = ItemsConfig()
+	_ = AbilitiesConfig()
+	_ = BuffsConfig()
+	_ = DestructablesConfig()
+	_ = DoodadsConfig()
+	_ = UpgradesConfig()
+}
+
+// ---------------------------------------------------------------------------
+// Items kind — w3t shadow, opt=false. Items share the units metadata SLK; the
+// editor filters with AppliesToItems() (UseItem flag). The tree is grouped by
+// item class ("Permanent" | "Charged" | …) from the `class` column.
+// ---------------------------------------------------------------------------
+
+var (
+	itemsConfigOnce sync.Once
+	itemsConfigCfg  *KindConfig
+)
+
+func ItemsConfig() *KindConfig {
+	itemsConfigOnce.Do(func() {
+		itemsConfigCfg = &KindConfig{
+			Kind:         "items",
+			MetaDataFile: "Units/ItemMetaData.slk",
+			BaseSLKs:     []string{"Units/ItemData.slk"},
+			BaseINIs: []string{
+				"Units/ItemFunc.txt",
+				"Units/ItemStrings.txt",
+				"Units/itemSkin.txt",
+			},
+			ShadowFile: "war3map.w3t",
+			ShadowOpt:  false,
+			AppliesFn: func(f ObjectFieldMeta) bool {
+				return f.AppliesToItems()
+			},
+			ClassifyFn: func(id string, fields map[string]string) string {
+				// HiveWE buckets the item editor by the `class` column: one of
+				// Permanent / Charged / Campaign / Artifact / PowerUp /
+				// Purchasable / Miscellaneous. We pass it through as the kind
+				// tag; the JS layer titlecases for display.
+				c := strings.TrimSpace(fields["class"])
+				if c == "" {
+					return "misc"
+				}
+				return strings.ToLower(c)
+			},
+			CategoryFn: func(race, kind string) string {
+				if kind == "" {
+					return "Miscellaneous"
+				}
+				return strings.Title(kind)
+			},
+			// Items have no `race` — drop FilterListRow (nil = include all).
+			IconArtFn: unitIconArt,
+			// Items don't have a 3D model preview (they're icons in the world);
+			// leave ModelPathFn nil so the preview pane stays empty.
+			GetMods:  func(s *Session) *w3objmod.File { return s.itemMods },
+			SetMods:  func(s *Session, f *w3objmod.File) { s.itemMods = f },
+			GetDirty: func(s *Session) bool { return s.dirtyItemMods },
+			SetDirty: func(s *Session, v bool) { s.dirtyItemMods = v },
+		}
+		registerKindConfig(itemsConfigCfg)
+	})
+	return itemsConfigCfg
+}
+
+// ---------------------------------------------------------------------------
+// Abilities kind — w3a shadow, opt=TRUE (per-modification level/dataPointer
+// slots between type and value). Per-race base INIs span every WC3 race plus
+// Campaign/Common/Item/Neutral/NightElf/Orc/Undead families.
+// ---------------------------------------------------------------------------
+
+var (
+	abilitiesConfigOnce sync.Once
+	abilitiesConfigCfg  *KindConfig
+)
+
+func AbilitiesConfig() *KindConfig {
+	abilitiesConfigOnce.Do(func() {
+		abilitiesConfigCfg = &KindConfig{
+			Kind:         "abilities",
+			MetaDataFile: "Units/AbilityMetaData.slk",
+			BaseSLKs:     []string{"Units/AbilityData.slk"},
+			BaseINIs: []string{
+				"Units/HumanAbilityFunc.txt",
+				"Units/HumanAbilityStrings.txt",
+				"Units/OrcAbilityFunc.txt",
+				"Units/OrcAbilityStrings.txt",
+				"Units/UndeadAbilityFunc.txt",
+				"Units/UndeadAbilityStrings.txt",
+				"Units/NightElfAbilityFunc.txt",
+				"Units/NightElfAbilityStrings.txt",
+				"Units/NeutralAbilityFunc.txt",
+				"Units/NeutralAbilityStrings.txt",
+				"Units/CampaignAbilityFunc.txt",
+				"Units/CampaignAbilityStrings.txt",
+				"Units/CommonAbilityFunc.txt",
+				"Units/CommonAbilityStrings.txt",
+				"Units/ItemAbilityFunc.txt",
+				"Units/ItemAbilityStrings.txt",
+			},
+			ShadowFile: "war3map.w3a",
+			ShadowOpt:  true,
+			AppliesFn: func(f ObjectFieldMeta) bool {
+				// Ability metadata uses useAbility; if that's missing the
+				// row never surfaces (silently filtered).
+				return f.AppliesToAbilities()
+			},
+			ClassifyFn: classifyAbilityKind,
+			CategoryFn: func(race, kind string) string {
+				cat := titleRace(race)
+				switch kind {
+				case "hero":
+					cat += " Hero Ability"
+				case "item":
+					cat += " Item Ability"
+				case "unit":
+					cat += " Unit Ability"
+				}
+				return cat
+			},
+			IconArtFn: unitIconArt,
+			GetMods:   func(s *Session) *w3objmod.File { return s.abilityMods },
+			SetMods:   func(s *Session, f *w3objmod.File) { s.abilityMods = f },
+			GetDirty:  func(s *Session) bool { return s.dirtyAbilityMods },
+			SetDirty:  func(s *Session, v bool) { s.dirtyAbilityMods = v },
+		}
+		registerKindConfig(abilitiesConfigCfg)
+	})
+	return abilitiesConfigCfg
+}
+
+// classifyAbilityKind buckets ability rows into "hero" | "item" | "unit"
+// using per-ability usehero / useitem / useunit columns (NOT the metadata
+// flags — those describe FIELD applicability; THESE columns on each ability
+// row describe what kind of entity can carry the ability).
+//
+// Order: hero > item > unit. An ability marked both hero AND unit (rare but
+// possible) shows under heroes. Falls back to "unit" when no flag matches.
+func classifyAbilityKind(id string, fields map[string]string) string {
+	if fields["usehero"] == "1" {
+		return "hero"
+	}
+	if fields["useitem"] == "1" {
+		return "item"
+	}
+	if fields["useunit"] == "1" {
+		return "unit"
+	}
+	// HiveWE also falls back to the FourCC casing heuristic when the
+	// columns are unset (custom abilities sometimes omit them) — uppercase
+	// first char = hero. Matches the unit classifier.
+	if id != "" && id[0] >= 'A' && id[0] <= 'Z' {
+		return "hero"
+	}
+	return "unit"
+}
+
+// ---------------------------------------------------------------------------
+// Buffs kind — w3h shadow, opt=false. Shares the per-race ability INIs (buffs
+// and abilities live in the same .txt files in Reforged); the SLK + metadata
+// are separate.
+// ---------------------------------------------------------------------------
+
+var (
+	buffsConfigOnce sync.Once
+	buffsConfigCfg  *KindConfig
+)
+
+func BuffsConfig() *KindConfig {
+	buffsConfigOnce.Do(func() {
+		buffsConfigCfg = &KindConfig{
+			Kind:         "buffs",
+			MetaDataFile: "Units/AbilityBuffMetaData.slk",
+			BaseSLKs:     []string{"Units/AbilityBuffData.slk"},
+			BaseINIs: []string{
+				"Units/HumanAbilityFunc.txt",
+				"Units/HumanAbilityStrings.txt",
+				"Units/OrcAbilityFunc.txt",
+				"Units/OrcAbilityStrings.txt",
+				"Units/UndeadAbilityFunc.txt",
+				"Units/UndeadAbilityStrings.txt",
+				"Units/NightElfAbilityFunc.txt",
+				"Units/NightElfAbilityStrings.txt",
+				"Units/NeutralAbilityFunc.txt",
+				"Units/NeutralAbilityStrings.txt",
+				"Units/CampaignAbilityFunc.txt",
+				"Units/CampaignAbilityStrings.txt",
+				"Units/CommonAbilityFunc.txt",
+				"Units/CommonAbilityStrings.txt",
+				"Units/ItemAbilityFunc.txt",
+				"Units/ItemAbilityStrings.txt",
+			},
+			ShadowFile: "war3map.w3h",
+			ShadowOpt:  false,
+			AppliesFn: func(f ObjectFieldMeta) bool {
+				return f.AppliesToBuffs()
+			},
+			ClassifyFn: func(id string, fields map[string]string) string {
+				// Buffs typically have a `race` column for grouping. We keep
+				// the classification minimal — race already does the bucket
+				// work; everything else collapses to "buff".
+				return "buff"
+			},
+			CategoryFn: func(race, kind string) string {
+				return titleRace(race)
+			},
+			IconArtFn: unitIconArt,
+			GetMods:   func(s *Session) *w3objmod.File { return s.buffMods },
+			SetMods:   func(s *Session, f *w3objmod.File) { s.buffMods = f },
+			GetDirty:  func(s *Session) bool { return s.dirtyBuffMods },
+			SetDirty:  func(s *Session, v bool) { s.dirtyBuffMods = v },
+		}
+		registerKindConfig(buffsConfigCfg)
+	})
+	return buffsConfigCfg
+}
+
+// ---------------------------------------------------------------------------
+// Destructables kind — w3b shadow, opt=false. Tree-trunks, walls, bridges,
+// chests. Grouped by the `category` column.
+// ---------------------------------------------------------------------------
+
+var (
+	destructablesConfigOnce sync.Once
+	destructablesConfigCfg  *KindConfig
+)
+
+func DestructablesConfig() *KindConfig {
+	destructablesConfigOnce.Do(func() {
+		destructablesConfigCfg = &KindConfig{
+			Kind:         "destructables",
+			MetaDataFile: "Units/DestructableMetaData.slk",
+			BaseSLKs:     []string{"Units/DestructableData.slk"},
+			BaseINIs: []string{
+				"Units/DestructableSkin.txt",
+			},
+			ShadowFile: "war3map.w3b",
+			ShadowOpt:  false,
+			AppliesFn: func(f ObjectFieldMeta) bool {
+				return f.AppliesToDestructables()
+			},
+			ClassifyFn: classifyByCategoryColumn,
+			CategoryFn: categoryPassthrough,
+			IconArtFn:  destructableIconArt,
+			ModelPathFn: doodadModelPath,
+			GetMods:    func(s *Session) *w3objmod.File { return s.destructibleMods },
+			SetMods:    func(s *Session, f *w3objmod.File) { s.destructibleMods = f },
+			GetDirty:   func(s *Session) bool { return s.dirtyDestructibleMods },
+			SetDirty:   func(s *Session, v bool) { s.dirtyDestructibleMods = v },
+		}
+		registerKindConfig(destructablesConfigCfg)
+	})
+	return destructablesConfigCfg
+}
+
+// ---------------------------------------------------------------------------
+// Doodads kind — w3d shadow, opt=TRUE (per-modification variation slot for
+// random visual variants). Grouped by the `category` column.
+// ---------------------------------------------------------------------------
+
+var (
+	doodadsConfigOnce sync.Once
+	doodadsConfigCfg  *KindConfig
+)
+
+func DoodadsConfig() *KindConfig {
+	doodadsConfigOnce.Do(func() {
+		doodadsConfigCfg = &KindConfig{
+			Kind:         "doodads",
+			MetaDataFile: "Doodads/DoodadMetaData.slk",
+			BaseSLKs:     []string{"Doodads/Doodads.slk"},
+			BaseINIs: []string{
+				"Doodads/doodadSkins.txt",
+			},
+			ShadowFile: "war3map.w3d",
+			ShadowOpt:  true,
+			AppliesFn: func(f ObjectFieldMeta) bool {
+				return f.AppliesToDoodads()
+			},
+			ClassifyFn:  classifyByCategoryColumn,
+			CategoryFn:  categoryPassthrough,
+			IconArtFn:   destructableIconArt,
+			ModelPathFn: doodadModelPath,
+			GetMods:     func(s *Session) *w3objmod.File { return s.doodadMods },
+			SetMods:     func(s *Session, f *w3objmod.File) { s.doodadMods = f },
+			GetDirty:    func(s *Session) bool { return s.dirtyDoodadMods },
+			SetDirty:    func(s *Session, v bool) { s.dirtyDoodadMods = v },
+		}
+		registerKindConfig(doodadsConfigCfg)
+	})
+	return doodadsConfigCfg
+}
+
+// ---------------------------------------------------------------------------
+// Upgrades kind — w3q shadow, opt=TRUE (per-level fields). Grouped by race.
+// ---------------------------------------------------------------------------
+
+var (
+	upgradesConfigOnce sync.Once
+	upgradesConfigCfg  *KindConfig
+)
+
+func UpgradesConfig() *KindConfig {
+	upgradesConfigOnce.Do(func() {
+		upgradesConfigCfg = &KindConfig{
+			Kind:         "upgrades",
+			MetaDataFile: "Units/UpgradeMetaData.slk",
+			BaseSLKs:     []string{"Units/UpgradeData.slk"},
+			BaseINIs: []string{
+				"Units/CampaignUpgradeFunc.txt",
+				"Units/CampaignUpgradeStrings.txt",
+				"Units/HumanUpgradeFunc.txt",
+				"Units/HumanUpgradeStrings.txt",
+				"Units/OrcUpgradeFunc.txt",
+				"Units/OrcUpgradeStrings.txt",
+				"Units/NightElfUpgradeFunc.txt",
+				"Units/NightElfUpgradeStrings.txt",
+				"Units/UndeadUpgradeFunc.txt",
+				"Units/UndeadUpgradeStrings.txt",
+				"Units/NeutralUpgradeFunc.txt",
+				"Units/NeutralUpgradeStrings.txt",
+			},
+			ShadowFile: "war3map.w3q",
+			ShadowOpt:  true,
+			AppliesFn: func(f ObjectFieldMeta) bool {
+				return f.AppliesToUpgrades()
+			},
+			ClassifyFn: func(id string, fields map[string]string) string {
+				return "upgrade"
+			},
+			CategoryFn: func(race, kind string) string {
+				return titleRace(race)
+			},
+			IconArtFn: unitIconArt,
+			GetMods:   func(s *Session) *w3objmod.File { return s.upgradeMods },
+			SetMods:   func(s *Session, f *w3objmod.File) { s.upgradeMods = f },
+			GetDirty:  func(s *Session) bool { return s.dirtyUpgradeMods },
+			SetDirty:  func(s *Session, v bool) { s.dirtyUpgradeMods = v },
+		}
+		registerKindConfig(upgradesConfigCfg)
+	})
+	return upgradesConfigCfg
+}
+
+// classifyByCategoryColumn is the shared ClassifyFn for kinds where the
+// `category` SLK column is the tree-bucket label (doodads, destructables).
+// Falls back to "misc" when the column is empty.
+func classifyByCategoryColumn(id string, fields map[string]string) string {
+	c := strings.TrimSpace(fields["category"])
+	if c == "" {
+		return "misc"
+	}
+	return c
+}
+
+// categoryPassthrough returns the kind tag verbatim (used for the human-
+// readable category label when the kind tag IS already a human label).
+// Caller passes "" race; the kind comes through as-is.
+func categoryPassthrough(race, kind string) string {
+	if kind == "" {
+		return "Miscellaneous"
+	}
+	return kind
+}
+
+// destructableIconArt picks the doodad/destructable icon path. Same
+// fallback chain as unitIconArt — `art` then `art:sd` then `art:hd` —
+// because destructables/doodads use the same per-mode variant naming
+// convention in their respective skin INIs.
+func destructableIconArt(fields map[string]string) string {
+	return unitIconArt(fields)
+}
+
+// doodadModelPath returns the .mdx + .mdl-fallback paths for doodads /
+// destructables. Doodads.slk stores the model in the `file` column, with
+// `file:hd`/`file:sd` per-mode variants in doodadSkins.txt.
+//
+// For doodads with multiple model variations (e.g. tree variants stored as
+// "TreeA.mdx,TreeB.mdx" or as "Tree" stem + numbered files), we surface
+// only the FIRST variant for the preview — the editor's preview pane is
+// a single-model view, not a variant carousel.
+func doodadModelPath(fields map[string]string) (string, []string) {
+	for _, k := range []string{"file", "file:hd", "file:sd"} {
+		v := strings.TrimSpace(fields[k])
+		if v == "" {
+			continue
+		}
+		// Doodad `file` columns sometimes carry a comma-separated list of
+		// variant stems. Take the first one for the preview.
+		if i := strings.IndexByte(v, ','); i >= 0 {
+			v = strings.TrimSpace(v[:i])
+		}
+		stem := v
+		if i := strings.LastIndexByte(v, '.'); i > 0 {
+			ext := strings.ToLower(v[i:])
+			if ext == ".mdx" || ext == ".mdl" {
+				stem = v[:i]
+			}
+		}
+		return stem + ".mdx", []string{stem + ".mdl"}
+	}
+	return "", nil
 }

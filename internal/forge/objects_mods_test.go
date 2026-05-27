@@ -48,6 +48,39 @@ func stubUnitsBase(t *testing.T) {
 	setObjectBaseForTest("units", stubBase, stubMeta)
 }
 
+// stubKindBase is the generic counterpart of stubUnitsBase used by the
+// Phase-2b per-kind table tests. Installs one stock row + one metadata
+// field for the named kind, with the Applies* flag set via applies(). The
+// row has the named race column populated when race != "".
+//
+// All existing per-kind cache state is cleared up-front + restored on
+// cleanup so tests don't leak into each other.
+func stubKindBase(t *testing.T, kind, rowID, race, fieldFourCC, fieldColumn string, applies func(*ObjectFieldMeta)) {
+	t.Helper()
+	resetObjectBaseCacheForTest(kind)
+	prevReader := baseAssetReader
+	baseAssetReader = nil
+	t.Cleanup(func() {
+		baseAssetReader = prevReader
+		resetObjectBaseCacheForTest(kind)
+	})
+	stubBase := slk.New()
+	row := slk.MappedRow{"name": "StockRow"}
+	if race != "" {
+		row["race"] = race
+	}
+	stubBase.Rows = map[string]slk.MappedRow{rowID: row}
+	stubMeta := &ObjectMetadata{
+		Fields: []ObjectFieldMeta{
+			{ID: fieldFourCC, Field: fieldColumn, Category: "text", Type: "string"},
+		},
+		ByID: map[string]*ObjectFieldMeta{},
+	}
+	applies(&stubMeta.Fields[0])
+	stubMeta.ByID[fieldFourCC] = &stubMeta.Fields[0]
+	setObjectBaseForTest(kind, stubBase, stubMeta)
+}
+
 // minimalFolderMap creates a tempdir folder-map containing only a
 // war3map.w3i (the required file Session.Open insists on). Returns the
 // tempdir path. The map has no units, no doodads, no terrain — just enough

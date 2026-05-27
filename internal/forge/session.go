@@ -115,10 +115,17 @@ type Session struct {
 	// Per-map object-modification tables. The renderer merges these on top
 	// of the stock SLK type indices so customs ("D006") and stock-row edits
 	// both resolve to a usable MDX. nil if the map doesn't include them.
+	//
+	// Phase 2b adds abilityMods/buffMods/upgradeMods so the Object Editor's
+	// kind-agnostic surface (SetObjectField/AddCustomObject/...) can route
+	// through KindConfig.GetMods/SetMods for all seven kinds.
 	doodadMods       *w3objmod.File // war3map.w3d
 	destructibleMods *w3objmod.File // war3map.w3b
-	unitMods         *w3objmod.File // war3map.w3u (parsed for future use)
+	unitMods         *w3objmod.File // war3map.w3u
 	itemMods         *w3objmod.File // war3map.w3t
+	abilityMods      *w3objmod.File // war3map.w3a (opt=true)
+	buffMods         *w3objmod.File // war3map.w3h
+	upgradeMods      *w3objmod.File // war3map.w3q (opt=true)
 	shadowMap        *shd.File      // war3map.shd
 	pathingMap       *wpm.File      // war3map.wpm
 	strings          wts.Strings    // war3map.wts, for TRIGSTR_<n> resolution
@@ -143,13 +150,23 @@ type Session struct {
 	dirtyInfo      bool
 	dirtyTerrain   bool
 	dirtyGameplay  bool
-	// dirtyUnitMods tracks pending edits to the war3map.w3u shadow (the
+	// dirtyXMods tracks pending edits to a per-map war3map.w3* shadow (the
 	// Object Editor's add-custom / delete-custom / set-field surface). Kept
-	// separate from dirtyUnits (which tracks war3mapUnits.doo — PLACED unit
-	// instances) so Save only touches the file that actually changed and the
-	// per-file write semantics stay clean.
-	dirtyUnitMods  bool
-	dirtyListeners []func(bool)
+	// separate from dirtyUnits/dirtyDoodads (which track placed-instance .doo
+	// files) so Save only touches the file that actually changed.
+	//
+	// One flag per kind — added in Phase 2b for the six new kinds. IsDirty
+	// + Save iterate every flag; KindConfig.GetDirty/SetDirty wraps the
+	// per-kind read/write into a closure so the generic mutator path doesn't
+	// need to switch on Kind.
+	dirtyUnitMods         bool
+	dirtyItemMods         bool
+	dirtyAbilityMods      bool
+	dirtyBuffMods         bool
+	dirtyDestructibleMods bool
+	dirtyDoodadMods       bool
+	dirtyUpgradeMods      bool
+	dirtyListeners        []func(bool)
 
 	// Sky-model override: set by the Map Info → Sky picker (or any caller
 	// that wants to change the SetSkyModel call). nil = no pending change
@@ -356,26 +373,39 @@ func (s *Session) Open(path string) error {
 		return err
 	}
 
-	// war3map.w3{d,b,u,t} — OPTIONAL object-modification tables. Custom
+	// war3map.w3{d,b,u,t,a,h,q} — OPTIONAL object-modification tables. Custom
 	// type IDs ("D006") + stock-row edits ("ATtr scale = 1.5") live here.
-	// The renderer's type indices apply these on top of the base SLK.
-	parseDood := func(b []byte) (*w3objmod.File, error) { return w3objmod.Parse(b, true, nil) }
-	parseDest := func(b []byte) (*w3objmod.File, error) { return w3objmod.Parse(b, false, nil) }
-	parseUnit := func(b []byte) (*w3objmod.File, error) { return w3objmod.Parse(b, false, nil) }
-	parseItem := func(b []byte) (*w3objmod.File, error) { return w3objmod.Parse(b, false, nil) }
-	doodadMods, err := readOpt(src, "war3map.w3d", parseDood)
+	// The renderer's type indices + Object Editor apply these on top of the
+	// stock SLK. w3d (doodads) and w3a (abilities) and w3q (upgrades) use
+	// the opt=true wire form (per-mod level/variation/dataPointer slots);
+	// the rest are opt=false.
+	parseOpt := func(b []byte) (*w3objmod.File, error) { return w3objmod.Parse(b, true, nil) }
+	parseFlat := func(b []byte) (*w3objmod.File, error) { return w3objmod.Parse(b, false, nil) }
+	doodadMods, err := readOpt(src, "war3map.w3d", parseOpt)
 	if err != nil {
 		return err
 	}
-	destructibleMods, err := readOpt(src, "war3map.w3b", parseDest)
+	destructibleMods, err := readOpt(src, "war3map.w3b", parseFlat)
 	if err != nil {
 		return err
 	}
-	unitMods, err := readOpt(src, "war3map.w3u", parseUnit)
+	unitMods, err := readOpt(src, "war3map.w3u", parseFlat)
 	if err != nil {
 		return err
 	}
-	itemMods, err := readOpt(src, "war3map.w3t", parseItem)
+	itemMods, err := readOpt(src, "war3map.w3t", parseFlat)
+	if err != nil {
+		return err
+	}
+	abilityMods, err := readOpt(src, "war3map.w3a", parseOpt)
+	if err != nil {
+		return err
+	}
+	buffMods, err := readOpt(src, "war3map.w3h", parseFlat)
+	if err != nil {
+		return err
+	}
+	upgradeMods, err := readOpt(src, "war3map.w3q", parseOpt)
 	if err != nil {
 		return err
 	}
@@ -407,17 +437,27 @@ func (s *Session) Open(path string) error {
 	s.destructibleMods = destructibleMods
 	s.unitMods = unitMods
 	s.itemMods = itemMods
+	s.abilityMods = abilityMods
+	s.buffMods = buffMods
+	s.upgradeMods = upgradeMods
 	s.shadowMap = shadowMap
 	s.pathingMap = pathingMap
 	s.strings = wtsStrings
 	s.gameplay = gameplay
 	s.selection = SelectionState{Items: nil, Primary: -1}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyGameplay || s.dirtyUnitMods
+	wasDirty := s.anyDirtyLocked()
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
 	s.dirtyInfo = false
 	s.dirtyGameplay = false
+	s.dirtyTerrain = false
 	s.dirtyUnitMods = false
+	s.dirtyItemMods = false
+	s.dirtyAbilityMods = false
+	s.dirtyBuffMods = false
+	s.dirtyDestructibleMods = false
+	s.dirtyDoodadMods = false
+	s.dirtyUpgradeMods = false
 	// Reset history — previous map's undo stack must not leak across opens
 	// (creation_numbers would dangle and Revert would error). Mutating the
 	// slices directly under the existing write-lock; ClearHistory's own lock
@@ -477,18 +517,27 @@ func (s *Session) Close() {
 	s.destructibleMods = nil
 	s.unitMods = nil
 	s.itemMods = nil
+	s.abilityMods = nil
+	s.buffMods = nil
+	s.upgradeMods = nil
 	s.shadowMap = nil
 	s.pathingMap = nil
 	s.strings = nil
 	s.gameplay = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.dirtyUnitMods
+	wasDirty := s.anyDirtyLocked()
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
 	s.dirtyInfo = false
 	s.dirtyTerrain = false
 	s.dirtyGameplay = false
 	s.dirtyUnitMods = false
+	s.dirtyItemMods = false
+	s.dirtyAbilityMods = false
+	s.dirtyBuffMods = false
+	s.dirtyDestructibleMods = false
+	s.dirtyDoodadMods = false
+	s.dirtyUpgradeMods = false
 	hadHistory := len(s.history) > 0 || len(s.redoStack) > 0
 	s.history = nil
 	s.redoStack = nil
@@ -631,6 +680,30 @@ func (s *Session) ItemMods() *w3objmod.File {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.itemMods
+}
+
+// AbilityMods returns the parsed war3map.w3a (per-map ability modifications +
+// new derived abilities), or nil if absent. Phase 2b accessor.
+func (s *Session) AbilityMods() *w3objmod.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.abilityMods
+}
+
+// BuffMods returns the parsed war3map.w3h (per-map buff modifications + new
+// derived buffs), or nil if absent. Phase 2b accessor.
+func (s *Session) BuffMods() *w3objmod.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.buffMods
+}
+
+// UpgradeMods returns the parsed war3map.w3q (per-map upgrade modifications +
+// new derived upgrades), or nil if absent. Phase 2b accessor.
+func (s *Session) UpgradeMods() *w3objmod.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.upgradeMods
 }
 
 // ShadowMap returns the parsed war3map.shd, or nil if absent.
@@ -1478,9 +1551,15 @@ func (s *Session) DeleteCustomObject(cfg *KindConfig, id string) error {
 // kind's per-map shadow + the other per-file dirty flags. Caller MUST hold
 // s.mu (read or write). Used by the object-edit mutators to detect the 0→1
 // transition that fires the public dirty event.
+//
+// Phase 2b: includes every per-kind shadow dirty flag. Add new dirty flags
+// here AND to IsDirty() AND to Save()'s save-loop AND to Open/Close's reset
+// block; otherwise the Save pill leaks state across map opens.
 func (s *Session) anyDirtyLocked() bool {
 	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain ||
-		s.dirtyGameplay || s.dirtyUnitMods
+		s.dirtyGameplay || s.dirtyUnitMods || s.dirtyItemMods ||
+		s.dirtyAbilityMods || s.dirtyBuffMods || s.dirtyDestructibleMods ||
+		s.dirtyDoodadMods || s.dirtyUpgradeMods
 }
 
 // ---------------------------------------------------------------------------
@@ -1546,6 +1625,52 @@ func (s *Session) MutateGameplay(fn func(*miscdata.File)) error {
 	return nil
 }
 
+// saveObjectMods is the shared per-kind shadow-save helper called from Save's
+// loop over every registered KindConfig. No-op when the kind's dirty flag
+// isn't set. When the shadow pointer is nil but the dirty flag is somehow
+// set (defensive — shouldn't happen via the public mutators) writes an
+// empty File rather than crashing.
+//
+// Caller does NOT hold s.mu — this acquires and releases internally for both
+// reads (shadow pointer + dirty flag) and the post-write dirty clear.
+//
+// Encode passes the kind's FieldMap so the on-disk modification IDs validate;
+// the Overrides map keys carried on the in-memory File are FOURCC-keyed
+// (matching how Parse was called at Open time), so FieldMap acts as a check
+// rather than a translation table here.
+func saveObjectMods(s *Session, cfg *KindConfig, src fileSource) error {
+	s.mu.Lock()
+	if !cfg.GetDirty(s) {
+		s.mu.Unlock()
+		return nil
+	}
+	mods := cfg.GetMods(s)
+	s.mu.Unlock()
+
+	if mods == nil {
+		// Defensive — public mutators always allocate before flipping the
+		// dirty flag, but a future-added code path could trip this. An
+		// empty File is a valid (and tiny) on-disk shape.
+		mods = &w3objmod.File{Version: 3}
+	}
+	_, meta, _ := loadObjectBase(cfg)
+	var fieldMap w3objmod.FieldMap
+	if meta != nil {
+		fieldMap = meta.FieldMap()
+	}
+	data, err := w3objmod.Encode(mods, cfg.ShadowOpt, fieldMap)
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", cfg.ShadowFile, err)
+	}
+	if err := src.write(cfg.ShadowFile, data); err != nil {
+		return fmt.Errorf("write %s: %w", cfg.ShadowFile, err)
+	}
+	s.mu.Lock()
+	cfg.SetDirty(s, false)
+	s.mu.Unlock()
+	return nil
+}
+
 // applyTilesetSnapshot is the shared mutation helper used by SwapTileset's
 // initial apply path and by swapTilesetCmd.Apply/Revert for undo/redo.
 // Caller MUST hold s.mu. No notifications / dirty flips happen here —
@@ -1568,7 +1693,7 @@ func applyTilesetSnapshot(s *Session, letter byte, ground, cliff []string, tileG
 func (s *Session) IsDirty() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.dirtyUnitMods || s.pendingSkyModel != nil
+	return s.anyDirtyLocked() || s.pendingSkyModel != nil
 }
 
 // Save flushes every dirty in-memory file back through the source's write
@@ -1587,7 +1712,7 @@ func (s *Session) Save() error {
 		s.mu.Unlock()
 		return fmt.Errorf("no map loaded")
 	}
-	if !s.dirtyUnits && !s.dirtyDoodads && !s.dirtyInfo && !s.dirtyTerrain && !s.dirtyGameplay && !s.dirtyUnitMods && s.pendingSkyModel == nil {
+	if !s.anyDirtyLocked() && s.pendingSkyModel == nil {
 		s.mu.Unlock()
 		return nil // nothing to do
 	}
@@ -1597,7 +1722,6 @@ func (s *Session) Save() error {
 	info := s.info
 	terrain := s.terrain
 	gameplay := s.gameplay
-	unitMods := s.unitMods
 	saveUnits := s.dirtyUnits
 	saveDoodads := s.dirtyDoodads
 	saveInfo := s.dirtyInfo
@@ -1605,7 +1729,6 @@ func (s *Session) Save() error {
 	isLua := info != nil && info.Lua
 	saveTerrain := s.dirtyTerrain
 	saveGameplay := s.dirtyGameplay
-	saveUnitMods := s.dirtyUnitMods
 	s.mu.Unlock()
 
 	if src == nil {
@@ -1693,38 +1816,15 @@ func (s *Session) Save() error {
 		s.dirtyGameplay = false
 		s.mu.Unlock()
 	}
-	if saveUnitMods {
-		// Encode the unit-mods shadow back to war3map.w3u. The Overrides
-		// keys carried on the in-memory File are FOURCC-keyed (Parse was
-		// called with a nil FieldMap at Open time — translation to
-		// column-name space happens at MergedUnits read time, not at parse
-		// time). We pass the FieldMap here so Encode can validate that the
-		// keys are recognized; passing nil also works (Encode emits 4-char
-		// keys as-is when no FieldMap is supplied), but the field-meta
-		// lookup is cheap and a nice safety net.
-		mods := unitMods
-		if mods == nil {
-			// AddCustomUnit always allocates a non-nil unitMods before
-			// flipping dirtyUnitMods, but be defensive — a stray write path
-			// could theoretically dirty without allocating. An empty file
-			// is a valid (and small) on-disk shape.
-			mods = &w3objmod.File{Version: 3}
+	// Per-kind object-shadow saves. One pass over every registered KindConfig
+	// flushes whichever shadows are dirty back to their war3map.w3* file.
+	// Order doesn't matter — each file is independent on disk and on the
+	// dirty bus. Partial-write semantics: per-kind error returns immediately
+	// with subsequent kinds left dirty for retry.
+	for _, cfg := range kindConfigs {
+		if err := saveObjectMods(s, cfg, src); err != nil {
+			return err
 		}
-		_, meta, _ := loadObjectBase(UnitsConfig())
-		var fieldMap w3objmod.FieldMap
-		if meta != nil {
-			fieldMap = meta.FieldMap()
-		}
-		data, err := w3objmod.Encode(mods, UnitsConfig().ShadowOpt, fieldMap)
-		if err != nil {
-			return fmt.Errorf("encode war3map.w3u: %w", err)
-		}
-		if err := src.write("war3map.w3u", data); err != nil {
-			return fmt.Errorf("write war3map.w3u: %w", err)
-		}
-		s.mu.Lock()
-		s.dirtyUnitMods = false
-		s.mu.Unlock()
 	}
 	if pendingSky != nil {
 		scriptName := "war3map.j"

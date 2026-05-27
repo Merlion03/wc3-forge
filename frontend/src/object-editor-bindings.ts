@@ -10,10 +10,29 @@
 
 import type { main } from '../wailsjs/go/models'
 
+// Object-editor kind tag. Wire-stable across Go + JS — adding a new kind
+// here MUST be paired with a Go-side registerObjectKind in handlers.go.
+export type ObjectKind =
+  | 'units'
+  | 'items'
+  | 'abilities'
+  | 'buffs'
+  | 'destructables'
+  | 'doodads'
+  | 'upgrades'
+
 interface WailsApp {
+  // Phase-1b units-typed surface kept as backwards-compat aliases.
   SetUnitObjectField: (id: string, column: string, value: string) => Promise<main.UnitObjectDetail>
   CreateCustomUnit: (baseID: string, id: string) => Promise<CreateCustomUnitResult>
   DeleteCustomUnit: (id: string) => Promise<void>
+  // Phase-2b generic surface. Same return shapes — the UnitObjectListEntity
+  // / UnitObjectDetail types serve every kind.
+  ListObjects: (kind: ObjectKind) => Promise<main.UnitObjectListEntity[]>
+  GetObject: (kind: ObjectKind, id: string) => Promise<main.UnitObjectDetail | null>
+  SetObjectField: (kind: ObjectKind, id: string, column: string, value: string) => Promise<main.UnitObjectDetail>
+  CreateCustomObject: (kind: ObjectKind, baseID: string, id: string) => Promise<CreateCustomObjectResult>
+  DeleteCustomObject: (kind: ObjectKind, id: string) => Promise<void>
 }
 
 // The Wails autobind surface — populated by the Go side at startup, so it
@@ -24,6 +43,11 @@ function app(): WailsApp {
 }
 
 export interface CreateCustomUnitResult {
+  id: string
+  detail: main.UnitObjectDetail
+}
+
+export interface CreateCustomObjectResult {
   id: string
   detail: main.UnitObjectDetail
 }
@@ -45,4 +69,44 @@ export function CreateCustomUnit(
 
 export function DeleteCustomUnit(id: string): Promise<void> {
   return app().DeleteCustomUnit(id)
+}
+
+// Generic Phase-2b helpers. Default to type-safety via the ObjectKind union
+// so a typo in the caller fails at compile time.
+
+export function ListObjects(
+  kind: ObjectKind,
+): Promise<main.UnitObjectListEntity[]> {
+  return app().ListObjects(kind)
+}
+
+export function GetObject(
+  kind: ObjectKind,
+  id: string,
+): Promise<main.UnitObjectDetail | null> {
+  return app().GetObject(kind, id)
+}
+
+export function SetObjectField(
+  kind: ObjectKind,
+  id: string,
+  column: string,
+  value: string,
+): Promise<main.UnitObjectDetail> {
+  return app().SetObjectField(kind, id, column, value)
+}
+
+export function CreateCustomObject(
+  kind: ObjectKind,
+  baseID: string,
+  id: string,
+): Promise<CreateCustomObjectResult> {
+  return app().CreateCustomObject(kind, baseID, id)
+}
+
+export function DeleteCustomObject(
+  kind: ObjectKind,
+  id: string,
+): Promise<void> {
+  return app().DeleteCustomObject(kind, id)
 }

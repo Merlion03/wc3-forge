@@ -289,6 +289,10 @@ func listObjects(cfg *KindConfig) ([]objectsUnitsListEntity, error) {
 		if cfg.CategoryFn != nil {
 			cat = cfg.CategoryFn(race, kind)
 		}
+		iconArt := ""
+		if cfg.IconArtFn != nil {
+			iconArt = cfg.IconArtFn(u.Fields)
+		}
 		out = append(out, objectsUnitsListEntity{
 			ID:        id,
 			Name:      name,
@@ -300,7 +304,7 @@ func listObjects(cfg *KindConfig) ([]objectsUnitsListEntity, error) {
 			IsEdited:  u.IsEdited,
 			BaseID:    u.BaseID,
 			Campaign:  u.Fields["campaign"] == "1",
-			IconArt:   unitIconArt(u.Fields),
+			IconArt:   iconArt,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -373,10 +377,17 @@ func getObject(cfg *KindConfig, id string) (*objectsUnitsGetResult, error) {
 		return rows[i].DisplayName < rows[j].DisplayName
 	})
 
-	modelPath, modelFallbacks := unitModelPath(u.Fields)
+	modelPath, modelFallbacks := "", []string(nil)
+	if cfg.ModelPathFn != nil {
+		modelPath, modelFallbacks = cfg.ModelPathFn(u.Fields)
+	}
 	kind := ""
 	if cfg.ClassifyFn != nil {
 		kind = cfg.ClassifyFn(u.ID, u.Fields)
+	}
+	iconArt := ""
+	if cfg.IconArtFn != nil {
+		iconArt = cfg.IconArtFn(u.Fields)
 	}
 	return &objectsUnitsGetResult{
 		ID:             u.ID,
@@ -386,7 +397,7 @@ func getObject(cfg *KindConfig, id string) (*objectsUnitsGetResult, error) {
 		IsEdited:       u.IsEdited,
 		Race:           strings.ToLower(u.Fields["race"]),
 		Kind:           kind,
-		IconArt:        unitIconArt(u.Fields),
+		IconArt:        iconArt,
 		ModelPath:      modelPath,
 		ModelFallbacks: modelFallbacks,
 		Fields:         rows,

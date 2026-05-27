@@ -99,14 +99,19 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("_ui.send_command", handleUISendCommand)
 	// Object Editor — kind-agnostic. The "objects.*" namespace is distinct
 	// from "units.*"/"doodads.*", which are reserved for *placed* entities
-	// (war3mapUnits.doo / war3map.doo). Phase 2a wires units only;
-	// Phase 2b adds the other six kinds by calling registerObjectKind
-	// with their respective KindConfig (ItemsConfig, AbilitiesConfig, ...).
+	// (war3mapUnits.doo / war3map.doo). Phase 2b wires all seven kinds:
+	// units, items, abilities, buffs, destructables, doodads, upgrades.
 	//
 	// Each call stamps out six routes:
 	//   objects.<kind>.list / .get / .fields_meta
 	//   objects.<kind>.set_field / .create_custom / .delete_custom
 	registerObjectKind(reg, UnitsConfig())
+	registerObjectKind(reg, ItemsConfig())
+	registerObjectKind(reg, AbilitiesConfig())
+	registerObjectKind(reg, BuffsConfig())
+	registerObjectKind(reg, DestructablesConfig())
+	registerObjectKind(reg, DoodadsConfig())
+	registerObjectKind(reg, UpgradesConfig())
 }
 
 // handleUISendCommand forwards a raw test-driver command string. Used by

@@ -1607,6 +1607,98 @@ func (a *App) DeleteCustomUnit(id string) error {
 	return forge.DeleteCustomUnitObject(id)
 }
 
+// ---------------------------------------------------------------------------
+// Generic Object Editor surface — Phase 2b. The kind-typed wrappers above
+// (ListUnitObjects, GetUnitObject, ...) stay as backwards-compat aliases.
+// New JS code should target the generic methods below, which accept a kind
+// string ("units"/"items"/"abilities"/"buffs"/"destructables"/"doodads"/
+// "upgrades") and dispatch through the registered KindConfig.
+//
+// Wails surface choice was option B (six generic methods) over option A
+// (42 hand-typed per-kind methods). Wire shapes are identical across kinds
+// — the same UnitObjectListEntity / UnitObjectDetail structures serve every
+// editor; only the kind tag changes. The generic path also lets future
+// kinds light up without touching app.go.
+// ---------------------------------------------------------------------------
+
+// ListObjects returns the merged tree for the given kind. Empty slice (not
+// error) when no map is loaded or CASC isn't reachable for that kind's
+// MetaData — the UI shows an empty-state instead of an error toast.
+func (a *App) ListObjects(kind string) []UnitObjectListEntity {
+	out, err := forge.ListObjects(kind)
+	if err != nil {
+		return []UnitObjectListEntity{}
+	}
+	dtos := make([]UnitObjectListEntity, 0, len(out))
+	for _, r := range out {
+		dtos = append(dtos, UnitObjectListEntity{
+			ID:        r.ID,
+			Name:      r.Name,
+			Race:      r.Race,
+			RaceLabel: r.RaceLabel,
+			Kind:      r.Kind,
+			Category:  r.Category,
+			IsCustom:  r.IsCustom,
+			IsEdited:  r.IsEdited,
+			BaseID:    r.BaseID,
+			Campaign:  r.Campaign,
+			IconArt:   r.IconArt,
+		})
+	}
+	return dtos
+}
+
+// GetObject returns the full field table for one object of the given kind.
+// Returns nil (not error) when the id is missing or no map loaded — the UI
+// shows an inline empty state in that case.
+func (a *App) GetObject(kind, id string) *UnitObjectDetail {
+	if id == "" {
+		return nil
+	}
+	d, err := forge.GetObject(kind, id)
+	if err != nil || d == nil {
+		return nil
+	}
+	return toUnitObjectDetail(d)
+}
+
+// SetObjectField writes a single field override on an object of the given
+// kind. column may be FourCC (e.g. "unam") or column-name (e.g. "name") —
+// the mutator normalizes via the kind's MetaData. Returns the post-mutation
+// detail so the JS side can re-render the Overridden flag in-place.
+func (a *App) SetObjectField(kind, id, column, value string) (*UnitObjectDetail, error) {
+	d, err := forge.SetObjectField(kind, id, column, value)
+	if err != nil {
+		return nil, err
+	}
+	return toUnitObjectDetail(d), nil
+}
+
+// CreateCustomObjectResult mirrors CreateCustomUnitResult for the generic
+// surface — chosen ID + full detail in one round-trip.
+type CreateCustomObjectResult struct {
+	ID     string            `json:"id"`
+	Detail *UnitObjectDetail `json:"detail"`
+}
+
+// CreateCustomObject appends a new custom row of the given kind derived from
+// baseID and returns its full detail. id is optional — when empty the
+// allocator picks the next free FourCC starting from baseID's first
+// character.
+func (a *App) CreateCustomObject(kind, baseID, id string) (*CreateCustomObjectResult, error) {
+	chosenID, d, err := forge.CreateCustomObject(kind, baseID, id)
+	if err != nil {
+		return nil, err
+	}
+	return &CreateCustomObjectResult{ID: chosenID, Detail: toUnitObjectDetail(d)}, nil
+}
+
+// DeleteCustomObject removes a custom row of the given kind by id. Errors
+// if id isn't a custom row (stock rows aren't deletable).
+func (a *App) DeleteCustomObject(kind, id string) error {
+	return forge.DeleteCustomObject(kind, id)
+}
+
 // GameplayConstantRow is the JSON-friendly shape for one row in the
 // Gameplay Constants Editor. Carries the section the row belongs to (only
 // [Misc] in practice today) and the raw value as stored in war3mapMisc.txt
