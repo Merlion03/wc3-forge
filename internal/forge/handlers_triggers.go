@@ -342,7 +342,7 @@ func triggerFunctionsMetaCached() *TriggerFunctionsMetaResponse {
 			if sn, ok := rows["_"+key+"_ScriptName"]; ok && len(sn) > 0 {
 				m.ScriptName = sn[0]
 			}
-			if hint, ok := td.TriggerStrings[key]; ok {
+			if hint := td.HintFor(key); hint != "" {
 				m.Hint = hint
 			}
 			resp.Functions = append(resp.Functions, m)

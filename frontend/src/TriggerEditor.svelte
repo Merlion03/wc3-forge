@@ -229,13 +229,14 @@
   // Render one ECA + its children to a flat row list with depth so the UI
   // can indent. Magic ECAs (IfThenElseMultiple, etc.) get synthetic section
   // headers per HiveWE's trigger_editor.cpp L351-365.
-  type ECARow = { label: string; depth: number; isMagicChild?: boolean; raw: TriggerECA }
+  type ECARow = { label: string; depth: number; isMagicChild?: boolean; raw: TriggerECA; hint?: string }
   function renderECARows(ecas: TriggerECA[], depth: number): ECARow[] {
     const out: ECARow[] = []
     for (const e of ecas) {
       const meta = metaByName.get(e.name)
       const label = renderECALabel(e, meta?.parameters_template)
-      out.push({ label, depth, raw: e })
+      const hint = meta?.hint || ''
+      out.push({ label, depth, raw: e, hint })
       if (e.children && e.children.length > 0) {
         if (MAGIC_ECAS.has(e.name)) {
           // Bucket children under section headers. The bucket assignment
@@ -469,7 +470,11 @@
               <summary class="te-section-summary">Events ({parts.events.length})</summary>
               <div class="te-eca-list">
                 {#each renderECARows(parts.events, 0) as r (r.raw === r.raw && r.label)}
-                  <div class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}" style="padding-left: {r.depth * 16}px">{r.label}</div>
+                  <div
+                    class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}"
+                    style="padding-left: {r.depth * 16}px"
+                    title={r.hint || undefined}
+                  >{r.label}</div>
                 {/each}
                 {#if parts.events.length === 0}
                   <div class="te-eca-empty">(none)</div>
@@ -481,7 +486,11 @@
               <summary class="te-section-summary">Conditions ({parts.conditions.length})</summary>
               <div class="te-eca-list">
                 {#each renderECARows(parts.conditions, 0) as r (r.raw === r.raw && r.label)}
-                  <div class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}" style="padding-left: {r.depth * 16}px">{r.label}</div>
+                  <div
+                    class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}"
+                    style="padding-left: {r.depth * 16}px"
+                    title={r.hint || undefined}
+                  >{r.label}</div>
                 {/each}
                 {#if parts.conditions.length === 0}
                   <div class="te-eca-empty">(none)</div>
@@ -493,7 +502,11 @@
               <summary class="te-section-summary">Actions ({parts.actions.length})</summary>
               <div class="te-eca-list">
                 {#each renderECARows(parts.actions, 0) as r (r.raw === r.raw && r.label)}
-                  <div class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}" style="padding-left: {r.depth * 16}px">{r.label}</div>
+                  <div
+                    class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}"
+                    style="padding-left: {r.depth * 16}px"
+                    title={r.hint || undefined}
+                  >{r.label}</div>
                 {/each}
                 {#if parts.actions.length === 0}
                   <div class="te-eca-empty">(none)</div>

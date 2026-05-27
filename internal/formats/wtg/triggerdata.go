@@ -265,3 +265,18 @@ func (td *TriggerData) Argc(name string) (int, bool) {
 	n, ok := td.ArgumentCounts[name]
 	return n, ok
 }
+
+// HintFor returns the English hover-tooltip text for the given function name,
+// or "" if no hint is loaded for that name. Hints come from
+// UI/TriggerStrings.txt — see LoadTriggerStrings. The frontend's Trigger
+// Editor surfaces this via native title="" tooltips on each ECA row.
+//
+// Callers can branch on the empty-string return to skip rendering tooltips
+// for functions that don't have a hint (custom user-defined functions never
+// do; many WC3 stock functions have one).
+func (td *TriggerData) HintFor(name string) string {
+	if td == nil {
+		return ""
+	}
+	return td.TriggerStrings[name]
+}
