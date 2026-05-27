@@ -390,6 +390,105 @@ func handleObjectsUnitsGet(params json.RawMessage) (any, error) {
 	}, nil
 }
 
+// objectsUnitsSetFieldParams carries one field-edit. column may be either
+// a FourCC ("unam") or a SLK column name ("name") — the mutator normalizes.
+// value is always a string; type-aware encoding happens at Save (w3objmod.Encode
+// infers int → float → string).
+type objectsUnitsSetFieldParams struct {
+	ID     string `json:"id"`
+	Column string `json:"column"`
+	Value  string `json:"value"`
+}
+
+// handleObjectsUnitsSetField mutates a single field on a unit (stock or
+// custom) and returns the updated full Get payload so the caller doesn't
+// need a follow-up round-trip to refresh its view.
+func handleObjectsUnitsSetField(params json.RawMessage) (any, error) {
+	var p objectsUnitsSetFieldParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.ID == "" {
+		return nil, errors.New("id is required")
+	}
+	if p.Column == "" {
+		return nil, errors.New("column is required")
+	}
+	if err := Current.SetUnitField(p.ID, p.Column, p.Value); err != nil {
+		return nil, err
+	}
+	// Re-issue the get so callers get the post-mutation field table back
+	// in one round-trip. The Overridden flag flips, and any cascading
+	// formatting changes (display resolution) are re-computed.
+	return handleObjectsUnitsGet(mustMarshalRaw(objectsUnitsGetParams{ID: p.ID}))
+}
+
+// objectsUnitsCreateCustomParams carries a custom-creation request. base_id
+// is required (a stock unit to inherit from). id is optional — when empty,
+// the allocator picks the next free FourCC starting from the base's first
+// character (e.g. base "hpea" → "h001"; base "Hpal" → "H001").
+type objectsUnitsCreateCustomParams struct {
+	BaseID string `json:"base_id"`
+	ID     string `json:"id,omitempty"`
+}
+
+type objectsUnitsCreateCustomResult struct {
+	ID     string                 `json:"id"`
+	Detail *objectsUnitsGetResult `json:"detail"`
+}
+
+// handleObjectsUnitsCreateCustom appends a new custom unit and returns the
+// chosen ID + the full Get payload (so the caller can immediately render
+// the new unit's field table without a separate round-trip).
+func handleObjectsUnitsCreateCustom(params json.RawMessage) (any, error) {
+	var p objectsUnitsCreateCustomParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.BaseID == "" {
+		return nil, errors.New("base_id is required")
+	}
+	id, err := Current.AddCustomUnit(p.ID, p.BaseID)
+	if err != nil {
+		return nil, err
+	}
+	got, err := handleObjectsUnitsGet(mustMarshalRaw(objectsUnitsGetParams{ID: id}))
+	if err != nil {
+		return nil, fmt.Errorf("get newly-created %q: %w", id, err)
+	}
+	detail, _ := got.(*objectsUnitsGetResult)
+	return objectsUnitsCreateCustomResult{ID: id, Detail: detail}, nil
+}
+
+// objectsUnitsDeleteCustomParams carries a delete request. Errors if id
+// isn't a custom (stock units aren't deletable).
+type objectsUnitsDeleteCustomParams struct {
+	ID string `json:"id"`
+}
+
+func handleObjectsUnitsDeleteCustom(params json.RawMessage) (any, error) {
+	var p objectsUnitsDeleteCustomParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.ID == "" {
+		return nil, errors.New("id is required")
+	}
+	if err := Current.DeleteCustomUnit(p.ID); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+// mustMarshalRaw is a tiny helper for handlers that re-dispatch into other
+// handlers. json.Marshal on a known-good struct never errors; eliding the
+// error keeps the call sites cleaner than the standard
+// `if x, err := json.Marshal(...); err != nil { ... }` boilerplate.
+func mustMarshalRaw(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
+}
+
 type objectsUnitsFieldsMetaItem struct {
 	ID          string `json:"id"`
 	Field       string `json:"field"`

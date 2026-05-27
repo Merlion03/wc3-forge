@@ -1,17 +1,29 @@
 <script lang="ts">
-  // Phase 1a Object Editor: read-only view of map units. Shadcn-svelte Dialog
-  // hosts a two-pane layout — left tree (Race → Kind → Unit) with search;
-  // right table of fields for the selected unit, grouped by the same
-  // categories HiveWE's UnitMetaData drives (text, stats, combat, art, …).
+  // Object Editor (Phase 1b — write-side). Shadcn-svelte Dialog hosts the
+  // two-pane layout (left: Race → Kind → Unit tree; right: per-field table
+  // for the selected unit grouped by Category).
   //
-  // Wire format: ListUnitObjects() returns flat rows; the tree is built
-  // client-side by grouping on race+kind. GetUnitObject(id) returns the
-  // ordered field list for one unit; we re-bucket by Category for the
-  // collapsible sections. Both APIs are Wails-bound to the same forge.*
-  // funcs the MCP bridge exposes — Wails surface and MCP wire stay in
-  // lockstep, so a future agent-driven workflow sees identical data.
+  // Reads: ListUnitObjects + GetUnitObject (Wails-bound) wrap the same
+  // forge.MergedUnits view the MCP bridge exposes through objects.units.list
+  // and objects.units.get — same merged base+w3u shadow.
+  //
+  // Writes (Phase 1b):
+  //   - inline editor per field (Enter/blur commits via SetUnitObjectField);
+  //   - "Add Custom Unit" button above the tree opens a small picker that
+  //     calls CreateCustomUnit;
+  //   - per-row delete (×) on custom units calls DeleteCustomUnit.
+  //
+  // Refresh: subscribes to wc3-forge:entity-changed with Kind==='unit_mod'
+  // so external mutations (MCP, undo/redo) re-pull the tree + current detail.
 
+  import { onMount, onDestroy } from 'svelte'
   import { ListUnitObjects, GetUnitObject } from '../wailsjs/go/main/App.js'
+  import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
+  import {
+    SetUnitObjectField,
+    CreateCustomUnit,
+    DeleteCustomUnit,
+  } from './object-editor-bindings'
   import type { main } from '../wailsjs/go/models'
   import * as Dialog from '$lib/components/ui/dialog'
   import { Input } from '$lib/components/ui/input'
@@ -37,11 +49,17 @@
   let loading: boolean = $state(false)
   let detailLoading: boolean = $state(false)
   let search: string = $state('')
+  let errorMsg: string = $state('')
+  // "Add Custom Unit" inline picker state. open === false hides the panel;
+  // when true the user picks a base + optional id, and CreateCustomUnit is
+  // called on confirm.
+  let showAddCustom: boolean = $state(false)
+  let addCustomBaseID: string = $state('')
+  let addCustomNewID: string = $state('')
 
   // Reload whenever the dialog opens — the underlying merged view is
-  // map-state-dependent, and a save-back path in a future phase will need
-  // this re-fetch to reflect new shadow data. Cheap enough to refresh
-  // unconditionally rather than tracking dirty-state across opens.
+  // map-state-dependent and the entity-changed bus may have fired while
+  // closed. Cheap enough to refresh unconditionally.
   $effect(() => {
     if (open) {
       reload().then(() => {
@@ -51,7 +69,36 @@
       selectedId = ''
       detail = null
       search = ''
+      errorMsg = ''
+      showAddCustom = false
     }
+  })
+
+  // Subscribe to the entity-changed bus while the dialog is open. unit_mod
+  // events fire when SetUnitField / AddCustomUnit / DeleteCustomUnit run
+  // (from this UI OR from MCP OR from undo/redo); we refresh the tree + the
+  // currently-selected detail in response.
+  const ENTITY_EVENT = 'wc3-forge:entity-changed'
+  onMount(() => {
+    EventsOn(ENTITY_EVENT, async (payload: { kind: string; field?: string }) => {
+      if (!payload || payload.kind !== 'unit_mod') return
+      // Either an "edit" (Field='unam' etc.) or a "customs" event. Both
+      // need the tree refreshed (custom counts change; edited flag may
+      // flip on a stock unit). Detail also re-pulled if a unit is selected.
+      await reload()
+      if (selectedId) {
+        try {
+          detail = await GetUnitObject(selectedId)
+        } catch {
+          /* selected unit may have been deleted; clear */
+          detail = null
+          selectedId = ''
+        }
+      }
+    })
+  })
+  onDestroy(() => {
+    EventsOff(ENTITY_EVENT)
   })
 
   async function reload() {
@@ -79,9 +126,83 @@
     }
   }
 
+  // Commit one field edit. value is the raw string from the input — server
+  // infers wire-type (int/float/string) at Encode time based on the parse
+  // result. Updates detail in-place from the returned payload so the
+  // Overridden flag re-flags without a second round-trip.
+  async function commitField(field: main.UnitObjectField, raw: string) {
+    if (!detail) return
+    if (raw === field.value) return // no-op
+    errorMsg = ''
+    try {
+      const updated = await SetUnitObjectField(detail.id, field.field, raw)
+      if (updated) detail = updated
+    } catch (e) {
+      errorMsg = String(e)
+      console.error('SetUnitObjectField failed', e)
+    }
+  }
+
+  // Build the bool-checkbox commit: WC3 stores bools as 1/0 strings.
+  async function commitBoolField(field: main.UnitObjectField, checked: boolean) {
+    return commitField(field, checked ? '1' : '0')
+  }
+
+  function openAddCustom() {
+    addCustomNewID = ''
+    // Default base: currently-selected unit if any; else first stock unit
+    // in the tree (alphabetical by name).
+    if (selectedId) {
+      addCustomBaseID = selectedId
+    } else if (rows.length > 0) {
+      // Pick the first non-custom row alphabetically.
+      const stock = rows.filter((r) => !r.is_custom)
+      addCustomBaseID = stock[0]?.id ?? ''
+    } else {
+      addCustomBaseID = ''
+    }
+    showAddCustom = true
+  }
+
+  async function confirmAddCustom() {
+    if (!addCustomBaseID) {
+      errorMsg = 'pick a base unit'
+      return
+    }
+    errorMsg = ''
+    try {
+      const res = await CreateCustomUnit(addCustomBaseID, addCustomNewID)
+      showAddCustom = false
+      if (res?.id) {
+        // Reload tree + select the new id. The entity-changed event will
+        // also fire reload as a backstop; harmless duplicate work.
+        await reload()
+        await selectUnit(res.id)
+      }
+    } catch (e) {
+      errorMsg = String(e)
+      console.error('CreateCustomUnit failed', e)
+    }
+  }
+
+  async function deleteCustom(id: string) {
+    if (!confirm(`Delete custom unit ${id}?`)) return
+    errorMsg = ''
+    try {
+      await DeleteCustomUnit(id)
+      // Clear selection if the deleted id was selected.
+      if (selectedId === id) {
+        selectedId = ''
+        detail = null
+      }
+      await reload()
+    } catch (e) {
+      errorMsg = String(e)
+      console.error('DeleteCustomUnit failed', e)
+    }
+  }
+
   // Filter rows by search. Substring match against id, name, and category.
-  // Lowercased once per keystroke; the row count is small enough to filter
-  // synchronously per keystroke without debouncing.
   let filteredRows = $derived.by(() => {
     const q = search.trim().toLowerCase()
     if (!q) return rows
@@ -93,8 +214,11 @@
     )
   })
 
-  // Tree: Race → Kind → [Unit]. Order: race alpha, kind in conventional
-  // order (unit, hero, building, special), unit by name.
+  // Stock units only — for the Add Custom Unit base picker. Customs can't
+  // be a base (we don't support multi-level inheritance) and showing them
+  // would clutter the dropdown.
+  let stockRows = $derived.by(() => rows.filter((r) => !r.is_custom))
+
   const KIND_ORDER: Record<string, number> = {
     unit: 0,
     hero: 1,
@@ -144,11 +268,6 @@
     return out
   })
 
-  // Field table for the selected unit: group fields by Category. Within a
-  // category, fields are already pre-sorted server-side (by Index then
-  // display name). HiveWE's category order is the natural reading order
-  // for unit data — Text first (Name, Description), then visible/visual
-  // (Art), then numeric (Stats, Combat), then specialized.
   const CATEGORY_ORDER: Record<string, number> = {
     text: 0,
     art: 1,
@@ -204,6 +323,24 @@
     return out
   })
 
+  // Field-type → input-widget categorization. We don't enumerate enum
+  // values yet (Phase 3 polish); enums get a plain text input.
+  function inputTypeFor(t: string): 'bool' | 'int' | 'real' | 'text' {
+    switch (t) {
+      case 'bool':
+        return 'bool'
+      case 'int':
+      case 'unitCode':
+        return 'int'
+      case 'real':
+      case 'unreal':
+        return 'real'
+      default:
+        // string, model, icon, abilityList, all enums, … → text
+        return 'text'
+    }
+  }
+
   function closeAndNotify(o: boolean) {
     if (!o) {
       onClose?.()
@@ -217,20 +354,70 @@
     <Dialog.Header class="px-4 py-3 border-b border-border">
       <Dialog.Title>Object Editor — Units</Dialog.Title>
       <Dialog.Description class="text-xs text-muted-foreground">
-        Read-only view (Phase 1a). Showing merged stock base + map customizations.
+        Edit unit fields; add or delete custom units. Edits persist on Save.
       </Dialog.Description>
     </Dialog.Header>
 
+    {#if errorMsg}
+      <div class="px-4 py-1.5 text-xs bg-red-950/40 text-red-300 border-b border-red-900">
+        {errorMsg}
+      </div>
+    {/if}
+
     <div class="flex flex-1 min-h-0">
-      <!-- Left pane: tree -->
+      <!-- Left pane: tree + add-custom button -->
       <aside class="w-80 flex-none border-r border-border flex flex-col min-h-0">
-        <div class="p-2 border-b border-border">
-          <Input
-            type="search"
-            placeholder="Search units…"
-            bind:value={search}
-            class="h-8 text-sm"
-          />
+        <div class="p-2 border-b border-border flex flex-col gap-2">
+          <div class="flex gap-2">
+            <Input
+              type="search"
+              placeholder="Search units…"
+              bind:value={search}
+              class="h-8 text-sm flex-1"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              class="h-8 text-xs px-2"
+              onclick={openAddCustom}
+              title="Add a new custom unit derived from a stock base"
+            >+ Custom</Button>
+          </div>
+          {#if showAddCustom}
+            <div class="p-2 rounded border border-border bg-muted/30 flex flex-col gap-1.5">
+              <div class="text-xs text-muted-foreground">New custom unit</div>
+              <label class="text-xs block">
+                Base:
+                <select
+                  class="w-full mt-0.5 bg-background border border-border rounded text-xs px-1 py-0.5"
+                  bind:value={addCustomBaseID}
+                >
+                  <option value="" disabled>— pick base —</option>
+                  {#each stockRows as r (r.id)}
+                    <option value={r.id}>{r.name} [{r.id}]</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="text-xs block">
+                ID (optional, autogen if blank):
+                <Input
+                  type="text"
+                  bind:value={addCustomNewID}
+                  placeholder="e.g. h001"
+                  class="h-7 text-xs mt-0.5"
+                  maxlength={4}
+                />
+              </label>
+              <div class="flex gap-1.5 justify-end mt-1">
+                <Button variant="ghost" size="sm" class="h-7 text-xs" onclick={() => (showAddCustom = false)}>
+                  Cancel
+                </Button>
+                <Button size="sm" class="h-7 text-xs" onclick={confirmAddCustom}>
+                  Create
+                </Button>
+              </div>
+            </div>
+          {/if}
         </div>
         <div class="flex-1 overflow-auto text-sm">
           {#if loading}
@@ -257,42 +444,48 @@
                     <ul class="ml-4">
                       {#each k.rows as u (u.id)}
                         <li>
-                          <button
-                            class="w-full text-left px-2 py-0.5 truncate hover:bg-accent flex items-center gap-1.5"
+                          <div
+                            class="oe-row flex items-center gap-1.5 hover:bg-accent"
                             class:bg-accent={selectedId === u.id}
-                            onclick={() => selectUnit(u.id)}
-                            title={`${u.id} — ${u.category}`}
                           >
-                            <!-- Per-row command-button icon; same pattern the
-                                 Explorer uses. The asset HTTP handler routes
-                                 /asset/<path> through map-first-then-CASC and
-                                 swaps BLP↔DDS siblings, so the path the Go
-                                 side hands us resolves regardless of which
-                                 extension actually shipped. -->
-                            {#if u.icon_art}
-                              {#await loadIconURL(u.icon_art) then iconURL}
-                                {#if iconURL}
-                                  <img class="oe-icon" src={iconURL} alt="" />
-                                {:else}
-                                  <span class="oe-icon oe-icon-placeholder" aria-hidden="true"></span>
-                                {/if}
-                              {/await}
-                            {:else}
-                              <span class="oe-icon oe-icon-placeholder" aria-hidden="true"></span>
-                            {/if}
-                            <span class="truncate flex-1">{u.name}</span>
+                            <button
+                              class="flex-1 text-left px-2 py-0.5 truncate flex items-center gap-1.5"
+                              onclick={() => selectUnit(u.id)}
+                              title={`${u.id} — ${u.category}`}
+                            >
+                              {#if u.icon_art}
+                                {#await loadIconURL(u.icon_art) then iconURL}
+                                  {#if iconURL}
+                                    <img class="oe-icon" src={iconURL} alt="" />
+                                  {:else}
+                                    <span class="oe-icon oe-icon-placeholder" aria-hidden="true"></span>
+                                  {/if}
+                                {/await}
+                              {:else}
+                                <span class="oe-icon oe-icon-placeholder" aria-hidden="true"></span>
+                              {/if}
+                              <span class="truncate flex-1">{u.name}</span>
+                              {#if u.is_custom}
+                                <span
+                                  class="text-[10px] px-1 rounded bg-emerald-700/30 text-emerald-300"
+                                  title="Custom unit"
+                                >C</span>
+                              {:else if u.is_edited}
+                                <span
+                                  class="text-[10px] px-1 rounded bg-violet-700/30 text-violet-300"
+                                  title="Stock unit with edits"
+                                >M</span>
+                              {/if}
+                            </button>
                             {#if u.is_custom}
-                              <span
-                                class="text-[10px] px-1 rounded bg-emerald-700/30 text-emerald-300"
-                                title="Custom unit"
-                              >C</span>
-                            {:else if u.is_edited}
-                              <span
-                                class="text-[10px] px-1 rounded bg-violet-700/30 text-violet-300"
-                                title="Stock unit with edits"
-                              >M</span>
+                              <button
+                                class="oe-delete-btn text-xs text-muted-foreground hover:text-red-400 px-1.5"
+                                onclick={() => deleteCustom(u.id)}
+                                title="Delete custom unit"
+                                aria-label="Delete custom unit"
+                              >×</button>
                             {/if}
-                          </button>
+                          </div>
                         </li>
                       {/each}
                     </ul>
@@ -343,13 +536,6 @@
             </div>
           </header>
           {#if detail.model_path}
-            <!-- 3D model preview. Same component the Properties panel uses
-                 for placed-entity previews; reuses the asset HTTP handler's
-                 map-first-then-CASC + extension-swap routing. Fixed height
-                 keeps the preview from squeezing the field table on short
-                 windows. Keyed by the unit id so swapping selection fully
-                 unmounts the previous viewer (own GL context, own RAF
-                 loop) instead of re-loading inside a stale one. -->
             {#key detail.id}
               <div class="oe-preview border-b border-border">
                 <AssetPreview
@@ -370,6 +556,7 @@
                 <table class="w-full">
                   <tbody>
                     {#each g.fields as f (f.id)}
+                      {@const widget = inputTypeFor(f.type)}
                       <tr
                         class="hover:bg-accent/30"
                         class:bg-violet-950={f.overridden}
@@ -380,8 +567,66 @@
                         >
                           {f.display_name || f.field}
                         </td>
-                        <td class="py-0.5 align-top font-mono text-xs break-all">
-                          {f.display || f.value || '—'}
+                        <td class="py-0.5 align-top">
+                          {#if widget === 'bool'}
+                            <input
+                              type="checkbox"
+                              checked={f.value === '1'}
+                              onchange={(e) =>
+                                commitBoolField(
+                                  f,
+                                  (e.currentTarget as HTMLInputElement).checked,
+                                )
+                              }
+                            />
+                          {:else if widget === 'int'}
+                            <input
+                              type="number"
+                              step="1"
+                              class="oe-edit w-full bg-background border border-border rounded px-1.5 py-0.5 text-xs font-mono"
+                              value={f.value}
+                              onblur={(e) =>
+                                commitField(
+                                  f,
+                                  (e.currentTarget as HTMLInputElement).value,
+                                )
+                              }
+                              onkeydown={(e) => {
+                                if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
+                              }}
+                            />
+                          {:else if widget === 'real'}
+                            <input
+                              type="number"
+                              step="0.01"
+                              class="oe-edit w-full bg-background border border-border rounded px-1.5 py-0.5 text-xs font-mono"
+                              value={f.value}
+                              onblur={(e) =>
+                                commitField(
+                                  f,
+                                  (e.currentTarget as HTMLInputElement).value,
+                                )
+                              }
+                              onkeydown={(e) => {
+                                if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
+                              }}
+                            />
+                          {:else}
+                            <input
+                              type="text"
+                              class="oe-edit w-full bg-background border border-border rounded px-1.5 py-0.5 text-xs font-mono"
+                              value={f.value}
+                              onblur={(e) =>
+                                commitField(
+                                  f,
+                                  (e.currentTarget as HTMLInputElement).value,
+                                )
+                              }
+                              onkeydown={(e) => {
+                                if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
+                              }}
+                            />
+                          {/if}
                         </td>
                       </tr>
                     {/each}
@@ -401,9 +646,6 @@
 </Dialog.Root>
 
 <style>
-  /* Tree-row icon. WC3 command-button BLPs are square; 18px keeps row
-     height tight while staying readable at typical zoom. flex-none stops
-     the icon from being squeezed when a long unit name fills the cell. */
   .oe-icon {
     width: 18px;
     height: 18px;
@@ -411,8 +653,6 @@
     border-radius: 2px;
     flex: none;
   }
-  /* Larger icon in the detail header — gives the selected unit a clear
-     visual anchor matching the WC3 World Editor / HiveWE convention. */
   .oe-icon-lg {
     width: 40px;
     height: 40px;
@@ -420,24 +660,28 @@
     border-radius: 4px;
     flex: none;
   }
-  /* Placeholder for rows whose `art` column is blank (rare, mostly
-     special/internal units). Same dimensions so layout doesn't shift on
-     icon-load failure. */
   .oe-icon-placeholder {
     background: rgb(var(--muted) / 0.4);
     display: inline-block;
   }
-  /* 3D preview pane — width-constrained, not height-constrained.
-     AssetPreview's inner wrapper carries `aspect-[4/3] w-full` so its
-     height is driven by width — fixing height fights the aspect ratio
-     and produces a clipped canvas. Capping width at 360px yields a
-     ~270px-tall preview that anchors the detail pane without overwhelming
-     the field table below. flex-none stops the flex column from
-     stretching it vertically. */
   .oe-preview {
     width: 100%;
     max-width: 360px;
     flex: none;
     padding: 8px 12px;
+  }
+  /* Delete button hidden until hover keeps the row visually clean — the
+     usual editor convention for destructive per-row actions. */
+  .oe-delete-btn {
+    opacity: 0;
+    transition: opacity 0.12s;
+  }
+  .oe-row:hover .oe-delete-btn {
+    opacity: 1;
+  }
+  /* Compact edit input shouldn't visually shout — keep the same row
+     height the read-only display had. */
+  .oe-edit {
+    height: 1.6em;
   }
 </style>

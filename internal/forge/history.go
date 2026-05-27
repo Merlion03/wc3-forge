@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/w3objmod"
 )
 
 // Command is the unit of undo/redo. Each mutator method on Session (MoveUnit,
@@ -290,6 +291,115 @@ func (c *swapTilesetCmd) Revert(s *Session) error {
 }
 func (c *swapTilesetCmd) Affected(s *Session) []EntityChange {
 	return []EntityChange{{Kind: "terrain", ID: 0, Field: "tileset"}}
+}
+
+// ---------------------------------------------------------------------------
+// Object Editor (units) write commands. These operate on the war3map.w3u
+// shadow (s.unitMods), not on placed entities. Affected events use
+// Kind="unit_mod" with ID=0 — the tree refresh in the Object Editor is
+// coarse (re-list, re-detail) rather than per-row; the JS side ignores ID
+// and rebuilds based on Field.
+// ---------------------------------------------------------------------------
+
+// setUnitFieldCmd represents one field-edit on a stock or custom unit.
+// hadOverride distinguishes "the field was previously a default" (Revert
+// deletes the override entirely) from "the field had a previous override
+// value" (Revert restores oldVal). Without this flag, Revert would always
+// write oldVal back — including when oldVal was the empty string from a
+// non-existent override, which would create a spurious "" override on
+// Undo.
+type setUnitFieldCmd struct {
+	id          string
+	column      string // FourCC or column-name; setUnitField normalizes
+	oldVal      string
+	newVal      string
+	hadOverride bool
+}
+
+func (c *setUnitFieldCmd) Label() string { return "Edit unit field" }
+
+func (c *setUnitFieldCmd) Apply(s *Session) error {
+	_, _, err := setUnitField(s, c.id, c.column, c.newVal)
+	if err != nil {
+		return err
+	}
+	s.dirtyUnitMods = true
+	return nil
+}
+
+func (c *setUnitFieldCmd) Revert(s *Session) error {
+	if !c.hadOverride {
+		if err := clearUnitField(s, c.id, c.column); err != nil {
+			return err
+		}
+	} else {
+		if _, _, err := setUnitField(s, c.id, c.column, c.oldVal); err != nil {
+			return err
+		}
+	}
+	s.dirtyUnitMods = true
+	return nil
+}
+
+func (c *setUnitFieldCmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "unit_mod", ID: 0, Field: c.column}}
+}
+
+// addCustomUnitCmd represents creating a new custom unit row in the w3u
+// shadow. Apply appends a custom with empty overrides; Revert removes it.
+// The "shadow stock id" check lives in addCustomUnit so Apply's error
+// path is the same whether the cmd ran from the mutator or from Redo.
+type addCustomUnitCmd struct {
+	newID  string
+	baseID string
+}
+
+func (c *addCustomUnitCmd) Label() string { return "Add custom unit" }
+
+func (c *addCustomUnitCmd) Apply(s *Session) error {
+	if err := addCustomUnit(s, c.newID, c.baseID); err != nil {
+		return err
+	}
+	s.dirtyUnitMods = true
+	return nil
+}
+
+func (c *addCustomUnitCmd) Revert(s *Session) error {
+	_, _ = removeCustomUnit(s, c.newID)
+	s.dirtyUnitMods = true
+	return nil
+}
+
+func (c *addCustomUnitCmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "unit_mod", ID: 0, Field: "customs"}}
+}
+
+// deleteCustomUnitCmd removes a custom unit row from the shadow. We snapshot
+// the full CustomObject (id, base id, overrides) so Revert can restore the
+// row's overrides verbatim — without the snapshot, Undo would re-create the
+// shell but lose any per-field edits the user had committed.
+type deleteCustomUnitCmd struct {
+	saved w3objmod.CustomObject
+}
+
+func (c *deleteCustomUnitCmd) Label() string { return "Delete custom unit" }
+
+func (c *deleteCustomUnitCmd) Apply(s *Session) error {
+	if _, ok := removeCustomUnit(s, c.saved.ID); !ok {
+		return fmt.Errorf("custom %q not found", c.saved.ID)
+	}
+	s.dirtyUnitMods = true
+	return nil
+}
+
+func (c *deleteCustomUnitCmd) Revert(s *Session) error {
+	reinsertCustomUnit(s, c.saved)
+	s.dirtyUnitMods = true
+	return nil
+}
+
+func (c *deleteCustomUnitCmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "unit_mod", ID: 0, Field: "customs"}}
 }
 
 // ---------------------------------------------------------------------------

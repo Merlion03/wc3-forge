@@ -55,3 +55,47 @@ func GetUnitObject(id string) (*UnitObjectDetail, error) {
 	}
 	return d, nil
 }
+
+// SetUnitObjectField writes `value` to the named field on the unit. column
+// may be FourCC or column-name; the mutator normalizes. Returns the
+// post-mutation full detail payload so the caller doesn't need a separate
+// Get round-trip — the Overridden flag refreshes in-place.
+func SetUnitObjectField(id, column, value string) (*UnitObjectDetail, error) {
+	if id == "" {
+		return nil, errors.New("id is required")
+	}
+	if column == "" {
+		return nil, errors.New("column is required")
+	}
+	if err := Current.SetUnitField(id, column, value); err != nil {
+		return nil, err
+	}
+	return GetUnitObject(id)
+}
+
+// CreateCustomUnitObject appends a new custom unit and returns the chosen ID
+// + full detail payload. When id is empty the allocator picks the next free
+// FourCC starting from the base's first character.
+func CreateCustomUnitObject(baseID, id string) (string, *UnitObjectDetail, error) {
+	if baseID == "" {
+		return "", nil, errors.New("base_id is required")
+	}
+	chosenID, err := Current.AddCustomUnit(id, baseID)
+	if err != nil {
+		return "", nil, err
+	}
+	d, err := GetUnitObject(chosenID)
+	if err != nil {
+		return chosenID, nil, fmt.Errorf("get newly-created %q: %w", chosenID, err)
+	}
+	return chosenID, d, nil
+}
+
+// DeleteCustomUnitObject removes the custom unit with the given id. Errors
+// if id isn't a custom (stock units aren't deletable).
+func DeleteCustomUnitObject(id string) error {
+	if id == "" {
+		return errors.New("id is required")
+	}
+	return Current.DeleteCustomUnit(id)
+}

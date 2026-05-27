@@ -105,6 +105,14 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("objects.units.list", handleObjectsUnitsList)
 	reg("objects.units.get", handleObjectsUnitsGet)
 	reg("objects.units.fields_meta", handleObjectsUnitsFieldsMeta)
+	// Phase 1b: write-side. Edit a field (set_field), spawn a new derived
+	// unit (create_custom), drop a derived unit (delete_custom). All flow
+	// through Session.SetUnitField / AddCustomUnit / DeleteCustomUnit so
+	// undo/redo + entity-changed events fire normally; Save persists the
+	// resulting w3u shadow.
+	reg("objects.units.set_field", handleObjectsUnitsSetField)
+	reg("objects.units.create_custom", handleObjectsUnitsCreateCustom)
+	reg("objects.units.delete_custom", handleObjectsUnitsDeleteCustom)
 }
 
 // handleUISendCommand forwards a raw test-driver command string. Used by

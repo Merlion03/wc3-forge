@@ -1546,6 +1546,17 @@ func (a *App) GetUnitObject(id string) *UnitObjectDetail {
 	if err != nil || d == nil {
 		return nil
 	}
+	return toUnitObjectDetail(d)
+}
+
+// toUnitObjectDetail converts the forge-package detail shape to the
+// Wails-bound shape. Re-declared in app.go because the bridge type lives
+// inside internal/forge — Wails bindings can't depend on that package's
+// private types, so we round-trip through the public alias.
+func toUnitObjectDetail(d *forge.UnitObjectDetail) *UnitObjectDetail {
+	if d == nil {
+		return nil
+	}
 	fields := make([]UnitObjectField, 0, len(d.Fields))
 	for _, f := range d.Fields {
 		fields = append(fields, UnitObjectField(f))
@@ -1556,6 +1567,44 @@ func (a *App) GetUnitObject(id string) *UnitObjectDetail {
 		ModelPath: d.ModelPath, ModelFallbacks: d.ModelFallbacks,
 		Fields: fields,
 	}
+}
+
+// SetUnitObjectField writes a single field override. column may be FourCC
+// (e.g. "unam") or column-name (e.g. "name") — the mutator normalizes via
+// UnitMetaData. Returns the post-mutation detail so the JS side can
+// re-render the Overridden flag in-place. Returns nil + error when the
+// edit fails (no map / unknown id / unknown field).
+func (a *App) SetUnitObjectField(id, column, value string) (*UnitObjectDetail, error) {
+	d, err := forge.SetUnitObjectField(id, column, value)
+	if err != nil {
+		return nil, err
+	}
+	return toUnitObjectDetail(d), nil
+}
+
+// CreateCustomUnit appends a new custom unit row derived from baseID and
+// returns its full detail. id is optional — when empty the allocator picks
+// the next free FourCC starting from baseID's first character.
+//
+// Returns the chosen id PLUS the detail in a flat object so the JS side
+// gets both in one round-trip without an extra Get call.
+type CreateCustomUnitResult struct {
+	ID     string            `json:"id"`
+	Detail *UnitObjectDetail `json:"detail"`
+}
+
+func (a *App) CreateCustomUnit(baseID, id string) (*CreateCustomUnitResult, error) {
+	chosenID, d, err := forge.CreateCustomUnitObject(baseID, id)
+	if err != nil {
+		return nil, err
+	}
+	return &CreateCustomUnitResult{ID: chosenID, Detail: toUnitObjectDetail(d)}, nil
+}
+
+// DeleteCustomUnit removes a custom unit by id. Errors if id isn't a
+// custom row (stock units aren't deletable).
+func (a *App) DeleteCustomUnit(id string) error {
+	return forge.DeleteCustomUnitObject(id)
 }
 
 // GameplayConstantRow is the JSON-friendly shape for one row in the

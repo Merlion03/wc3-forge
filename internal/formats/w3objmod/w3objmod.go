@@ -63,6 +63,12 @@ type OriginalEdit struct {
 }
 
 // File is the parsed object-modification table.
+//
+// Encode emits a fresh File at Version==3 unless the original Parse
+// recorded a different Version (we round-trip whatever was on disk so a
+// .w3u that came in at v2 doesn't get silently upgraded). Override values
+// are written with type inferred from the string (int → float → string)
+// unless the caller supplies a TypeHints map; see Encode for details.
 type File struct {
 	Version       uint32
 	OriginalEdits []OriginalEdit
@@ -204,6 +210,214 @@ func readValue(r *reader, typ uint32) (string, error) {
 	}
 }
 
+// TypeHint is the on-wire value-type identifier carried with each
+// modification entry. Values 0..3 match the w3u/w3d/etc. encoding.
+const (
+	TypeInt    uint32 = 0
+	TypeFloat  uint32 = 1
+	TypeUnreal uint32 = 2
+	TypeString uint32 = 3
+)
+
+// Encode serializes a *File back into the binary war3map.w3{bdutia} wire
+// format Parse consumes. opt mirrors Parse's opt flag (true for w3d/w3a —
+// these carry per-modification level/variation + dataPointer; false for
+// w3u/w3t/w3b). fields is the FourCC → column-name map (same one passed
+// to Parse) — Encode inverts it to translate column-name keys back to
+// FourCC modification IDs on the wire.
+//
+// Round-trip guarantee: Parse → Encode → Parse produces an equal File
+// (Version, OriginalEdits, Customs, Overrides). Empty/nil File encodes to
+// `{version, 0 original, 0 customs}`, which is a valid empty table.
+//
+// Value-type inference (no per-field metadata): the override values are
+// stored as strings (matching slk.Mapped's column semantics), so on
+// encode we re-infer the on-wire type:
+//   - parses cleanly as int (no decimal, no exponent) → TypeInt (0)
+//   - else parses cleanly as float                    → TypeFloat (1)
+//   - else                                            → TypeString (3)
+//
+// TypeUnreal (2) is treated like TypeFloat on read; we never emit type 2
+// because we can't tell a "float" from an "unreal" without metadata, and
+// the in-game runtime treats them identically for the integer values it
+// actually reads (per HiveWE's w3objmod handling).
+func Encode(f *File, opt bool, fields FieldMap) ([]byte, error) {
+	w := &writer{}
+	version := uint32(3)
+	if f != nil && f.Version != 0 {
+		version = f.Version
+	}
+	w.u32(version)
+
+	// Invert the column-name → FourCC map so we can translate Overrides keys
+	// back to the on-wire modification ID. Some overrides may already be
+	// keyed by FourCC directly (when Parse was called with a nil FieldMap);
+	// we detect that case by looking up the key against the field set.
+	rev := map[string]string{}
+	for fourCC, col := range fields {
+		rev[col] = fourCC
+	}
+
+	// Original-edits table.
+	var origCount uint32
+	if f != nil {
+		origCount = uint32(len(f.OriginalEdits))
+	}
+	w.u32(origCount)
+	if f != nil {
+		for _, e := range f.OriginalEdits {
+			if err := writeObject(w, e.BaseID, "\x00\x00\x00\x00", e.Overrides, version, opt, fields, rev); err != nil {
+				return nil, fmt.Errorf("encode original edit %q: %w", e.BaseID, err)
+			}
+		}
+	}
+
+	// Custom-table.
+	var customCount uint32
+	if f != nil {
+		customCount = uint32(len(f.Customs))
+	}
+	w.u32(customCount)
+	if f != nil {
+		for _, c := range f.Customs {
+			if err := writeObject(w, c.BaseID, c.ID, c.Overrides, version, opt, fields, rev); err != nil {
+				return nil, fmt.Errorf("encode custom %q (base=%q): %w", c.ID, c.BaseID, err)
+			}
+		}
+	}
+	return w.buf, nil
+}
+
+// writeObject emits one object row (header + modifications) into w.
+// modifiedID should be 4 zero bytes for original-edits, the new FourCC for
+// customs. Caller is responsible for the table-count prefix.
+func writeObject(w *writer, origID, modifiedID string, ov Overrides, version uint32, opt bool, fields FieldMap, rev map[string]string) error {
+	if len(origID) != 4 {
+		return fmt.Errorf("original_id %q is not 4 chars", origID)
+	}
+	if len(modifiedID) != 4 {
+		return fmt.Errorf("modified_id %q is not 4 chars", modifiedID)
+	}
+	w.bytes([]byte(origID))
+	w.bytes([]byte(modifiedID))
+	if version >= 3 {
+		// set_count + set_flag — always 1 + 0 in practice (HiveWE writes the
+		// same constants). Parse drops these on read; we don't preserve
+		// per-row values, so emitting the canonical pair is the same shape
+		// every real map ships.
+		w.u32(1)
+		w.u32(0)
+	}
+	// Sort keys for deterministic output — the wire format permits any
+	// order, but stable output makes Parse→Encode→Parse byte-equal in
+	// the common case (and round-trip tests cleaner).
+	keys := make([]string, 0, len(ov))
+	for k := range ov {
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+	w.u32(uint32(len(keys)))
+	for _, key := range keys {
+		modID := resolveModID(key, fields, rev)
+		if len(modID) != 4 {
+			return fmt.Errorf("override key %q has no 4-char modification ID (rev map miss)", key)
+		}
+		val := ov[key]
+		typ := inferType(val)
+		w.bytes([]byte(modID))
+		w.u32(typ)
+		if opt {
+			// level/variation + dataPointer slots. We don't carry these on
+			// the File struct today, so emit zeros. HiveWE does the same
+			// for simple overrides (the non-zero values are only meaningful
+			// for level-stratified ability fields, which the editor's
+			// units path doesn't touch).
+			w.u32(0)
+			w.u32(0)
+		}
+		if err := writeValue(w, typ, val); err != nil {
+			return fmt.Errorf("write value %q (key=%q, type=%d): %w", val, key, typ, err)
+		}
+		// end_marker — Blizzard writes zero; readers ignore the value but
+		// expect 4 bytes of padding before the next modification.
+		w.u32(0)
+	}
+	return nil
+}
+
+// resolveModID maps an Overrides map key back to the 4-char modification
+// ID expected on the wire. The key may already be a FourCC (when Parse was
+// called with a nil FieldMap) — detect that case via the field set; else
+// translate via the inverted FieldMap (column-name → FourCC).
+func resolveModID(key string, fields FieldMap, rev map[string]string) string {
+	// Fast path: the key matches a known column name.
+	if id, ok := rev[key]; ok {
+		return id
+	}
+	// Fallback: the key is itself a FourCC. Confirm by checking the forward
+	// FieldMap, OR accept any 4-char ASCII string when no field metadata is
+	// available (caller passed nil/empty FieldMap).
+	if len(key) == 4 {
+		if fields == nil || len(fields) == 0 {
+			return key
+		}
+		if _, ok := fields[key]; ok {
+			return key
+		}
+		// Not in metadata, but 4 chars — emit as-is. The renderer will
+		// drop it on re-Parse if metadata is still missing, but the
+		// round-trip stays clean.
+		return key
+	}
+	return ""
+}
+
+// inferType picks the on-wire value type for an Override string. Prefers
+// int over float when the string parses cleanly as both; falls back to
+// string for anything that doesn't parse as a number.
+func inferType(v string) uint32 {
+	if v == "" {
+		// Empty strings round-trip as TypeString — TypeInt with empty bytes
+		// would deserialize as 0, which silently rewrites the meaning of
+		// a "no value" cell.
+		return TypeString
+	}
+	// Int-first: stricter than float (rejects "1.0", "1e3"). Same shape
+	// HiveWE uses.
+	if _, err := parseInt32(v); err == nil {
+		return TypeInt
+	}
+	if _, err := parseFloat32(v); err == nil {
+		return TypeFloat
+	}
+	return TypeString
+}
+
+// writeValue emits the value bytes for the given on-wire type. Caller has
+// already emitted the type tag and (when opt) the level/dataPointer slots.
+func writeValue(w *writer, typ uint32, v string) error {
+	switch typ {
+	case TypeInt:
+		n, err := parseInt32(v)
+		if err != nil {
+			return err
+		}
+		w.u32(uint32(int32(n)))
+	case TypeFloat, TypeUnreal:
+		f, err := parseFloat32(v)
+		if err != nil {
+			return err
+		}
+		w.u32(math.Float32bits(f))
+	case TypeString:
+		w.bytes([]byte(v))
+		w.u8(0) // null terminator
+	default:
+		return fmt.Errorf("unknown wire type %d", typ)
+	}
+	return nil
+}
+
 // --- minimal reader helpers (no third-party deps) ---
 
 type reader struct {
@@ -252,4 +466,115 @@ func (r *reader) cString() (string, error) {
 	s := string(r.buf[r.off:end])
 	r.off = end + 1
 	return s, nil
+}
+
+// --- writer + parsing helpers ---
+
+type writer struct {
+	buf []byte
+}
+
+func (w *writer) u32(v uint32) {
+	w.buf = append(w.buf,
+		byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+}
+
+func (w *writer) u8(v byte) { w.buf = append(w.buf, v) }
+
+func (w *writer) bytes(b []byte) { w.buf = append(w.buf, b...) }
+
+// parseInt32 accepts the strict base-10 integer subset (optional leading
+// sign, digits only) — same shape inferType expects. Rejects "1.0",
+// "1e3", "0x10", trailing whitespace. strconv.Atoi is too lenient on
+// leading/trailing whitespace; we trim once at the call-site instead.
+func parseInt32(s string) (int32, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty")
+	}
+	i := 0
+	if s[0] == '+' || s[0] == '-' {
+		i = 1
+		if i == len(s) {
+			return 0, fmt.Errorf("sign without digits")
+		}
+	}
+	// Must be all-digit from here; reject decimal points and exponents.
+	for j := i; j < len(s); j++ {
+		c := s[j]
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("non-digit %q at %d", c, j)
+		}
+	}
+	// Now safe to parse via strconv (we've confirmed the byte set).
+	var n int64
+	for j := i; j < len(s); j++ {
+		n = n*10 + int64(s[j]-'0')
+		if n > (1<<31)-1+1 { // bounds check, with one slop for negation
+			return 0, fmt.Errorf("overflow")
+		}
+	}
+	if s[0] == '-' {
+		n = -n
+	}
+	if n < -(1<<31) || n > (1<<31)-1 {
+		return 0, fmt.Errorf("out of int32 range")
+	}
+	return int32(n), nil
+}
+
+// parseFloat32 accepts any string strconv recognizes as a float, then
+// casts to float32. We don't constrain shape further — float values in
+// SLK columns commonly carry scientific notation ("1e3") and explicit
+// signs.
+func parseFloat32(s string) (float32, error) {
+	v, err := parseFloat64(s)
+	if err != nil {
+		return 0, err
+	}
+	return float32(v), nil
+}
+
+// parseFloat64 is a no-dep float parser stub via fmt.Sscan — fast enough
+// for the volume of fields the editor touches per Save. Imports of
+// strconv would pull in extra dep surface for no value.
+func parseFloat64(s string) (float64, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty")
+	}
+	var v float64
+	n, err := fmt.Sscanf(s, "%f", &v)
+	if err != nil {
+		return 0, err
+	}
+	if n != 1 {
+		return 0, fmt.Errorf("no float parsed")
+	}
+	// fmt.Sscanf is too lenient — accepts "1.0abc" by parsing only the
+	// leading "1.0". Re-format and require an exact match (modulo float
+	// formatting nuances) to reject trailing garbage. This is good enough
+	// for distinguishing a numeric SLK cell from a string one.
+	// We tolerate trailing whitespace (strings from SLK / metadata can
+	// carry it) and the "%g" round-trip difference (1.0 → "1").
+	check := fmt.Sprintf("%g", v)
+	if check != s && check != s+".0" && check+".0" != s {
+		// Try a stricter rule: ensure every char in s is digit/.+-/eE.
+		for _, c := range s {
+			if !(c == '+' || c == '-' || c == '.' || c == 'e' || c == 'E' || (c >= '0' && c <= '9')) {
+				return 0, fmt.Errorf("trailing garbage")
+			}
+		}
+	}
+	return v, nil
+}
+
+// sortStrings is a tiny lexical sort over a []string. Used by Encode to
+// produce deterministic Modification ordering inside each object row.
+// Stdlib sort.Strings would be fine; staying alloc-free + dependency-free
+// for the small typical input sizes (≤ a few dozen keys per row).
+func sortStrings(a []string) {
+	for i := 1; i < len(a); i++ {
+		for j := i; j > 0 && a[j-1] > a[j]; j-- {
+			a[j-1], a[j] = a[j], a[j-1]
+		}
+	}
 }

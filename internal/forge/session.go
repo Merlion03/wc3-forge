@@ -143,6 +143,12 @@ type Session struct {
 	dirtyInfo      bool
 	dirtyTerrain   bool
 	dirtyGameplay  bool
+	// dirtyUnitMods tracks pending edits to the war3map.w3u shadow (the
+	// Object Editor's add-custom / delete-custom / set-field surface). Kept
+	// separate from dirtyUnits (which tracks war3mapUnits.doo — PLACED unit
+	// instances) so Save only touches the file that actually changed and the
+	// per-file write semantics stay clean.
+	dirtyUnitMods  bool
 	dirtyListeners []func(bool)
 
 	// Sky-model override: set by the Map Info → Sky picker (or any caller
@@ -406,11 +412,12 @@ func (s *Session) Open(path string) error {
 	s.strings = wtsStrings
 	s.gameplay = gameplay
 	s.selection = SelectionState{Items: nil, Primary: -1}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyGameplay
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyGameplay || s.dirtyUnitMods
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
 	s.dirtyInfo = false
 	s.dirtyGameplay = false
+	s.dirtyUnitMods = false
 	// Reset history — previous map's undo stack must not leak across opens
 	// (creation_numbers would dangle and Revert would error). Mutating the
 	// slices directly under the existing write-lock; ClearHistory's own lock
@@ -475,12 +482,13 @@ func (s *Session) Close() {
 	s.strings = nil
 	s.gameplay = nil
 	s.selection = SelectionState{Items: nil, Primary: -1}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.dirtyUnitMods
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
 	s.dirtyInfo = false
 	s.dirtyTerrain = false
 	s.dirtyGameplay = false
+	s.dirtyUnitMods = false
 	hadHistory := len(s.history) > 0 || len(s.redoStack) > 0
 	s.history = nil
 	s.redoStack = nil
@@ -1320,6 +1328,154 @@ func (s *Session) SwapTileset(req SwapTilesetRequest) error {
 	return nil
 }
 
+// SetUnitField writes `value` to the named field on the unit with FourCC
+// `id`. The field can be a FourCC (e.g. "unam") OR a column-name (e.g.
+// "name") — setUnitField normalizes via UnitMetaData. Stock units land in
+// the OriginalEdits table; customs land on their own Overrides map. The
+// edit is recorded as one undo step via setUnitFieldCmd.
+//
+// Idempotence: a SetUnitField call with the same value as the current
+// override is a no-op (no dirty flip, no history entry, no event). Without
+// this short-circuit the Properties panel's commit-on-blur path would
+// pollute the undo stack with non-edits.
+//
+// Returns an error if id isn't known (neither stock nor custom) or the
+// field isn't in UnitMetaData. Does not flip dirty / record history when
+// the call errored out — caller's UI safely retries.
+func (s *Session) SetUnitField(id, field, value string) error {
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	// Read the current value (peek into unitMods + base) for the idempotence
+	// check + to capture oldVal for undo. We don't take the write lock yet —
+	// the read is cheap and we'd just turn around and acquire write below.
+	mods := s.unitMods
+	_, meta, _ := loadUnitsBase()
+	fourCC := fieldKeyForUnitMods(meta, field)
+	if fourCC == "" {
+		s.mu.Unlock()
+		return fmt.Errorf("unknown field %q (not in UnitMetaData)", field)
+	}
+	var prev string
+	var had bool
+	if mods != nil {
+		if ci := findCustomIndex(mods, id); ci >= 0 {
+			prev, had = mods.Customs[ci].Overrides[fourCC]
+		} else if ei := findOriginalEditIndex(mods, id); ei >= 0 {
+			prev, had = mods.OriginalEdits[ei].Overrides[fourCC]
+		}
+	}
+	if had && prev == value {
+		s.mu.Unlock()
+		return nil // no-op
+	}
+	// Validate id is a real unit BEFORE mutating. setUnitField does the same
+	// check, but it allocates unitMods as a side-effect — we don't want a
+	// missing-id call to leave an empty File hanging around.
+	if mods == nil || findCustomIndex(mods, id) < 0 {
+		base, _, _ := loadUnitsBase()
+		if base == nil || base.Rows[id] == nil {
+			// Not a known custom AND not a known stock unit.
+			s.mu.Unlock()
+			return fmt.Errorf("no unit with id %q", id)
+		}
+	}
+	// Perform the mutation.
+	if _, _, err := setUnitField(s, id, field, value); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.dirtyUnitMods
+	s.dirtyUnitMods = true
+	s.recordCommand(&setUnitFieldCmd{
+		id: id, column: field, oldVal: prev, newVal: value, hadOverride: had,
+	})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	s.notifyEntityChanged(EntityChange{Kind: "unit_mod", ID: 0, Field: field})
+	if historyChanged {
+		s.notifyHistoryChanged()
+	}
+	return nil
+}
+
+// AddCustomUnit appends a new custom unit row inheriting from baseID. If
+// newID is empty, an allocator picks the next free FourCC starting from
+// the first character of baseID (e.g. "hpea" → "h001"); the chosen ID is
+// returned.
+//
+// Errors if newID collides with an existing custom or shadows a stock
+// unit. Recorded in history as one undo step.
+func (s *Session) AddCustomUnit(newID, baseID string) (string, error) {
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return "", fmt.Errorf("no map loaded")
+	}
+	if newID == "" {
+		newID = allocateCustomID(s, baseID)
+		if newID == "" {
+			s.mu.Unlock()
+			return "", fmt.Errorf("no free custom id available for base %q", baseID)
+		}
+	}
+	if err := addCustomUnit(s, newID, baseID); err != nil {
+		s.mu.Unlock()
+		return "", err
+	}
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.dirtyUnitMods
+	s.dirtyUnitMods = true
+	s.recordCommand(&addCustomUnitCmd{newID: newID, baseID: baseID})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	s.notifyEntityChanged(EntityChange{Kind: "unit_mod", ID: 0, Field: "customs"})
+	if historyChanged {
+		s.notifyHistoryChanged()
+	}
+	return newID, nil
+}
+
+// DeleteCustomUnit removes a custom unit row from the shadow. Errors if id
+// isn't a custom (stock units can't be deleted — they live in the base SLK).
+// Recorded in history as one undo step; Revert re-appends the snapshot.
+func (s *Session) DeleteCustomUnit(id string) error {
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	if s.unitMods == nil || findCustomIndex(s.unitMods, id) < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no custom unit with id %q", id)
+	}
+	saved, ok := removeCustomUnit(s, id)
+	if !ok {
+		s.mu.Unlock()
+		return fmt.Errorf("no custom unit with id %q", id)
+	}
+	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.dirtyUnitMods
+	s.dirtyUnitMods = true
+	s.recordCommand(&deleteCustomUnitCmd{saved: saved})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	s.notifyEntityChanged(EntityChange{Kind: "unit_mod", ID: 0, Field: "customs"})
+	if historyChanged {
+		s.notifyHistoryChanged()
+	}
+	return nil
+}
+
 // Gameplay returns the parsed war3mapMisc.txt (per-map gameplay constants),
 // or nil if no map is loaded. The returned pointer is shared — callers must
 // not mutate; use MutateGameplay for changes so dirty-tracking fires.
@@ -1382,7 +1538,7 @@ func applyTilesetSnapshot(s *Session, letter byte, ground, cliff []string, tileG
 func (s *Session) IsDirty() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.pendingSkyModel != nil
+	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.dirtyUnitMods || s.pendingSkyModel != nil
 }
 
 // Save flushes every dirty in-memory file back through the source's write
@@ -1401,7 +1557,7 @@ func (s *Session) Save() error {
 		s.mu.Unlock()
 		return fmt.Errorf("no map loaded")
 	}
-	if !s.dirtyUnits && !s.dirtyDoodads && !s.dirtyInfo && !s.dirtyTerrain && !s.dirtyGameplay && s.pendingSkyModel == nil {
+	if !s.dirtyUnits && !s.dirtyDoodads && !s.dirtyInfo && !s.dirtyTerrain && !s.dirtyGameplay && !s.dirtyUnitMods && s.pendingSkyModel == nil {
 		s.mu.Unlock()
 		return nil // nothing to do
 	}
@@ -1411,6 +1567,7 @@ func (s *Session) Save() error {
 	info := s.info
 	terrain := s.terrain
 	gameplay := s.gameplay
+	unitMods := s.unitMods
 	saveUnits := s.dirtyUnits
 	saveDoodads := s.dirtyDoodads
 	saveInfo := s.dirtyInfo
@@ -1418,6 +1575,7 @@ func (s *Session) Save() error {
 	isLua := info != nil && info.Lua
 	saveTerrain := s.dirtyTerrain
 	saveGameplay := s.dirtyGameplay
+	saveUnitMods := s.dirtyUnitMods
 	s.mu.Unlock()
 
 	if src == nil {
@@ -1503,6 +1661,39 @@ func (s *Session) Save() error {
 		}
 		s.mu.Lock()
 		s.dirtyGameplay = false
+		s.mu.Unlock()
+	}
+	if saveUnitMods {
+		// Encode the unit-mods shadow back to war3map.w3u. The Overrides
+		// keys carried on the in-memory File are FOURCC-keyed (Parse was
+		// called with a nil FieldMap at Open time — translation to
+		// column-name space happens at MergedUnits read time, not at parse
+		// time). We pass the FieldMap here so Encode can validate that the
+		// keys are recognized; passing nil also works (Encode emits 4-char
+		// keys as-is when no FieldMap is supplied), but the field-meta
+		// lookup is cheap and a nice safety net.
+		mods := unitMods
+		if mods == nil {
+			// AddCustomUnit always allocates a non-nil unitMods before
+			// flipping dirtyUnitMods, but be defensive — a stray write path
+			// could theoretically dirty without allocating. An empty file
+			// is a valid (and small) on-disk shape.
+			mods = &w3objmod.File{Version: 3}
+		}
+		_, meta, _ := loadUnitsBase()
+		var fieldMap w3objmod.FieldMap
+		if meta != nil {
+			fieldMap = meta.FieldMap()
+		}
+		data, err := w3objmod.Encode(mods, false, fieldMap)
+		if err != nil {
+			return fmt.Errorf("encode war3map.w3u: %w", err)
+		}
+		if err := src.write("war3map.w3u", data); err != nil {
+			return fmt.Errorf("write war3map.w3u: %w", err)
+		}
+		s.mu.Lock()
+		s.dirtyUnitMods = false
 		s.mu.Unlock()
 	}
 	if pendingSky != nil {
