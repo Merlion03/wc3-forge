@@ -10,23 +10,22 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/StephenSHorton/wc3-forge/internal/bridge"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wesstrings"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wts"
 )
 
-// MCP handlers for the Object Editor. Phase 1a scope: units only, read-only.
-//
-// Wire format choices:
-//   - One handler per kind ("objects.units.*") rather than a single
-//     polymorphic endpoint. Different object kinds have different metadata
-//     surfaces (items don't have a race column; doodads use a single-letter
-//     category; abilities have a level dimension) — a unified endpoint
-//     would either lose those distinctions or force the wire format to
-//     carry every union field. Separate handlers are clearer.
-//   - List endpoint returns flat rows + per-row category/race tags. The
-//     frontend builds the tree by grouping client-side — same shape HiveWE
-//     uses for its tree models. Keeps the MCP wire small (no nested JSON)
-//     and lets the UI re-pivot without a round-trip.
+// MCP handlers for the Object Editor. Phase 2a: refactored into kind-agnostic
+// factories. RegisterAll wires every registered KindConfig through
+// registerObjectKind below, which stamps out six handlers per kind
+// ("objects.<kind>.list", "objects.<kind>.get", "objects.<kind>.fields_meta",
+// "objects.<kind>.set_field", "objects.<kind>.create_custom",
+// "objects.<kind>.delete_custom"). Wire-format choices remain Phase-1b:
+//   - One handler per kind (not a polymorphic single endpoint) so per-kind
+//     specifics (race column, item-class, ability levels) don't bleed into
+//     a union shape.
+//   - List endpoint returns flat rows + per-row category/race tags so the
+//     frontend can build the tree client-side.
 
 // Lazy WES-strings table — Reforged ships UI/WorldEditStrings.txt and
 // UI/WorldEditGameStrings.txt; merged into a single in-memory table.
@@ -174,79 +173,121 @@ func unitIconArt(fields map[string]string) string {
 	return ""
 }
 
-// classifyKind derives the editor-tree leaf bucket for a unit row: one of
-// "hero", "building", "special", "unit". Mirrors HiveWE's UnitTreeModel::
-// getFolderParent — order is special > building > hero > unit.
-//
-// Hero detection uses the WC3 FourCC convention: heroes have an uppercase
-// first character (Hpal Paladin, Orkn Shadow Hunter, E000 custom hero),
-// non-heroes start lowercase (hpea Peasant). `unitclass.contains("Hero")`
-// looked tempting but breaks for neutral heroes (Orkn has no unitclass
-// at all in stock data); the first-char rule is the actual data-model
-// invariant Blizzard preserved across every WC3 unit row.
-func classifyKind(id string, fields map[string]string) string {
-	if fields["special"] == "1" {
-		return "special"
-	}
-	if fields["isbldg"] == "1" {
-		return "building"
-	}
-	if id != "" && id[0] >= 'A' && id[0] <= 'Z' {
-		return "hero"
-	}
-	return "unit"
-}
+// ---------------------------------------------------------------------------
+// Wire shapes. Phase-1b types are kept under their objectsUnits* names so the
+// JSON tags stay byte-identical to what shipped; type aliases (objectsList*)
+// give the generic factories a kind-agnostic name to work with internally.
+// ---------------------------------------------------------------------------
 
-// objectsUnitsListEntity is one row in the units tree. The frontend groups
-// by Race, then Kind, to build HiveWE's three-level tree (Race → Kind →
-// Unit). Sort order is name-asc within each Kind.
+// objectsUnitsListEntity is one row in the list tree. Frontend groups by
+// Race, then Kind, to build HiveWE's three-level tree. Sort order is
+// name-asc within each Kind. JSON shape is the Phase-1b wire contract —
+// do not rename fields without bumping the wire version.
 type objectsUnitsListEntity struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Race       string `json:"race"`        // raw lowercase tag ("human"); frontend titlecases via shared lookup
-	RaceLabel  string `json:"race_label"`  // pre-titled label ("Human")
-	Kind       string `json:"kind"`        // "unit" | "hero" | "building" | "special"
-	Category   string `json:"category"`    // human-readable bucket combining race + kind
-	IsCustom   bool   `json:"is_custom"`
-	IsEdited   bool   `json:"is_edited"`
-	BaseID     string `json:"base_id,omitempty"` // only set for customs
-	Campaign   bool   `json:"campaign"`            // hides under "Campaign" subtree when true
-	IconArt    string `json:"icon_art"`            // command-button icon path stem, e.g. "replaceabletextures/commandbuttons/btnshadowhunter.blp"
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Race      string `json:"race"`        // raw lowercase tag ("human"); frontend titlecases via shared lookup
+	RaceLabel string `json:"race_label"`  // pre-titled label ("Human")
+	Kind      string `json:"kind"`        // "unit" | "hero" | "building" | "special"
+	Category  string `json:"category"`    // human-readable bucket combining race + kind
+	IsCustom  bool   `json:"is_custom"`
+	IsEdited  bool   `json:"is_edited"`
+	BaseID    string `json:"base_id,omitempty"` // only set for customs
+	Campaign  bool   `json:"campaign"`            // hides under "Campaign" subtree when true
+	IconArt   string `json:"icon_art"`            // command-button icon path stem
 }
 
-func handleObjectsUnitsList(_ json.RawMessage) (any, error) {
-	merged, _, err := MergedUnits()
+type objectsUnitsGetParams struct {
+	ID string `json:"id"`
+}
+
+type objectsUnitsField struct {
+	ID          string `json:"id"`           // FourCC of the field
+	Field       string `json:"field"`        // SLK column name (lowercased)
+	DisplayName string `json:"display_name"` // resolved label
+	Category    string `json:"category"`     // "stats" | "combat" | "text" | ...
+	Type        string `json:"type"`         // "int" | "string" | "bool" | ...
+	Value       string `json:"value"`        // raw cell value
+	Display     string `json:"display"`      // value with TRIGSTR/WESTRING/color codes resolved
+	Overridden  bool   `json:"overridden"`   // true if this came from the per-map shadow
+}
+
+type objectsUnitsGetResult struct {
+	ID             string              `json:"id"`
+	Name           string              `json:"name"`
+	BaseID         string              `json:"base_id,omitempty"`
+	IsCustom       bool                `json:"is_custom"`
+	IsEdited       bool                `json:"is_edited"`
+	Race           string              `json:"race"`
+	Kind           string              `json:"kind"`
+	IconArt        string              `json:"icon_art"`
+	ModelPath      string              `json:"model_path"`      // primary .mdx path for the 3D preview
+	ModelFallbacks []string            `json:"model_fallbacks"` // .mdl sibling + variants the previewer tries on load failure
+	Fields         []objectsUnitsField `json:"fields"`
+}
+
+type objectsUnitsSetFieldParams struct {
+	ID     string `json:"id"`
+	Column string `json:"column"`
+	Value  string `json:"value"`
+}
+
+type objectsUnitsCreateCustomParams struct {
+	BaseID string `json:"base_id"`
+	ID     string `json:"id,omitempty"`
+}
+
+type objectsUnitsCreateCustomResult struct {
+	ID     string                 `json:"id"`
+	Detail *objectsUnitsGetResult `json:"detail"`
+}
+
+type objectsUnitsDeleteCustomParams struct {
+	ID string `json:"id"`
+}
+
+type objectsUnitsFieldsMetaItem struct {
+	ID          string `json:"id"`
+	Field       string `json:"field"`
+	DisplayName string `json:"display_name"`
+	Category    string `json:"category"`
+	Type        string `json:"type"`
+	MinVal      string `json:"min_val,omitempty"`
+	MaxVal      string `json:"max_val,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Generic handler factories. Each kind gets six handlers stamped from these.
+// ---------------------------------------------------------------------------
+
+// listObjects is the generic implementation behind objects.<kind>.list AND
+// the Wails ListUnitObjects/etc. shims. Returns rows sorted by race → kind →
+// name (case-insensitive).
+func listObjects(cfg *KindConfig) ([]objectsUnitsListEntity, error) {
+	merged, _, err := MergedObjects(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("load units: %w", err)
+		return nil, fmt.Errorf("load %s: %w", cfg.Kind, err)
 	}
 	mapStrings := Current.Strings()
 	out := make([]objectsUnitsListEntity, 0, len(merged))
 	for id, u := range merged {
-		// Filter out rows that aren't actually units. UnitMetaData drives
-		// the field-set; the SLK Mapped also has item rows mixed in (they
-		// share the same base table family). HiveWE filters by isbldg/
-		// isupper/special/unitclass + the absence of `class` (which is
-		// item-only). For now, presence of `race` is the cheap split — every
-		// unit/hero/building row has it, items don't.
-		race := strings.ToLower(strings.TrimSpace(u.Fields["race"]))
-		if race == "" {
+		if cfg.FilterListRow != nil && !cfg.FilterListRow(id, u.Fields) {
 			continue
 		}
 		name := resolveDisplay(u.Fields["name"], mapStrings)
 		if name == "" {
-			// Stock SLK rows without a resolved Name still belong in the
-			// tree — fall back to the FourCC so the user can locate them.
+			// Stock rows without a resolved Name still belong in the tree —
+			// fall back to the FourCC so the user can locate them.
 			name = id
 		}
-		kind := classifyKind(u.ID, u.Fields)
-		cat := titleRace(race)
-		switch kind {
-		case "hero":
-			cat += " Hero"
-		case "building":
-			cat += " Building"
-		case "special":
-			cat += " Special"
+		kind := ""
+		if cfg.ClassifyFn != nil {
+			kind = cfg.ClassifyFn(u.ID, u.Fields)
+		}
+		race := strings.ToLower(strings.TrimSpace(u.Fields["race"]))
+		cat := ""
+		if cfg.CategoryFn != nil {
+			cat = cfg.CategoryFn(race, kind)
 		}
 		out = append(out, objectsUnitsListEntity{
 			ID:        id,
@@ -274,69 +315,32 @@ func handleObjectsUnitsList(_ json.RawMessage) (any, error) {
 	return out, nil
 }
 
-type objectsUnitsGetParams struct {
-	ID string `json:"id"`
-}
-
-type objectsUnitsField struct {
-	ID          string `json:"id"`           // FourCC of the field
-	Field       string `json:"field"`        // SLK column name (lowercased)
-	DisplayName string `json:"display_name"` // resolved label
-	Category    string `json:"category"`     // "stats" | "combat" | "text" | ...
-	Type        string `json:"type"`         // "int" | "string" | "bool" | ...
-	Value       string `json:"value"`        // raw cell value
-	Display     string `json:"display"`      // value with TRIGSTR/WESTRING/color codes resolved
-	Overridden  bool   `json:"overridden"`   // true if this came from the w3u shadow
-}
-
-type objectsUnitsGetResult struct {
-	ID             string              `json:"id"`
-	Name           string              `json:"name"`
-	BaseID         string              `json:"base_id,omitempty"`
-	IsCustom       bool                `json:"is_custom"`
-	IsEdited       bool                `json:"is_edited"`
-	Race           string              `json:"race"`
-	Kind           string              `json:"kind"`
-	IconArt        string              `json:"icon_art"`
-	ModelPath      string              `json:"model_path"`      // primary .mdx path for the 3D preview
-	ModelFallbacks []string            `json:"model_fallbacks"` // .mdl sibling + variants the previewer tries on load failure
-	Fields         []objectsUnitsField `json:"fields"`
-}
-
-func handleObjectsUnitsGet(params json.RawMessage) (any, error) {
-	var p objectsUnitsGetParams
-	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
-	}
-	if p.ID == "" {
+// getObject is the generic implementation behind objects.<kind>.get. Returns
+// nil error + nil result when the id isn't known so callers can treat that
+// as "empty state" without branching on error vs. missing.
+func getObject(cfg *KindConfig, id string) (*objectsUnitsGetResult, error) {
+	if id == "" {
 		return nil, errors.New("id is required")
 	}
-	merged, meta, err := MergedUnits()
+	merged, meta, err := MergedObjects(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("load units: %w", err)
+		return nil, fmt.Errorf("load %s: %w", cfg.Kind, err)
 	}
-	u, ok := merged[p.ID]
+	u, ok := merged[id]
 	if !ok {
-		return nil, fmt.Errorf("no unit with id %q", p.ID)
+		return nil, fmt.Errorf("no %s object with id %q", cfg.Kind, id)
 	}
 
 	mapStrings := Current.Strings()
-	// Emit one entry per metadata-known field; fields without metadata
-	// (e.g. helper columns the SLK carries but Blizzard doesn't expose)
-	// are dropped — they have no display name or type and would just
-	// clutter the editor. HiveWE behaves the same way.
 	rows := make([]objectsUnitsField, 0, len(meta.Fields))
 	for i := range meta.Fields {
 		f := &meta.Fields[i]
-		if !f.AppliesToUnits() {
+		if cfg.AppliesFn != nil && !cfg.AppliesFn(*f) {
 			continue
 		}
 		col := strings.ToLower(f.Field)
 		val, has := u.Fields[col]
 		if !has {
-			// Field doesn't exist on this unit (most don't apply per-unit;
-			// HiveWE shows them as blank). Emit blank so the UI knows the
-			// field is editable on this row.
 			val = ""
 		}
 		rows = append(rows, objectsUnitsField{
@@ -350,17 +354,12 @@ func handleObjectsUnitsGet(params json.RawMessage) (any, error) {
 			Overridden:  u.Overridden[col],
 		})
 	}
-	// Stable ordering inside each category (matching HiveWE's Index sort).
-	// Index -1 → end of its category. Categories themselves come out in
-	// insertion order; the frontend can re-bucket as it pleases.
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Category != rows[j].Category {
 			return rows[i].Category < rows[j].Category
 		}
-		// Within a category, preserve the metadata's Index ordering.
 		fi := meta.ByID[rows[i].ID]
 		fj := meta.ByID[rows[j].ID]
-		// Treat -1 (unindexed) as +inf — sinks to bottom of its category.
 		ii, jj := fi.Index, fj.Index
 		if ii < 0 {
 			ii = 1 << 30
@@ -375,6 +374,10 @@ func handleObjectsUnitsGet(params json.RawMessage) (any, error) {
 	})
 
 	modelPath, modelFallbacks := unitModelPath(u.Fields)
+	kind := ""
+	if cfg.ClassifyFn != nil {
+		kind = cfg.ClassifyFn(u.ID, u.Fields)
+	}
 	return &objectsUnitsGetResult{
 		ID:             u.ID,
 		Name:           resolveDisplay(u.Fields["name"], mapStrings),
@@ -382,7 +385,7 @@ func handleObjectsUnitsGet(params json.RawMessage) (any, error) {
 		IsCustom:       u.IsCustom,
 		IsEdited:       u.IsEdited,
 		Race:           strings.ToLower(u.Fields["race"]),
-		Kind:           classifyKind(u.ID, u.Fields),
+		Kind:           kind,
 		IconArt:        unitIconArt(u.Fields),
 		ModelPath:      modelPath,
 		ModelFallbacks: modelFallbacks,
@@ -390,120 +393,11 @@ func handleObjectsUnitsGet(params json.RawMessage) (any, error) {
 	}, nil
 }
 
-// objectsUnitsSetFieldParams carries one field-edit. column may be either
-// a FourCC ("unam") or a SLK column name ("name") — the mutator normalizes.
-// value is always a string; type-aware encoding happens at Save (w3objmod.Encode
-// infers int → float → string).
-type objectsUnitsSetFieldParams struct {
-	ID     string `json:"id"`
-	Column string `json:"column"`
-	Value  string `json:"value"`
-}
-
-// handleObjectsUnitsSetField mutates a single field on a unit (stock or
-// custom) and returns the updated full Get payload so the caller doesn't
-// need a follow-up round-trip to refresh its view.
-func handleObjectsUnitsSetField(params json.RawMessage) (any, error) {
-	var p objectsUnitsSetFieldParams
-	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
-	}
-	if p.ID == "" {
-		return nil, errors.New("id is required")
-	}
-	if p.Column == "" {
-		return nil, errors.New("column is required")
-	}
-	if err := Current.SetUnitField(p.ID, p.Column, p.Value); err != nil {
-		return nil, err
-	}
-	// Re-issue the get so callers get the post-mutation field table back
-	// in one round-trip. The Overridden flag flips, and any cascading
-	// formatting changes (display resolution) are re-computed.
-	return handleObjectsUnitsGet(mustMarshalRaw(objectsUnitsGetParams{ID: p.ID}))
-}
-
-// objectsUnitsCreateCustomParams carries a custom-creation request. base_id
-// is required (a stock unit to inherit from). id is optional — when empty,
-// the allocator picks the next free FourCC starting from the base's first
-// character (e.g. base "hpea" → "h001"; base "Hpal" → "H001").
-type objectsUnitsCreateCustomParams struct {
-	BaseID string `json:"base_id"`
-	ID     string `json:"id,omitempty"`
-}
-
-type objectsUnitsCreateCustomResult struct {
-	ID     string                 `json:"id"`
-	Detail *objectsUnitsGetResult `json:"detail"`
-}
-
-// handleObjectsUnitsCreateCustom appends a new custom unit and returns the
-// chosen ID + the full Get payload (so the caller can immediately render
-// the new unit's field table without a separate round-trip).
-func handleObjectsUnitsCreateCustom(params json.RawMessage) (any, error) {
-	var p objectsUnitsCreateCustomParams
-	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
-	}
-	if p.BaseID == "" {
-		return nil, errors.New("base_id is required")
-	}
-	id, err := Current.AddCustomUnit(p.ID, p.BaseID)
-	if err != nil {
-		return nil, err
-	}
-	got, err := handleObjectsUnitsGet(mustMarshalRaw(objectsUnitsGetParams{ID: id}))
-	if err != nil {
-		return nil, fmt.Errorf("get newly-created %q: %w", id, err)
-	}
-	detail, _ := got.(*objectsUnitsGetResult)
-	return objectsUnitsCreateCustomResult{ID: id, Detail: detail}, nil
-}
-
-// objectsUnitsDeleteCustomParams carries a delete request. Errors if id
-// isn't a custom (stock units aren't deletable).
-type objectsUnitsDeleteCustomParams struct {
-	ID string `json:"id"`
-}
-
-func handleObjectsUnitsDeleteCustom(params json.RawMessage) (any, error) {
-	var p objectsUnitsDeleteCustomParams
-	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
-	}
-	if p.ID == "" {
-		return nil, errors.New("id is required")
-	}
-	if err := Current.DeleteCustomUnit(p.ID); err != nil {
-		return nil, err
-	}
-	return map[string]any{"ok": true}, nil
-}
-
-// mustMarshalRaw is a tiny helper for handlers that re-dispatch into other
-// handlers. json.Marshal on a known-good struct never errors; eliding the
-// error keeps the call sites cleaner than the standard
-// `if x, err := json.Marshal(...); err != nil { ... }` boilerplate.
-func mustMarshalRaw(v any) json.RawMessage {
-	b, _ := json.Marshal(v)
-	return b
-}
-
-type objectsUnitsFieldsMetaItem struct {
-	ID          string `json:"id"`
-	Field       string `json:"field"`
-	DisplayName string `json:"display_name"`
-	Category    string `json:"category"`
-	Type        string `json:"type"`
-	MinVal      string `json:"min_val,omitempty"`
-	MaxVal      string `json:"max_val,omitempty"`
-}
-
-// handleObjectsUnitsFieldsMeta returns the field schema so the frontend
-// can render labels + type-aware widgets without round-tripping the
-// metadata on every unit selection. Static for the process lifetime.
-func handleObjectsUnitsFieldsMeta(_ json.RawMessage) (any, error) {
-	_, meta, err := loadUnitsBase()
+// fieldsMetaForKind is the generic implementation behind
+// objects.<kind>.fields_meta. Static for the process lifetime modulo
+// map-strings resolution.
+func fieldsMetaForKind(cfg *KindConfig) ([]objectsUnitsFieldsMetaItem, error) {
+	_, meta, err := loadObjectBase(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("load metadata: %w", err)
 	}
@@ -511,7 +405,7 @@ func handleObjectsUnitsFieldsMeta(_ json.RawMessage) (any, error) {
 	out := make([]objectsUnitsFieldsMetaItem, 0, len(meta.Fields))
 	for i := range meta.Fields {
 		f := &meta.Fields[i]
-		if !f.AppliesToUnits() {
+		if cfg.AppliesFn != nil && !cfg.AppliesFn(*f) {
 			continue
 		}
 		out = append(out, objectsUnitsFieldsMetaItem{
@@ -525,4 +419,122 @@ func handleObjectsUnitsFieldsMeta(_ json.RawMessage) (any, error) {
 		})
 	}
 	return out, nil
+}
+
+// makeListHandler returns the objects.<kind>.list handler bound to cfg.
+func makeListHandler(cfg *KindConfig) bridge.Handler {
+	return func(_ json.RawMessage) (any, error) {
+		return listObjects(cfg)
+	}
+}
+
+// makeGetHandler returns the objects.<kind>.get handler bound to cfg.
+func makeGetHandler(cfg *KindConfig) bridge.Handler {
+	return func(params json.RawMessage) (any, error) {
+		var p objectsUnitsGetParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return getObject(cfg, p.ID)
+	}
+}
+
+// makeFieldsMetaHandler returns the objects.<kind>.fields_meta handler.
+func makeFieldsMetaHandler(cfg *KindConfig) bridge.Handler {
+	return func(_ json.RawMessage) (any, error) {
+		return fieldsMetaForKind(cfg)
+	}
+}
+
+// makeSetFieldHandler returns the objects.<kind>.set_field handler. Re-emits
+// the post-mutation Get payload so the caller doesn't need a follow-up
+// round-trip to refresh its view.
+func makeSetFieldHandler(cfg *KindConfig) bridge.Handler {
+	return func(params json.RawMessage) (any, error) {
+		var p objectsUnitsSetFieldParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if p.ID == "" {
+			return nil, errors.New("id is required")
+		}
+		if p.Column == "" {
+			return nil, errors.New("column is required")
+		}
+		if err := Current.SetObjectField(cfg, p.ID, p.Column, p.Value); err != nil {
+			return nil, err
+		}
+		return getObject(cfg, p.ID)
+	}
+}
+
+// makeCreateCustomHandler returns the objects.<kind>.create_custom handler.
+func makeCreateCustomHandler(cfg *KindConfig) bridge.Handler {
+	return func(params json.RawMessage) (any, error) {
+		var p objectsUnitsCreateCustomParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if p.BaseID == "" {
+			return nil, errors.New("base_id is required")
+		}
+		id, err := Current.AddCustomObject(cfg, p.ID, p.BaseID)
+		if err != nil {
+			return nil, err
+		}
+		detail, err := getObject(cfg, id)
+		if err != nil {
+			return nil, fmt.Errorf("get newly-created %q: %w", id, err)
+		}
+		return objectsUnitsCreateCustomResult{ID: id, Detail: detail}, nil
+	}
+}
+
+// makeDeleteCustomHandler returns the objects.<kind>.delete_custom handler.
+func makeDeleteCustomHandler(cfg *KindConfig) bridge.Handler {
+	return func(params json.RawMessage) (any, error) {
+		var p objectsUnitsDeleteCustomParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if p.ID == "" {
+			return nil, errors.New("id is required")
+		}
+		if err := Current.DeleteCustomObject(cfg, p.ID); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, nil
+	}
+}
+
+// registerObjectKind wires the six MCP handlers for one kind into the
+// bridge. RegisterAll calls this once per kind (today: units; Phase 2b adds
+// the other six). `reg` is RegisterAll's local closure that goes through the
+// `instrumented` wrapper so Agent Console subscribers see every dispatch.
+func registerObjectKind(reg func(method string, h bridge.Handler), cfg *KindConfig) {
+	reg("objects."+cfg.Kind+".list", makeListHandler(cfg))
+	reg("objects."+cfg.Kind+".get", makeGetHandler(cfg))
+	reg("objects."+cfg.Kind+".fields_meta", makeFieldsMetaHandler(cfg))
+	reg("objects."+cfg.Kind+".set_field", makeSetFieldHandler(cfg))
+	reg("objects."+cfg.Kind+".create_custom", makeCreateCustomHandler(cfg))
+	reg("objects."+cfg.Kind+".delete_custom", makeDeleteCustomHandler(cfg))
+}
+
+// ---------------------------------------------------------------------------
+// Phase-1b-named wrappers retained for the test harness. The tests reference
+// `handleObjectsUnitsList` / `handleObjectsUnitsGet` directly; those names
+// still resolve to the units variant of the generic factory output. New
+// tests should prefer `listObjects(UnitsConfig())` etc. directly.
+// ---------------------------------------------------------------------------
+
+func handleObjectsUnitsList(_ json.RawMessage) (any, error) {
+	return listObjects(UnitsConfig())
+}
+
+func handleObjectsUnitsGet(params json.RawMessage) (any, error) {
+	var p objectsUnitsGetParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	return getObject(UnitsConfig(), p.ID)
 }

@@ -97,22 +97,16 @@ func RegisterAll(b *bridge.Bridge) {
 	// Prefixed with underscore to flag it as a non-stable surface; agents
 	// should use the specific handlers (view.set_mode etc.) where available.
 	reg("_ui.send_command", handleUISendCommand)
-	// Object Editor — units (Phase 1a: read-only, units kind only). The
-	// "objects.*" namespace is distinct from the "units.*" namespace, which
-	// is reserved for *placed* unit entities (war3mapUnits.doo). Items,
-	// abilities, doodads, etc. will land under "objects.<kind>.*" the same
-	// way.
-	reg("objects.units.list", handleObjectsUnitsList)
-	reg("objects.units.get", handleObjectsUnitsGet)
-	reg("objects.units.fields_meta", handleObjectsUnitsFieldsMeta)
-	// Phase 1b: write-side. Edit a field (set_field), spawn a new derived
-	// unit (create_custom), drop a derived unit (delete_custom). All flow
-	// through Session.SetUnitField / AddCustomUnit / DeleteCustomUnit so
-	// undo/redo + entity-changed events fire normally; Save persists the
-	// resulting w3u shadow.
-	reg("objects.units.set_field", handleObjectsUnitsSetField)
-	reg("objects.units.create_custom", handleObjectsUnitsCreateCustom)
-	reg("objects.units.delete_custom", handleObjectsUnitsDeleteCustom)
+	// Object Editor — kind-agnostic. The "objects.*" namespace is distinct
+	// from "units.*"/"doodads.*", which are reserved for *placed* entities
+	// (war3mapUnits.doo / war3map.doo). Phase 2a wires units only;
+	// Phase 2b adds the other six kinds by calling registerObjectKind
+	// with their respective KindConfig (ItemsConfig, AbilitiesConfig, ...).
+	//
+	// Each call stamps out six routes:
+	//   objects.<kind>.list / .get / .fields_meta
+	//   objects.<kind>.set_field / .create_custom / .delete_custom
+	registerObjectKind(reg, UnitsConfig())
 }
 
 // handleUISendCommand forwards a raw test-driver command string. Used by

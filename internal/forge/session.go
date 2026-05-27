@@ -1328,35 +1328,33 @@ func (s *Session) SwapTileset(req SwapTilesetRequest) error {
 	return nil
 }
 
-// SetUnitField writes `value` to the named field on the unit with FourCC
-// `id`. The field can be a FourCC (e.g. "unam") OR a column-name (e.g.
-// "name") — setUnitField normalizes via UnitMetaData. Stock units land in
-// the OriginalEdits table; customs land on their own Overrides map. The
-// edit is recorded as one undo step via setUnitFieldCmd.
+// SetObjectField writes `value` to the named field on the object with FourCC
+// `id` for the kind described by cfg. The field can be a FourCC (e.g. "unam")
+// OR a column-name (e.g. "name") — setObjectField normalizes via the kind's
+// metadata. Stock rows land in the OriginalEdits table; customs land on
+// their own Overrides map. The edit is recorded as one undo step via
+// setObjectFieldCmd.
 //
-// Idempotence: a SetUnitField call with the same value as the current
+// Idempotence: a SetObjectField call with the same value as the current
 // override is a no-op (no dirty flip, no history entry, no event). Without
 // this short-circuit the Properties panel's commit-on-blur path would
 // pollute the undo stack with non-edits.
 //
-// Returns an error if id isn't known (neither stock nor custom) or the
-// field isn't in UnitMetaData. Does not flip dirty / record history when
-// the call errored out — caller's UI safely retries.
-func (s *Session) SetUnitField(id, field, value string) error {
+// Returns an error if id isn't known (neither stock nor custom for this
+// kind) or the field isn't in the kind's metadata. Does not flip dirty /
+// record history when the call errored out.
+func (s *Session) SetObjectField(cfg *KindConfig, id, field, value string) error {
 	s.mu.Lock()
 	if !s.loaded {
 		s.mu.Unlock()
 		return fmt.Errorf("no map loaded")
 	}
-	// Read the current value (peek into unitMods + base) for the idempotence
-	// check + to capture oldVal for undo. We don't take the write lock yet —
-	// the read is cheap and we'd just turn around and acquire write below.
-	mods := s.unitMods
-	_, meta, _ := loadUnitsBase()
-	fourCC := fieldKeyForUnitMods(meta, field)
+	mods := cfg.GetMods(s)
+	_, meta, _ := loadObjectBase(cfg)
+	fourCC := fieldKeyForMods(meta, field)
 	if fourCC == "" {
 		s.mu.Unlock()
-		return fmt.Errorf("unknown field %q (not in UnitMetaData)", field)
+		return fmt.Errorf("unknown field %q (not in %s)", field, cfg.MetaDataFile)
 	}
 	var prev string
 	var had bool
@@ -1371,109 +1369,141 @@ func (s *Session) SetUnitField(id, field, value string) error {
 		s.mu.Unlock()
 		return nil // no-op
 	}
-	// Validate id is a real unit BEFORE mutating. setUnitField does the same
-	// check, but it allocates unitMods as a side-effect — we don't want a
-	// missing-id call to leave an empty File hanging around.
+	// Validate id is a real object BEFORE mutating. setObjectField does the
+	// same check, but it allocates a fresh shadow as a side-effect — we don't
+	// want a missing-id call to leave an empty File hanging around.
 	if mods == nil || findCustomIndex(mods, id) < 0 {
-		base, _, _ := loadUnitsBase()
+		base, _, _ := loadObjectBase(cfg)
 		if base == nil || base.Rows[id] == nil {
-			// Not a known custom AND not a known stock unit.
 			s.mu.Unlock()
-			return fmt.Errorf("no unit with id %q", id)
+			return fmt.Errorf("no %s object with id %q", cfg.Kind, id)
 		}
 	}
-	// Perform the mutation.
-	if _, _, err := setUnitField(s, id, field, value); err != nil {
+	if _, _, err := setObjectField(s, cfg, id, field, value); err != nil {
 		s.mu.Unlock()
 		return err
 	}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.dirtyUnitMods
-	s.dirtyUnitMods = true
-	s.recordCommand(&setUnitFieldCmd{
-		id: id, column: field, oldVal: prev, newVal: value, hadOverride: had,
+	wasDirty := s.anyDirtyLocked()
+	cfg.SetDirty(s, true)
+	s.recordCommand(&setObjectFieldCmd{
+		kind: cfg.Kind, id: id, column: field, oldVal: prev, newVal: value, hadOverride: had,
 	})
 	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
 	if !wasDirty {
 		s.notifyDirty(true)
 	}
-	s.notifyEntityChanged(EntityChange{Kind: "unit_mod", ID: 0, Field: field})
+	s.notifyEntityChanged(EntityChange{Kind: cfg.Kind + "_mod", ID: 0, Field: field})
 	if historyChanged {
 		s.notifyHistoryChanged()
 	}
 	return nil
 }
 
-// AddCustomUnit appends a new custom unit row inheriting from baseID. If
-// newID is empty, an allocator picks the next free FourCC starting from
-// the first character of baseID (e.g. "hpea" → "h001"); the chosen ID is
-// returned.
+// AddCustomObject appends a new custom row of the given kind inheriting from
+// baseID. If newID is empty, an allocator picks the next free FourCC
+// starting from the first character of baseID (e.g. "hpea" → "h001"); the
+// chosen ID is returned.
 //
-// Errors if newID collides with an existing custom or shadows a stock
-// unit. Recorded in history as one undo step.
-func (s *Session) AddCustomUnit(newID, baseID string) (string, error) {
+// Errors if newID collides with an existing custom or shadows a stock row.
+// Recorded in history as one undo step.
+func (s *Session) AddCustomObject(cfg *KindConfig, newID, baseID string) (string, error) {
 	s.mu.Lock()
 	if !s.loaded {
 		s.mu.Unlock()
 		return "", fmt.Errorf("no map loaded")
 	}
 	if newID == "" {
-		newID = allocateCustomID(s, baseID)
+		newID = allocateCustomID(s, cfg, baseID)
 		if newID == "" {
 			s.mu.Unlock()
 			return "", fmt.Errorf("no free custom id available for base %q", baseID)
 		}
 	}
-	if err := addCustomUnit(s, newID, baseID); err != nil {
+	if err := addCustomObject(s, cfg, newID, baseID); err != nil {
 		s.mu.Unlock()
 		return "", err
 	}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.dirtyUnitMods
-	s.dirtyUnitMods = true
-	s.recordCommand(&addCustomUnitCmd{newID: newID, baseID: baseID})
+	wasDirty := s.anyDirtyLocked()
+	cfg.SetDirty(s, true)
+	s.recordCommand(&addCustomObjectCmd{kind: cfg.Kind, newID: newID, baseID: baseID})
 	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
 	if !wasDirty {
 		s.notifyDirty(true)
 	}
-	s.notifyEntityChanged(EntityChange{Kind: "unit_mod", ID: 0, Field: "customs"})
+	s.notifyEntityChanged(EntityChange{Kind: cfg.Kind + "_mod", ID: 0, Field: "customs"})
 	if historyChanged {
 		s.notifyHistoryChanged()
 	}
 	return newID, nil
 }
 
-// DeleteCustomUnit removes a custom unit row from the shadow. Errors if id
-// isn't a custom (stock units can't be deleted — they live in the base SLK).
-// Recorded in history as one undo step; Revert re-appends the snapshot.
-func (s *Session) DeleteCustomUnit(id string) error {
+// DeleteCustomObject removes a custom row of the given kind from the shadow.
+// Errors if id isn't a custom (stock rows can't be deleted — they live in
+// the base SLK). Recorded in history as one undo step; Revert re-appends
+// the snapshot.
+func (s *Session) DeleteCustomObject(cfg *KindConfig, id string) error {
 	s.mu.Lock()
 	if !s.loaded {
 		s.mu.Unlock()
 		return fmt.Errorf("no map loaded")
 	}
-	if s.unitMods == nil || findCustomIndex(s.unitMods, id) < 0 {
+	mods := cfg.GetMods(s)
+	if mods == nil || findCustomIndex(mods, id) < 0 {
 		s.mu.Unlock()
-		return fmt.Errorf("no custom unit with id %q", id)
+		return fmt.Errorf("no custom %s with id %q", cfg.Kind, id)
 	}
-	saved, ok := removeCustomUnit(s, id)
+	saved, ok := removeCustomObject(s, cfg, id)
 	if !ok {
 		s.mu.Unlock()
-		return fmt.Errorf("no custom unit with id %q", id)
+		return fmt.Errorf("no custom %s with id %q", cfg.Kind, id)
 	}
-	wasDirty := s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain || s.dirtyGameplay || s.dirtyUnitMods
-	s.dirtyUnitMods = true
-	s.recordCommand(&deleteCustomUnitCmd{saved: saved})
+	wasDirty := s.anyDirtyLocked()
+	cfg.SetDirty(s, true)
+	s.recordCommand(&deleteCustomObjectCmd{kind: cfg.Kind, saved: saved})
 	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
 	if !wasDirty {
 		s.notifyDirty(true)
 	}
-	s.notifyEntityChanged(EntityChange{Kind: "unit_mod", ID: 0, Field: "customs"})
+	s.notifyEntityChanged(EntityChange{Kind: cfg.Kind + "_mod", ID: 0, Field: "customs"})
 	if historyChanged {
 		s.notifyHistoryChanged()
 	}
 	return nil
+}
+
+// anyDirtyLocked reports whether the session holds any pending edit to any
+// kind's per-map shadow + the other per-file dirty flags. Caller MUST hold
+// s.mu (read or write). Used by the object-edit mutators to detect the 0→1
+// transition that fires the public dirty event.
+func (s *Session) anyDirtyLocked() bool {
+	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain ||
+		s.dirtyGameplay || s.dirtyUnitMods
+}
+
+// ---------------------------------------------------------------------------
+// Phase-1b compat shims — preserve the previous method names so external
+// callers (Wails app.go, future MCP additions) keep compiling. New code
+// should target the kind-agnostic SetObjectField / AddCustomObject /
+// DeleteCustomObject directly with the right config.
+// ---------------------------------------------------------------------------
+
+// SetUnitField is the Phase-1b alias of SetObjectField bound to UnitsConfig().
+func (s *Session) SetUnitField(id, field, value string) error {
+	return s.SetObjectField(UnitsConfig(), id, field, value)
+}
+
+// AddCustomUnit is the Phase-1b alias of AddCustomObject bound to UnitsConfig().
+func (s *Session) AddCustomUnit(newID, baseID string) (string, error) {
+	return s.AddCustomObject(UnitsConfig(), newID, baseID)
+}
+
+// DeleteCustomUnit is the Phase-1b alias of DeleteCustomObject bound to
+// UnitsConfig().
+func (s *Session) DeleteCustomUnit(id string) error {
+	return s.DeleteCustomObject(UnitsConfig(), id)
 }
 
 // Gameplay returns the parsed war3mapMisc.txt (per-map gameplay constants),
@@ -1680,12 +1710,12 @@ func (s *Session) Save() error {
 			// is a valid (and small) on-disk shape.
 			mods = &w3objmod.File{Version: 3}
 		}
-		_, meta, _ := loadUnitsBase()
+		_, meta, _ := loadObjectBase(UnitsConfig())
 		var fieldMap w3objmod.FieldMap
 		if meta != nil {
 			fieldMap = meta.FieldMap()
 		}
-		data, err := w3objmod.Encode(mods, false, fieldMap)
+		data, err := w3objmod.Encode(mods, UnitsConfig().ShadowOpt, fieldMap)
 		if err != nil {
 			return fmt.Errorf("encode war3map.w3u: %w", err)
 		}

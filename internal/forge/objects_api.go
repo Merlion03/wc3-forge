@@ -1,16 +1,21 @@
 package forge
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 )
 
-// Public re-exports of the Object Editor (units) read surface so package
-// main can bind them through Wails without re-implementing the wire shapes.
-// The MCP handlers in handlers_objects.go remain the source of truth for
-// JSON contract; these wrappers just unwrap the JSON-RawMessage signature
-// the bridge uses so callers can pass typed Go values instead.
+// Public re-exports of the Object Editor read/write surface for the Wails
+// App layer. The generic backed surface (listObjects/getObject/...) lives
+// in handlers_objects.go; this file gives package main typed entry points
+// that don't go through json.RawMessage.
+//
+// Each kind's surface is a thin wrapper around the generic that captures
+// the right *KindConfig. The Wails ListUnitObjects/GetUnitObject/etc.
+// methods in app.go call the units-named wrappers so the existing
+// frontend keeps working byte-for-byte. Phase 2b adds parallel
+// ListItemObjects/etc. by copying the units wrappers below — the bodies
+// are mechanical (swap UnitsConfig() for the kind's config).
 
 // UnitObjectListEntity is the public alias of the bridge's list-row shape.
 // Same JSON tags so a Wails-bound []UnitObjectListEntity and an MCP
@@ -26,15 +31,7 @@ type UnitObjectDetail = objectsUnitsGetResult
 // ListUnitObjects returns the merged-units tree. Empty slice when no CASC
 // is reachable — callers should treat that as "empty state", not an error.
 func ListUnitObjects() ([]UnitObjectListEntity, error) {
-	raw, err := handleObjectsUnitsList(nil)
-	if err != nil {
-		return nil, err
-	}
-	out, ok := raw.([]objectsUnitsListEntity)
-	if !ok {
-		return nil, errors.New("internal: unexpected list shape")
-	}
-	return out, nil
+	return listObjects(UnitsConfig())
 }
 
 // GetUnitObject returns one merged unit's full field table by FourCC id.
@@ -44,16 +41,7 @@ func GetUnitObject(id string) (*UnitObjectDetail, error) {
 	if id == "" {
 		return nil, errors.New("id is required")
 	}
-	params, _ := json.Marshal(objectsUnitsGetParams{ID: id})
-	raw, err := handleObjectsUnitsGet(params)
-	if err != nil {
-		return nil, err
-	}
-	d, ok := raw.(*objectsUnitsGetResult)
-	if !ok {
-		return nil, fmt.Errorf("internal: unexpected get shape %T", raw)
-	}
-	return d, nil
+	return getObject(UnitsConfig(), id)
 }
 
 // SetUnitObjectField writes `value` to the named field on the unit. column
@@ -67,7 +55,7 @@ func SetUnitObjectField(id, column, value string) (*UnitObjectDetail, error) {
 	if column == "" {
 		return nil, errors.New("column is required")
 	}
-	if err := Current.SetUnitField(id, column, value); err != nil {
+	if err := Current.SetObjectField(UnitsConfig(), id, column, value); err != nil {
 		return nil, err
 	}
 	return GetUnitObject(id)
@@ -80,7 +68,7 @@ func CreateCustomUnitObject(baseID, id string) (string, *UnitObjectDetail, error
 	if baseID == "" {
 		return "", nil, errors.New("base_id is required")
 	}
-	chosenID, err := Current.AddCustomUnit(id, baseID)
+	chosenID, err := Current.AddCustomObject(UnitsConfig(), id, baseID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -97,5 +85,5 @@ func DeleteCustomUnitObject(id string) error {
 	if id == "" {
 		return errors.New("id is required")
 	}
-	return Current.DeleteCustomUnit(id)
+	return Current.DeleteCustomObject(UnitsConfig(), id)
 }

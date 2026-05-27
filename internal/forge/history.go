@@ -294,112 +294,121 @@ func (c *swapTilesetCmd) Affected(s *Session) []EntityChange {
 }
 
 // ---------------------------------------------------------------------------
-// Object Editor (units) write commands. These operate on the war3map.w3u
-// shadow (s.unitMods), not on placed entities. Affected events use
-// Kind="unit_mod" with ID=0 — the tree refresh in the Object Editor is
-// coarse (re-list, re-detail) rather than per-row; the JS side ignores ID
-// and rebuilds based on Field.
+// Object Editor write commands. These operate on the per-kind shadow files
+// (s.unitMods / s.itemMods / ...), not on placed entities. Each command
+// carries a `kind` discriminator so Apply/Revert can dispatch into the right
+// KindConfig via kindConfigFor. Affected events use Kind="<kind>_mod" with
+// ID=0 — the tree refresh in the Object Editor is coarse (re-list, re-detail)
+// rather than per-row; the JS side ignores ID and rebuilds based on Field.
 // ---------------------------------------------------------------------------
 
-// setUnitFieldCmd represents one field-edit on a stock or custom unit.
-// hadOverride distinguishes "the field was previously a default" (Revert
-// deletes the override entirely) from "the field had a previous override
-// value" (Revert restores oldVal). Without this flag, Revert would always
-// write oldVal back — including when oldVal was the empty string from a
-// non-existent override, which would create a spurious "" override on
-// Undo.
-type setUnitFieldCmd struct {
+// setObjectFieldCmd represents one field-edit on a stock or custom object of
+// the given kind. hadOverride distinguishes "the field was previously a
+// default" (Revert deletes the override entirely) from "the field had a
+// previous override value" (Revert restores oldVal). Without this flag,
+// Revert would always write oldVal back — including when oldVal was the
+// empty string from a non-existent override, which would create a spurious
+// "" override on Undo.
+type setObjectFieldCmd struct {
+	kind        string
 	id          string
-	column      string // FourCC or column-name; setUnitField normalizes
+	column      string // FourCC or column-name; setObjectField normalizes
 	oldVal      string
 	newVal      string
 	hadOverride bool
 }
 
-func (c *setUnitFieldCmd) Label() string { return "Edit unit field" }
+func (c *setObjectFieldCmd) Label() string { return "Edit " + c.kind + " field" }
 
-func (c *setUnitFieldCmd) Apply(s *Session) error {
-	_, _, err := setUnitField(s, c.id, c.column, c.newVal)
-	if err != nil {
+func (c *setObjectFieldCmd) Apply(s *Session) error {
+	cfg := kindConfigFor(c.kind)
+	if _, _, err := setObjectField(s, cfg, c.id, c.column, c.newVal); err != nil {
 		return err
 	}
-	s.dirtyUnitMods = true
+	cfg.SetDirty(s, true)
 	return nil
 }
 
-func (c *setUnitFieldCmd) Revert(s *Session) error {
+func (c *setObjectFieldCmd) Revert(s *Session) error {
+	cfg := kindConfigFor(c.kind)
 	if !c.hadOverride {
-		if err := clearUnitField(s, c.id, c.column); err != nil {
+		if err := clearObjectField(s, cfg, c.id, c.column); err != nil {
 			return err
 		}
 	} else {
-		if _, _, err := setUnitField(s, c.id, c.column, c.oldVal); err != nil {
+		if _, _, err := setObjectField(s, cfg, c.id, c.column, c.oldVal); err != nil {
 			return err
 		}
 	}
-	s.dirtyUnitMods = true
+	cfg.SetDirty(s, true)
 	return nil
 }
 
-func (c *setUnitFieldCmd) Affected(s *Session) []EntityChange {
-	return []EntityChange{{Kind: "unit_mod", ID: 0, Field: c.column}}
+func (c *setObjectFieldCmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: c.kind + "_mod", ID: 0, Field: c.column}}
 }
 
-// addCustomUnitCmd represents creating a new custom unit row in the w3u
+// addCustomObjectCmd represents creating a new custom row in the kind's
 // shadow. Apply appends a custom with empty overrides; Revert removes it.
-// The "shadow stock id" check lives in addCustomUnit so Apply's error
+// The "shadow stock id" check lives in addCustomObject so Apply's error
 // path is the same whether the cmd ran from the mutator or from Redo.
-type addCustomUnitCmd struct {
+type addCustomObjectCmd struct {
+	kind   string
 	newID  string
 	baseID string
 }
 
-func (c *addCustomUnitCmd) Label() string { return "Add custom unit" }
+func (c *addCustomObjectCmd) Label() string { return "Add custom " + c.kind }
 
-func (c *addCustomUnitCmd) Apply(s *Session) error {
-	if err := addCustomUnit(s, c.newID, c.baseID); err != nil {
+func (c *addCustomObjectCmd) Apply(s *Session) error {
+	cfg := kindConfigFor(c.kind)
+	if err := addCustomObject(s, cfg, c.newID, c.baseID); err != nil {
 		return err
 	}
-	s.dirtyUnitMods = true
+	cfg.SetDirty(s, true)
 	return nil
 }
 
-func (c *addCustomUnitCmd) Revert(s *Session) error {
-	_, _ = removeCustomUnit(s, c.newID)
-	s.dirtyUnitMods = true
+func (c *addCustomObjectCmd) Revert(s *Session) error {
+	cfg := kindConfigFor(c.kind)
+	_, _ = removeCustomObject(s, cfg, c.newID)
+	cfg.SetDirty(s, true)
 	return nil
 }
 
-func (c *addCustomUnitCmd) Affected(s *Session) []EntityChange {
-	return []EntityChange{{Kind: "unit_mod", ID: 0, Field: "customs"}}
+func (c *addCustomObjectCmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: c.kind + "_mod", ID: 0, Field: "customs"}}
 }
 
-// deleteCustomUnitCmd removes a custom unit row from the shadow. We snapshot
+// deleteCustomObjectCmd removes a custom row from the shadow. We snapshot
 // the full CustomObject (id, base id, overrides) so Revert can restore the
 // row's overrides verbatim — without the snapshot, Undo would re-create the
 // shell but lose any per-field edits the user had committed.
-type deleteCustomUnitCmd struct {
+type deleteCustomObjectCmd struct {
+	kind  string
 	saved w3objmod.CustomObject
 }
 
-func (c *deleteCustomUnitCmd) Label() string { return "Delete custom unit" }
+func (c *deleteCustomObjectCmd) Label() string { return "Delete custom " + c.kind }
 
-func (c *deleteCustomUnitCmd) Apply(s *Session) error {
-	if _, ok := removeCustomUnit(s, c.saved.ID); !ok {
+func (c *deleteCustomObjectCmd) Apply(s *Session) error {
+	cfg := kindConfigFor(c.kind)
+	if _, ok := removeCustomObject(s, cfg, c.saved.ID); !ok {
 		return fmt.Errorf("custom %q not found", c.saved.ID)
 	}
-	s.dirtyUnitMods = true
+	cfg.SetDirty(s, true)
 	return nil
 }
 
-func (c *deleteCustomUnitCmd) Revert(s *Session) error {
-	reinsertCustomUnit(s, c.saved)
-	s.dirtyUnitMods = true
+func (c *deleteCustomObjectCmd) Revert(s *Session) error {
+	cfg := kindConfigFor(c.kind)
+	reinsertCustomObject(s, cfg, c.saved)
+	cfg.SetDirty(s, true)
 	return nil
 }
 
-func (c *deleteCustomUnitCmd) Affected(s *Session) []EntityChange {
-	return []EntityChange{{Kind: "unit_mod", ID: 0, Field: "customs"}}
+func (c *deleteCustomObjectCmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: c.kind + "_mod", ID: 0, Field: "customs"}}
 }
 
 // ---------------------------------------------------------------------------

@@ -26,16 +26,16 @@ func TestHandleObjectsUnitsGet_MissingID(t *testing.T) {
 // than crash. Confirms graceful degradation when CASC is unreachable —
 // matters because wc3-forge starts before CASC is mounted on some paths.
 func TestHandleObjectsUnitsList_NoCASC(t *testing.T) {
-	// Reset the sync.Once-guarded base cache so a previous test that
-	// happened to load CASC doesn't leak into this one. Tests run in the
-	// same process — without this, ordering changes the outcome.
+	// Reset the per-kind base cache so a previous test that happened to
+	// load CASC doesn't leak into this one. Tests run in the same process —
+	// without this, ordering changes the outcome.
 	prevReader := baseAssetReader
 	t.Cleanup(func() { baseAssetReader = prevReader })
 	baseAssetReader = nil
-	// Force re-load by clearing the sync.Once-guarded vars (only safe to
-	// touch from a test that owns the package). loadUnitsBase short-circuits
-	// after the first call; we want it to run again with the nil reader.
-	resetUnitsBaseCacheForTest()
+	// Force re-load by clearing the per-kind sync.Once-guarded slot. The
+	// generic loadObjectBase short-circuits after the first call; we want
+	// it to run again with the nil reader for the units kind.
+	resetObjectBaseCacheForTest("units")
 
 	out, err := handleObjectsUnitsList(json.RawMessage(`{}`))
 	if err != nil {

@@ -14,28 +14,22 @@ import (
 // install one stock unit ("hpea") with one field ("name", FourCC "unam"),
 // plus a stand-in metadata row whose FieldMap binds them together.
 //
-// Restore the base + reset the sync.Once on test exit so other tests don't
-// see the stub.
+// Restore the base + reset the per-kind cache on test exit so other tests
+// don't see the stub.
 func stubUnitsBase(t *testing.T) {
 	t.Helper()
-	resetUnitsBaseCacheForTest()
+	resetObjectBaseCacheForTest("units")
 	prevReader := baseAssetReader
 	baseAssetReader = nil
 	t.Cleanup(func() {
 		baseAssetReader = prevReader
-		resetUnitsBaseCacheForTest()
+		resetObjectBaseCacheForTest("units")
 	})
-	// Sneak past the sync.Once by directly populating the package globals.
-	// We re-run the Once to consume the no-op load (nil reader = empty base);
-	// then overwrite with the stub. This keeps the helpers' fast-path
-	// behavior identical to a real load.
-	_, _, _ = loadUnitsBase()
 	stubBase := slk.New()
 	stubBase.Rows = map[string]slk.MappedRow{
 		"hpea": slk.MappedRow{"name": "Peasant", "race": "human"},
 	}
-	unitsBase = stubBase
-	unitsMeta = &UnitMetadata{
+	stubMeta := &UnitMetadata{
 		Fields: []UnitFieldMeta{
 			{
 				ID: "unam", Field: "Name", Category: "text", Type: "string",
@@ -48,9 +42,10 @@ func stubUnitsBase(t *testing.T) {
 		},
 		ByID: map[string]*UnitFieldMeta{},
 	}
-	for i := range unitsMeta.Fields {
-		unitsMeta.ByID[unitsMeta.Fields[i].ID] = &unitsMeta.Fields[i]
+	for i := range stubMeta.Fields {
+		stubMeta.ByID[stubMeta.Fields[i].ID] = &stubMeta.Fields[i]
 	}
+	setObjectBaseForTest("units", stubBase, stubMeta)
 }
 
 // minimalFolderMap creates a tempdir folder-map containing only a
@@ -347,7 +342,7 @@ func TestAllocateCustomID_SkipsExisting(t *testing.T) {
 			{ID: "h001", BaseID: "hpea"},
 		},
 	}
-	got := allocateCustomID(s, "hpea")
+	got := allocateCustomID(s, UnitsConfig(), "hpea")
 	if got != "h002" {
 		t.Errorf("allocator picked %q, want h002 (next free)", got)
 	}
