@@ -22,6 +22,26 @@ export function CloseMap() {
   return window['go']['main']['App']['CloseMap']();
 }
 
+export function ConvertObject(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ConvertObject'](arg1, arg2, arg3);
+}
+
+export function CreateCustomObject(arg1, arg2, arg3) {
+  return window['go']['main']['App']['CreateCustomObject'](arg1, arg2, arg3);
+}
+
+export function CreateCustomUnit(arg1, arg2) {
+  return window['go']['main']['App']['CreateCustomUnit'](arg1, arg2);
+}
+
+export function DeleteCustomObject(arg1, arg2) {
+  return window['go']['main']['App']['DeleteCustomObject'](arg1, arg2);
+}
+
+export function DeleteCustomUnit(arg1) {
+  return window['go']['main']['App']['DeleteCustomUnit'](arg1);
+}
+
 export function DiscardTo(arg1) {
   return window['go']['main']['App']['DiscardTo'](arg1);
 }
@@ -66,6 +86,10 @@ export function GetMinimapBytes() {
   return window['go']['main']['App']['GetMinimapBytes']();
 }
 
+export function GetObject(arg1, arg2) {
+  return window['go']['main']['App']['GetObject'](arg1, arg2);
+}
+
 export function GetPathingMap() {
   return window['go']['main']['App']['GetPathingMap']();
 }
@@ -80,6 +104,14 @@ export function GetSelection() {
 
 export function GetTerrain() {
   return window['go']['main']['App']['GetTerrain']();
+}
+
+export function GetTrigger(arg1) {
+  return window['go']['main']['App']['GetTrigger'](arg1);
+}
+
+export function GetTriggerFunctionsMeta() {
+  return window['go']['main']['App']['GetTriggerFunctionsMeta']();
 }
 
 export function GetUnit(arg1) {
@@ -110,8 +142,16 @@ export function LaunchInWC3() {
   return window['go']['main']['App']['LaunchInWC3']();
 }
 
+export function ListCommandButtons() {
+  return window['go']['main']['App']['ListCommandButtons']();
+}
+
 export function ListDoodads() {
   return window['go']['main']['App']['ListDoodads']();
+}
+
+export function ListObjects(arg1) {
+  return window['go']['main']['App']['ListObjects'](arg1);
 }
 
 export function ListSkyModels() {
@@ -120,6 +160,10 @@ export function ListSkyModels() {
 
 export function ListTilesets() {
   return window['go']['main']['App']['ListTilesets']();
+}
+
+export function ListTriggerTree() {
+  return window['go']['main']['App']['ListTriggerTree']();
 }
 
 export function ListUnitObjects() {
@@ -198,6 +242,10 @@ export function SelectUnit(arg1) {
   return window['go']['main']['App']['SelectUnit'](arg1);
 }
 
+export function SetObjectField(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SetObjectField'](arg1, arg2, arg3, arg4);
+}
+
 export function SetReforgedMode(arg1) {
   return window['go']['main']['App']['SetReforgedMode'](arg1);
 }
@@ -212,6 +260,10 @@ export function SetSkyModel(arg1) {
 
 export function SetUnitAnimation(arg1, arg2) {
   return window['go']['main']['App']['SetUnitAnimation'](arg1, arg2);
+}
+
+export function SetUnitObjectField(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetUnitObjectField'](arg1, arg2, arg3);
 }
 
 export function Status() {

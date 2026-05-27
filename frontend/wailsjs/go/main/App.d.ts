@@ -16,6 +16,16 @@ export function ClearSelection():Promise<main.SelectionDTO>;
 
 export function CloseMap():Promise<main.MapStatus>;
 
+export function ConvertObject(arg1:string,arg2:string,arg3:string):Promise<main.ConvertObjectResult>;
+
+export function CreateCustomObject(arg1:string,arg2:string,arg3:string):Promise<main.CreateCustomObjectResult>;
+
+export function CreateCustomUnit(arg1:string,arg2:string):Promise<main.CreateCustomUnitResult>;
+
+export function DeleteCustomObject(arg1:string,arg2:string):Promise<void>;
+
+export function DeleteCustomUnit(arg1:string):Promise<void>;
+
 export function DiscardTo(arg1:number):Promise<void>;
 
 export function EmitTestCommand(arg1:string):Promise<void>;
@@ -38,6 +48,8 @@ export function GetMapBytes():Promise<string>;
 
 export function GetMinimapBytes():Promise<main.MinimapDTO>;
 
+export function GetObject(arg1:string,arg2:string):Promise<main.UnitObjectDetail>;
+
 export function GetPathingMap():Promise<main.PathingMapDTO>;
 
 export function GetReforgedMode():Promise<boolean>;
@@ -45,6 +57,10 @@ export function GetReforgedMode():Promise<boolean>;
 export function GetSelection():Promise<main.SelectionDTO>;
 
 export function GetTerrain():Promise<main.TerrainDTO>;
+
+export function GetTrigger(arg1:number):Promise<main.TriggerDetailDTO>;
+
+export function GetTriggerFunctionsMeta():Promise<main.TriggerFunctionsMetaDTO>;
 
 export function GetUnit(arg1:number):Promise<unitsdoo.Entity>;
 
@@ -60,11 +76,17 @@ export function IsDirty():Promise<boolean>;
 
 export function LaunchInWC3():Promise<void>;
 
+export function ListCommandButtons():Promise<Array<main.CommandButtonEntry>>;
+
 export function ListDoodads():Promise<Array<main.DoodadDTO>>;
+
+export function ListObjects(arg1:string):Promise<Array<main.UnitObjectListEntity>>;
 
 export function ListSkyModels():Promise<Array<main.SkyModelOption>>;
 
 export function ListTilesets():Promise<Array<main.TilesetInfoDTO>>;
+
+export function ListTriggerTree():Promise<main.TriggerTreeDTO>;
 
 export function ListUnitObjects():Promise<Array<main.UnitObjectListEntity>>;
 
@@ -104,6 +126,8 @@ export function ScaleUnit(arg1:number,arg2:number,arg3:number,arg4:number):Promi
 
 export function SelectUnit(arg1:number):Promise<main.SelectionDTO>;
 
+export function SetObjectField(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.UnitObjectDetail>;
+
 export function SetReforgedMode(arg1:boolean):Promise<boolean>;
 
 export function SetSelection(arg1:Array<main.SelectionItemDTO>):Promise<main.SelectionDTO>;
@@ -111,6 +135,8 @@ export function SetSelection(arg1:Array<main.SelectionItemDTO>):Promise<main.Sel
 export function SetSkyModel(arg1:string):Promise<string>;
 
 export function SetUnitAnimation(arg1:number,arg2:string):Promise<void>;
+
+export function SetUnitObjectField(arg1:string,arg2:string,arg3:string):Promise<main.UnitObjectDetail>;
 
 export function Status():Promise<main.MapStatus>;
 

@@ -142,6 +142,194 @@ export namespace main {
 	        this.map_path = source["map_path"];
 	    }
 	}
+	export class CommandButtonEntry {
+	    path: string;
+	    name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CommandButtonEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.name = source["name"];
+	    }
+	}
+	export class UnitObjectField {
+	    id: string;
+	    field: string;
+	    display_name: string;
+	    category: string;
+	    type: string;
+	    value: string;
+	    display: string;
+	    display_raw: string;
+	    overridden: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new UnitObjectField(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.field = source["field"];
+	        this.display_name = source["display_name"];
+	        this.category = source["category"];
+	        this.type = source["type"];
+	        this.value = source["value"];
+	        this.display = source["display"];
+	        this.display_raw = source["display_raw"];
+	        this.overridden = source["overridden"];
+	    }
+	}
+	export class UnitObjectDetail {
+	    id: string;
+	    name: string;
+	    base_id?: string;
+	    is_custom: boolean;
+	    is_edited: boolean;
+	    race: string;
+	    kind: string;
+	    icon_art: string;
+	    model_path: string;
+	    model_fallbacks: string[];
+	    fields: UnitObjectField[];
+	
+	    static createFrom(source: any = {}) {
+	        return new UnitObjectDetail(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.base_id = source["base_id"];
+	        this.is_custom = source["is_custom"];
+	        this.is_edited = source["is_edited"];
+	        this.race = source["race"];
+	        this.kind = source["kind"];
+	        this.icon_art = source["icon_art"];
+	        this.model_path = source["model_path"];
+	        this.model_fallbacks = source["model_fallbacks"];
+	        this.fields = this.convertValues(source["fields"], UnitObjectField);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ConvertObjectResult {
+	    id: string;
+	    detail?: UnitObjectDetail;
+	
+	    static createFrom(source: any = {}) {
+	        return new ConvertObjectResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.detail = this.convertValues(source["detail"], UnitObjectDetail);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class CreateCustomObjectResult {
+	    id: string;
+	    detail?: UnitObjectDetail;
+	
+	    static createFrom(source: any = {}) {
+	        return new CreateCustomObjectResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.detail = this.convertValues(source["detail"], UnitObjectDetail);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class CreateCustomUnitResult {
+	    id: string;
+	    detail?: UnitObjectDetail;
+	
+	    static createFrom(source: any = {}) {
+	        return new CreateCustomUnitResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.detail = this.convertValues(source["detail"], UnitObjectDetail);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class DoodadDTO {
 	    creation_number: number;
 	    type_id: string;
@@ -483,6 +671,177 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class TriggerDetailDTO {
+	    kind: string;
+	    category?: wtg.Category;
+	    trigger?: wtg.Trigger;
+	    variable?: wtg.Variable;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerDetailDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.category = this.convertValues(source["category"], wtg.Category);
+	        this.trigger = this.convertValues(source["trigger"], wtg.Trigger);
+	        this.variable = this.convertValues(source["variable"], wtg.Variable);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class TriggerFunctionMetaDTO {
+	    name: string;
+	    section: string;
+	    argc: number;
+	    arg_types: string[];
+	    return_type?: string;
+	    display_name?: string;
+	    parameters_template?: string[];
+	    defaults?: string[];
+	    limits?: string[];
+	    category?: string;
+	    script_name?: string;
+	    hint?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerFunctionMetaDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.section = source["section"];
+	        this.argc = source["argc"];
+	        this.arg_types = source["arg_types"];
+	        this.return_type = source["return_type"];
+	        this.display_name = source["display_name"];
+	        this.parameters_template = source["parameters_template"];
+	        this.defaults = source["defaults"];
+	        this.limits = source["limits"];
+	        this.category = source["category"];
+	        this.script_name = source["script_name"];
+	        this.hint = source["hint"];
+	    }
+	}
+	export class TriggerFunctionsMetaDTO {
+	    functions: TriggerFunctionMetaDTO[];
+	    categories?: Record<string, string>;
+	    types?: Record<string, string>;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerFunctionsMetaDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.functions = this.convertValues(source["functions"], TriggerFunctionMetaDTO);
+	        this.categories = source["categories"];
+	        this.types = source["types"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class TriggerTreeNodeDTO {
+	    id: number;
+	    parent_id: number;
+	    kind: string;
+	    name: string;
+	    description?: string;
+	    is_comment?: boolean;
+	    is_enabled?: boolean;
+	    is_script?: boolean;
+	    initially_on?: boolean;
+	    run_on_initialization?: boolean;
+	    open_state?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerTreeNodeDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.parent_id = source["parent_id"];
+	        this.kind = source["kind"];
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.is_comment = source["is_comment"];
+	        this.is_enabled = source["is_enabled"];
+	        this.is_script = source["is_script"];
+	        this.initially_on = source["initially_on"];
+	        this.run_on_initialization = source["run_on_initialization"];
+	        this.open_state = source["open_state"];
+	    }
+	}
+	export class TriggerTreeDTO {
+	    nodes: TriggerTreeNodeDTO[];
+	    is_pre_131?: boolean;
+	    has_global_jass?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerTreeDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.nodes = this.convertValues(source["nodes"], TriggerTreeNodeDTO);
+	        this.is_pre_131 = source["is_pre_131"];
+	        this.has_global_jass = source["has_global_jass"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class UnitDTO {
 	    creation_number: number;
 	    type_id: string;
@@ -515,84 +874,7 @@ export namespace main {
 	        this.gold_amount = source["gold_amount"];
 	    }
 	}
-	export class UnitObjectField {
-	    id: string;
-	    field: string;
-	    display_name: string;
-	    category: string;
-	    type: string;
-	    value: string;
-	    display: string;
-	    display_raw: string;
-	    overridden: boolean;
-
-	    static createFrom(source: any = {}) {
-	        return new UnitObjectField(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.field = source["field"];
-	        this.display_name = source["display_name"];
-	        this.category = source["category"];
-	        this.type = source["type"];
-	        this.value = source["value"];
-	        this.display = source["display"];
-	        this.display_raw = source["display_raw"];
-	        this.overridden = source["overridden"];
-	    }
-	}
-	export class UnitObjectDetail {
-	    id: string;
-	    name: string;
-	    base_id?: string;
-	    is_custom: boolean;
-	    is_edited: boolean;
-	    race: string;
-	    kind: string;
-	    icon_art: string;
-	    model_path: string;
-	    model_fallbacks: string[];
-	    fields: UnitObjectField[];
 	
-	    static createFrom(source: any = {}) {
-	        return new UnitObjectDetail(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.name = source["name"];
-	        this.base_id = source["base_id"];
-	        this.is_custom = source["is_custom"];
-	        this.is_edited = source["is_edited"];
-	        this.race = source["race"];
-	        this.kind = source["kind"];
-	        this.icon_art = source["icon_art"];
-	        this.model_path = source["model_path"];
-	        this.model_fallbacks = source["model_fallbacks"];
-	        this.fields = this.convertValues(source["fields"], UnitObjectField);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
 	
 	export class UnitObjectListEntity {
 	    id: string;
@@ -1336,6 +1618,196 @@ export namespace w3i {
 	
 	
 	
+
+}
+
+export namespace wtg {
+	
+	export class Category {
+	    classifier: number;
+	    id: number;
+	    parent_id: number;
+	    name: string;
+	    open_state: boolean;
+	    is_comment?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new Category(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.classifier = source["classifier"];
+	        this.id = source["id"];
+	        this.parent_id = source["parent_id"];
+	        this.name = source["name"];
+	        this.open_state = source["open_state"];
+	        this.is_comment = source["is_comment"];
+	    }
+	}
+	export class Parameter {
+	    type: number;
+	    value: string;
+	    has_sub_parameter?: boolean;
+	    sub_parameter?: ECA;
+	    unknown?: number;
+	    is_array?: boolean;
+	    array_index?: Parameter;
+	
+	    static createFrom(source: any = {}) {
+	        return new Parameter(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.value = source["value"];
+	        this.has_sub_parameter = source["has_sub_parameter"];
+	        this.sub_parameter = this.convertValues(source["sub_parameter"], ECA);
+	        this.unknown = source["unknown"];
+	        this.is_array = source["is_array"];
+	        this.array_index = this.convertValues(source["array_index"], Parameter);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ECA {
+	    type: number;
+	    group?: number;
+	    name: string;
+	    enabled: boolean;
+	    parameters?: Parameter[];
+	    children?: ECA[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ECA(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.group = source["group"];
+	        this.name = source["name"];
+	        this.enabled = source["enabled"];
+	        this.parameters = this.convertValues(source["parameters"], Parameter);
+	        this.children = this.convertValues(source["children"], ECA);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class Trigger {
+	    classifier: number;
+	    id: number;
+	    parent_id: number;
+	    name: string;
+	    description?: string;
+	    custom_text?: string;
+	    is_comment?: boolean;
+	    is_enabled: boolean;
+	    is_script?: boolean;
+	    initially_on: boolean;
+	    run_on_initialization?: boolean;
+	    ecas?: ECA[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Trigger(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.classifier = source["classifier"];
+	        this.id = source["id"];
+	        this.parent_id = source["parent_id"];
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.custom_text = source["custom_text"];
+	        this.is_comment = source["is_comment"];
+	        this.is_enabled = source["is_enabled"];
+	        this.is_script = source["is_script"];
+	        this.initially_on = source["initially_on"];
+	        this.run_on_initialization = source["run_on_initialization"];
+	        this.ecas = this.convertValues(source["ecas"], ECA);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class Variable {
+	    name: string;
+	    type: string;
+	    unknown?: number;
+	    is_array?: boolean;
+	    array_size?: number;
+	    is_initialized?: boolean;
+	    initial_value?: string;
+	    id: number;
+	    parent_id: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Variable(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.unknown = source["unknown"];
+	        this.is_array = source["is_array"];
+	        this.array_size = source["array_size"];
+	        this.is_initialized = source["is_initialized"];
+	        this.initial_value = source["initial_value"];
+	        this.id = source["id"];
+	        this.parent_id = source["parent_id"];
+	    }
+	}
 
 }
 

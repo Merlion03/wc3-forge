@@ -24,6 +24,7 @@
   import AssetPreview from './AssetPreview.svelte'
   import MapInfoEditor from './MapInfoEditor.svelte'
   import ObjectEditor from './ObjectEditor.svelte'
+  import TriggerEditor from './TriggerEditor.svelte'
   import SwapTilesetDialog from './SwapTilesetDialog.svelte'
   import GameplayConstantsEditor from './GameplayConstantsEditor.svelte'
   import BridgeConsole from './BridgeConsole.svelte'
@@ -201,6 +202,22 @@
   function closeObjectEditor() {
     showObjectEditor = false
     objectEditorInitialId = null
+  }
+
+  // ----- Trigger Editor modal (Phase 1a: read-only) -----
+  // Mount-on-demand mirroring Object Editor: the trigger tree + ECA detail
+  // render can be heavy (hundreds of rows on a real map), so we keep the
+  // component out of the DOM until opened.
+  let showTriggerEditor: boolean = $state(false)
+  let triggerEditorInitialId: number | null = $state(null)
+  function openTriggerEditor(id: number | null = null) {
+    if (!status.loaded) return
+    triggerEditorInitialId = id
+    showTriggerEditor = true
+  }
+  function closeTriggerEditor() {
+    showTriggerEditor = false
+    triggerEditorInitialId = null
   }
 
   // ----- Swap Tileset modal -----
@@ -647,6 +664,25 @@
           break
         case 'objecteditor.close':
           closeObjectEditor()
+          break
+        case 'triggereditor.open': {
+          // Optional arg: a trigger node id to preselect after opening
+          // (e.g. 'triggereditor.open 42'). Numeric parse — invalid args
+          // collapse to "no preselection" rather than erroring.
+          const idStr = args[0]
+          const id = idStr ? parseInt(idStr, 10) : NaN
+          openTriggerEditor(Number.isFinite(id) ? id : null)
+          break
+        }
+        case 'triggereditor.select': {
+          const id = parseInt(args[0] ?? '', 10)
+          if (Number.isFinite(id)) {
+            openTriggerEditor(id)
+          }
+          break
+        }
+        case 'triggereditor.close':
+          closeTriggerEditor()
           break
         case 'bridge_console.toggle':
           toggleBridgeConsole()
@@ -1588,6 +1624,14 @@
           <span class="flex-1">Object Editor</span>
           <DropdownMenu.Shortcut>F6</DropdownMenu.Shortcut>
         </DropdownMenu.Item>
+        <DropdownMenu.Item
+          onSelect={runMenuAction(openTriggerEditor)}
+          disabled={!status.loaded}
+          title="Browse GUI triggers + custom scripts (Phase 1a: read-only)."
+        >
+          <span class="flex-1">Trigger Editor</span>
+          <DropdownMenu.Shortcut>F4</DropdownMenu.Shortcut>
+        </DropdownMenu.Item>
         <DropdownMenu.Separator />
         <DropdownMenu.Item onSelect={runMenuAction(close)} disabled={!status.loaded || busy}>
           <span class="flex-1">Close</span>
@@ -2114,6 +2158,9 @@
 
   {#if showObjectEditor}
     <ObjectEditor bind:open={showObjectEditor} initialId={objectEditorInitialId} {reforged} onClose={closeObjectEditor} />
+  {/if}
+  {#if showTriggerEditor}
+    <TriggerEditor bind:open={showTriggerEditor} initialId={triggerEditorInitialId} onClose={closeTriggerEditor} />
   {/if}
 
   {#if showSwapTileset}
