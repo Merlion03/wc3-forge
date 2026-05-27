@@ -36,6 +36,13 @@ type File struct {
 	GlobalJASSComment string   `json:"global_jass_comment,omitempty"`
 	GlobalJASS        string   `json:"global_jass,omitempty"`
 	CustomTexts       []string `json:"custom_texts,omitempty"`
+	// RawSizes parallels CustomTexts and preserves the on-disk size field
+	// for each blob. Encode echoes these verbatim so maps that ship odd
+	// trailing-NUL counts (size=2 for empty, size=N+2 for non-empty) still
+	// round-trip byte-equal. For session-mutated text the size is
+	// auto-derived as len(newText)+1 (one trailing NUL) at Encode time when
+	// the slot's RawSize is 0.
+	RawSizes []uint32 `json:"-"`
 }
 
 // Parse decodes war3map.wct bytes. The output's CustomTexts order is the
@@ -110,6 +117,12 @@ func Parse(data []byte) (*File, error) {
 	// Per-trigger blobs — read until EOF. The caller knows how many triggers
 	// (by walking the wtg) and pairs them off in order; reading until EOF lets
 	// us tolerate trailing/missing entries gracefully.
+	//
+	// RawSizes preserves the on-disk size field per blob so Encode can echo
+	// it verbatim — real maps sometimes ship size=2 (text + two NUL bytes)
+	// or size=1 (just a NUL for an empty string), shapes our naive
+	// "size=len(text)+1" encoder doesn't reproduce. Parse trims the trailing
+	// NULs into a clean Go string; Encode pads back to the original size.
 	for r.off < len(r.buf) {
 		// Need at least 4 bytes for the size field; if fewer remain, bail
 		// quietly — the file may have a trailing padding byte on some
@@ -123,6 +136,7 @@ func Parse(data []byte) (*File, error) {
 		}
 		if size == 0 {
 			f.CustomTexts = append(f.CustomTexts, "")
+			f.RawSizes = append(f.RawSizes, 0)
 			continue
 		}
 		buf := r.readBytes(int(size))
@@ -133,6 +147,7 @@ func Parse(data []byte) (*File, error) {
 		// Editor terminates them with a NUL so we trim trailing zeros for a
 		// clean Go string.
 		f.CustomTexts = append(f.CustomTexts, string(bytes.TrimRight(buf, "\x00")))
+		f.RawSizes = append(f.RawSizes, size)
 	}
 	return f, nil
 }

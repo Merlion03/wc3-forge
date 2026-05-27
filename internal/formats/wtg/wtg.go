@@ -98,13 +98,23 @@ type Parameter struct {
 // Children is the nested rows that hang off magic ECAs like IfThenElseMultiple,
 // ForLoopAMultiple, AndMultiple — see triggers.ixx L351-365 for the synthesized
 // "If / Then / Else / Loop" UI labels the Trigger Editor pane uses.
+//
+// HasParameters is meaningful ONLY for sub-parameter ECAs (the inner ECA in
+// Parameter.SubParameter). The on-disk format has a separate u32 flag that
+// indicates whether parameter slots follow — distinct from the parameter
+// count, which lives in argc. Real-world maps (Enfo FFB) sometimes ship
+// HasParameters=true with argc[name]=0 (e.g. GetTriggerPlayer with an empty
+// parameter list), which the encoder must echo verbatim for byte equality.
+// For top-level ECAs (which always carry argc[name] parameter slots),
+// HasParameters is unused.
 type ECA struct {
-	Type       ECAType     `json:"type"`
-	Group      uint32      `json:"group,omitempty"` // only when nested
-	Name       string      `json:"name"`
-	Enabled    bool        `json:"enabled"`
-	Parameters []Parameter `json:"parameters,omitempty"`
-	Children   []ECA       `json:"children,omitempty"`
+	Type          ECAType     `json:"type"`
+	Group         uint32      `json:"group,omitempty"` // only when nested
+	Name          string      `json:"name"`
+	Enabled       bool        `json:"enabled"`
+	Parameters    []Parameter `json:"parameters,omitempty"`
+	Children      []ECA       `json:"children,omitempty"`
+	HasParameters bool        `json:"has_parameters,omitempty"` // SubParameter only — preserved for byte round-trip
 }
 
 // Trigger is one GUI / script / comment row in the tree. Custom-script and
@@ -162,23 +172,92 @@ type Variable struct {
 // file; the UI builds the tree by walking ParentID.
 type Triggers struct {
 	// On-disk header fields. Unknown1/Unknown2 are always 0 in practice;
-	// TrigDefVer is 2 in HiveWE's writer. Preserved here so a future encoder
+	// TrigDefVer is 2 in HiveWE's writer. Preserved here so the encoder
 	// round-trips byte-equal.
-	Unknown1    uint32 `json:"unknown1"`
-	Unknown2    uint32 `json:"unknown2"`
-	TrigDefVer  uint32 `json:"trig_def_ver"`
-	Version     uint32 `json:"version"`
-	SubVersion  uint32 `json:"sub_version"`
+	Unknown1   uint32 `json:"unknown1"`
+	Unknown2   uint32 `json:"unknown2"`
+	TrigDefVer uint32 `json:"trig_def_ver"`
+	Version    uint32 `json:"version"`
+	SubVersion uint32 `json:"sub_version"`
 
 	// IsPre131 is true when the .wtg used the legacy load_version_pre31
 	// format (no Classifier-byte discriminator on elements; categories /
-	// variables / triggers are flat sequential blocks). Useful for the
-	// Phase 2a encoder which needs to choose between writers.
+	// variables / triggers are flat sequential blocks). The encoder picks
+	// the right writer based on this flag + Version/SubVersion.
 	IsPre131 bool `json:"is_pre_131,omitempty"`
+
+	// DeletedIDs preserves the seven (map/library/category/trigger/comment/
+	// script/variable) deleted-id arrays that prefix the 1.31+ format.
+	// HiveWE skips them at parse and emits empty arrays at encode; we
+	// preserve them verbatim so round-trip-byte-equal holds for maps that
+	// happen to carry non-empty deletion lists. Always length 7. Each entry
+	// is the raw ID slice from disk (length matches the on-disk count2).
+	//
+	// The first `count` field is preserved separately in DeletedCounts —
+	// real-world maps (e.g. Enfo FFB) sometimes ship count != count2 (the
+	// stored count is a phantom from World Editor's deletion-tracker state
+	// while count2 is the actual ID-array length). Encoder must echo both
+	// fields verbatim for byte equality.
+	//
+	// Convention: nil entries are written as empty (count=0, count2=0); the
+	// length-7 outer slice is initialized by Parse on every 1.31+ read.
+	DeletedIDs    [7][]int32 `json:"deleted_ids,omitempty"`
+	DeletedCounts [7]uint32  `json:"deleted_counts,omitempty"`
+
+	// PreCategoryUnknown preserves the 4-byte "unknown / dunno" field that
+	// sits between the categories block and the variables block in the
+	// pre-1.31 format (HiveWE: triggers.ixx loadVersionPre31, the
+	// `reader.advance(4)` after the category loop). Captured verbatim so
+	// the pre-1.31 encoder can round-trip byte-equal.
+	PreCategoryUnknown uint32 `json:"pre_category_unknown,omitempty"`
+
+	// PreWctUnknown preserves the same 4-byte "unknown" field that
+	// pre-1.31 wct files carry between the global JASS header and the
+	// per-trigger blob array. Lives in the *wct.File, not here — but the
+	// pre-1.31 wtg has a similar pre-trigger unknown the encoder needs to
+	// re-emit. Currently unused; reserved for future fidelity work.
+	PreWctUnknown uint32 `json:"-"`
 
 	Categories []Category `json:"categories,omitempty"`
 	Variables  []Variable `json:"variables,omitempty"`
 	Triggers   []Trigger  `json:"triggers,omitempty"`
+
+	// Elements preserves the on-disk element-block order. The 1.31+ format
+	// interleaves categories, triggers, and variable-refs in arbitrary order
+	// per the World Editor's authoring history; for round-trip byte equality
+	// the encoder must re-emit them in the same order. Each entry is a
+	// (kind, index-into-its-slice) pair.
+	//
+	// For categories/triggers, the index points into Categories/Triggers.
+	// For variable-refs (legacy duplicate-variable rows the parser skips
+	// per HiveWE L692-697 commentary), the entry carries the raw payload
+	// directly since we don't need to model them as first-class entities.
+	//
+	// Mutators that ADD a category/trigger/variable must also append an
+	// entry to Elements so the new element appears in the saved file.
+	// DeleteTriggerNode must remove the corresponding Elements entry.
+	Elements []ElementRef `json:"-"`
+}
+
+// ElementKind discriminates the 1.31+ element-block row kind.
+type ElementKind uint8
+
+const (
+	ElementKindCategory ElementKind = iota
+	ElementKindTrigger
+	ElementKindVariableRef // legacy duplicate-variable header; raw bytes preserved
+)
+
+// ElementRef points at one entry of the 1.31+ element block. For Category
+// and Trigger kinds, Index is the position in Categories/Triggers. For
+// VariableRef kind, RawID + RawName + RawParentID hold the verbatim payload
+// the parser skipped (a 4-byte id, a cstr name, a 4-byte parent_id).
+type ElementRef struct {
+	Kind        ElementKind
+	Index       int    // into Categories or Triggers
+	RawID       uint32 // VariableRef only
+	RawName     string // VariableRef only
+	RawParentID uint32 // VariableRef only
 }
 
 const wtgMagic = "WTG!"
@@ -249,14 +328,30 @@ func loadVersion31(r *reader, t *Triggers, argc map[string]int) error {
 	}
 
 	// Seven deleted-id blocks: each is (u32 count, u32 count2, u32 ids[count2]).
-	// HiveWE skips them entirely; we do too.
+	// HiveWE skips them. We preserve them verbatim so the Phase 2a encoder
+	// can round-trip byte-equal: maps that ship non-empty deletion lists
+	// (rare but legal) would otherwise diff on every save.
+	//
+	// Real-world maps sometimes have count != count2 (Enfo FFB: count=1,
+	// count2=0). Both are preserved; the encoder re-emits both verbatim.
 	for i := 0; i < 7; i++ {
-		r.advance(4)                             // count
-		n := r.readU32()                         // count2
-		r.advance(int64(n) * 4)                  // ids
+		t.DeletedCounts[i] = r.readU32()
+		n := r.readU32()
 		if r.err != nil {
-			return fmt.Errorf("wtg: deleted block %d: %w", i, r.err)
+			return fmt.Errorf("wtg: deleted block %d header: %w", i, r.err)
 		}
+		if n == 0 {
+			t.DeletedIDs[i] = nil
+			continue
+		}
+		ids := make([]int32, n)
+		for j := uint32(0); j < n; j++ {
+			ids[j] = int32(r.readU32())
+		}
+		if r.err != nil {
+			return fmt.Errorf("wtg: deleted block %d body: %w", i, r.err)
+		}
+		t.DeletedIDs[i] = ids
 	}
 
 	t.Unknown1 = r.readU32()
@@ -290,6 +385,7 @@ func loadVersion31(r *reader, t *Triggers, argc map[string]int) error {
 	if r.err != nil {
 		return fmt.Errorf("wtg: read element_count: %w", r.err)
 	}
+	t.Elements = make([]ElementRef, 0, elementCount)
 	for i := uint32(0); i < elementCount; i++ {
 		classifier := Classifier(r.readU32())
 		if r.err != nil {
@@ -308,6 +404,7 @@ func loadVersion31(r *reader, t *Triggers, argc map[string]int) error {
 			if r.err != nil {
 				return fmt.Errorf("wtg: parse category %d: %w", i, r.err)
 			}
+			t.Elements = append(t.Elements, ElementRef{Kind: ElementKindCategory, Index: len(t.Categories)})
 			t.Categories = append(t.Categories, c)
 		case ClassifierGUI, ClassifierComment, ClassifierScript:
 			tr := Trigger{Classifier: classifier}
@@ -333,17 +430,22 @@ func loadVersion31(r *reader, t *Triggers, argc map[string]int) error {
 					return fmt.Errorf("wtg: parse trigger %q ECA %d: %w", tr.Name, j, err)
 				}
 			}
+			t.Elements = append(t.Elements, ElementRef{Kind: ElementKindTrigger, Index: len(t.Triggers)})
 			t.Triggers = append(t.Triggers, tr)
 		case ClassifierVariable:
 			// Per HiveWE L692-697: a duplicate variable header — the real
-			// variables already came in the dedicated section above. Skip
-			// the 4 + cstr + 4 bytes.
-			r.advance(4)
-			r.readCString()
-			r.advance(4)
+			// variables already came in the dedicated section above. We
+			// preserve the raw payload (id + name + parent_id) so the
+			// encoder round-trips byte-equal for maps that ship them.
+			rawID := r.readU32()
+			rawName := r.readCString()
+			rawParent := r.readU32()
 			if r.err != nil {
-				return fmt.Errorf("wtg: skip variable-ref %d: %w", i, r.err)
+				return fmt.Errorf("wtg: read variable-ref %d: %w", i, r.err)
 			}
+			t.Elements = append(t.Elements, ElementRef{
+				Kind: ElementKindVariableRef, RawID: rawID, RawName: rawName, RawParentID: rawParent,
+			})
 		default:
 			return fmt.Errorf("wtg: unknown classifier 0x%X at element %d", classifier, i)
 		}
@@ -383,9 +485,12 @@ func loadVersionPre31(r *reader, t *Triggers, argc map[string]int) error {
 		t.Categories = append(t.Categories, c)
 	}
 
-	r.advance(4) // unknown / dunno
+	// Pre-31 has a 4-byte "unknown" field between the categories block and
+	// the variables block. HiveWE skips it on read; we capture it so the
+	// pre-31 encoder can re-emit verbatim for round-trip equality.
+	t.PreCategoryUnknown = r.readU32()
 	if r.err != nil {
-		return fmt.Errorf("wtg(pre-31): advance unknown after categories: %w", r.err)
+		return fmt.Errorf("wtg(pre-31): read unknown after categories: %w", r.err)
 	}
 
 	variableCategory := maxID
@@ -543,11 +648,11 @@ func parseParameter(r *reader, p *Parameter, version uint32, argc map[string]int
 		sub.Group = 0
 		sub.Name = r.readCString()
 		sub.Enabled = true
-		hasParams := r.readU32() != 0
+		sub.HasParameters = r.readU32() != 0
 		if r.err != nil {
 			return r.err
 		}
-		if hasParams {
+		if sub.HasParameters {
 			n, ok := argc[sub.Name]
 			if !ok {
 				return fmt.Errorf("%w: sub-parameter name=%q", ErrUnknownECAName, sub.Name)
