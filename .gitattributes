@@ -31,6 +31,14 @@
 *.tga  binary
 *.slk  binary
 
+# Vendored TriggerData / TriggerStrings snapshots (under
+# internal/formats/wtg/data/). They're text but the wtg parser depends on
+# byte-for-byte fidelity with the CASC originals, so we pin line endings to
+# CRLF (the form CASC ships) — without this, Windows checkouts would have
+# CRLF in the working dir while LF lived in the index, and the embedded
+# bytes would mismatch the snapshot the dump tool produces.
+internal/formats/wtg/data/*.txt text eol=crlf
+
 # Images / fonts.
 *.png  binary
 *.jpg  binary
