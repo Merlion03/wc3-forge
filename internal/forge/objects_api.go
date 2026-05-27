@@ -123,6 +123,24 @@ func CreateCustomObject(kind, baseID, id string) (string, *ObjectDetail, error) 
 	return chosenID, d, nil
 }
 
+// ConvertObject converts an object from srcKind to dstKind. Returns the new
+// destination custom's ID. Today only doodads↔destructables is supported —
+// other pairs return an error from Session.ConvertObject. Stock-source rows
+// stay in place (we can't delete them); custom-source rows get removed so the
+// converted result is the user's intended single replacement.
+func ConvertObject(srcKind, srcID, dstKind string) (string, error) {
+	if srcID == "" {
+		return "", errors.New("src_id is required")
+	}
+	if _, err := resolveKind(srcKind); err != nil {
+		return "", err
+	}
+	if _, err := resolveKind(dstKind); err != nil {
+		return "", err
+	}
+	return Current.ConvertObject(srcKind, srcID, dstKind)
+}
+
 // DeleteCustomObject removes a custom row of the given kind by id. Errors if
 // id isn't a custom (stock rows aren't deletable).
 func DeleteCustomObject(kind, id string) error {

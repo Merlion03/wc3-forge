@@ -22,6 +22,7 @@
     SetObjectField,
     CreateCustomObject,
     DeleteCustomObject,
+    ConvertObject,
     type ObjectKind,
   } from './object-editor-bindings'
   import type { main } from '../wailsjs/go/models'
@@ -221,6 +222,33 @@
     } catch (e) {
       errorMsg = String(e)
       console.error('CreateCustomObject failed', e)
+    }
+  }
+
+  // Convert current selection between doodad ↔ destructable. Only enabled when
+  // currentKind is doodads or destructables AND something is selected. The
+  // Go side records the whole operation as a single undo group; on success we
+  // switch the active tab to the destination kind and select the new id so the
+  // user sees their conversion immediately.
+  async function convertCurrentTo(dstKind: ObjectKind) {
+    if (!detail || !selectedId) return
+    errorMsg = ''
+    try {
+      const res = await ConvertObject(currentKind, detail.id, dstKind)
+      // Switch to the destination kind first, THEN select the new id once the
+      // reload completes. switchKind triggers a reload via $effect.
+      currentKind = dstKind
+      // Wait one tick so the $effect-driven reload has actually fetched rows
+      // before we try to select; selectObject just fetches detail by id so it
+      // doesn't strictly require the tree to be loaded, but the tree being
+      // populated avoids a flash of "Select an object" in the middle pane.
+      await reload()
+      if (res?.id) {
+        await selectObject(res.id)
+      }
+    } catch (e) {
+      errorMsg = String(e)
+      console.error('ConvertObject failed', e)
     }
   }
 
@@ -611,6 +639,23 @@
                 {/if}
               </div>
             </div>
+            {#if currentKind === 'doodads'}
+              <Button
+                size="sm"
+                variant="outline"
+                class="h-7 text-xs"
+                onclick={() => convertCurrentTo('destructables')}
+                title="Convert this doodad to a destructable (creates a new custom; stock doodads remain)"
+              >→ Destructable</Button>
+            {:else if currentKind === 'destructables'}
+              <Button
+                size="sm"
+                variant="outline"
+                class="h-7 text-xs"
+                onclick={() => convertCurrentTo('doodads')}
+                title="Convert this destructable to a doodad (creates a new custom; stock destructables remain)"
+              >→ Doodad</Button>
+            {/if}
           </header>
           {#if detail.model_path}
             {#key detail.id}

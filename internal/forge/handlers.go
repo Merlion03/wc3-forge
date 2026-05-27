@@ -112,6 +112,10 @@ func RegisterAll(b *bridge.Bridge) {
 	registerObjectKind(reg, DestructablesConfig())
 	registerObjectKind(reg, DoodadsConfig())
 	registerObjectKind(reg, UpgradesConfig())
+	// Cross-kind conversion (doodad↔destructable today; extensible to other
+	// pairs via Session.ConvertObject's whitelist). Single MCP route since the
+	// shape is symmetric — caller names src/dst kinds in params.
+	reg("objects.convert", handleObjectsConvert)
 }
 
 // handleUISendCommand forwards a raw test-driver command string. Used by

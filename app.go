@@ -1699,6 +1699,34 @@ func (a *App) DeleteCustomObject(kind, id string) error {
 	return forge.DeleteCustomObject(kind, id)
 }
 
+// ConvertObjectResult mirrors CreateCustomObjectResult's shape — the new id
+// in the destination kind + its full detail payload, so the caller can switch
+// tabs + select without an extra round-trip.
+type ConvertObjectResult struct {
+	ID     string            `json:"id"`
+	Detail *UnitObjectDetail `json:"detail"`
+}
+
+// ConvertObject converts an object from srcKind to dstKind. Currently only
+// the doodads↔destructables pair is accepted (other pairs return a clear
+// error). Stock-source rows are NOT deleted (the converted result is a new
+// custom in dst); custom-source rows ARE deleted so the user ends up with
+// one replacement, not two near-duplicates. Recorded as one undo step.
+func (a *App) ConvertObject(srcKind, srcID, dstKind string) (*ConvertObjectResult, error) {
+	id, err := forge.ConvertObject(srcKind, srcID, dstKind)
+	if err != nil {
+		return nil, err
+	}
+	d, derr := forge.GetObject(dstKind, id)
+	if derr != nil {
+		// The conversion succeeded but the follow-up Get failed. Return the id
+		// without a detail rather than rolling back; the JS layer can fetch
+		// again or just refresh the tree.
+		return &ConvertObjectResult{ID: id}, nil
+	}
+	return &ConvertObjectResult{ID: id, Detail: toUnitObjectDetail(d)}, nil
+}
+
 // GameplayConstantRow is the JSON-friendly shape for one row in the
 // Gameplay Constants Editor. Carries the section the row belongs to (only
 // [Misc] in practice today) and the raw value as stored in war3mapMisc.txt

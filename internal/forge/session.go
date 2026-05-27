@@ -7,8 +7,10 @@ package forge
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1545,6 +1547,162 @@ func (s *Session) DeleteCustomObject(cfg *KindConfig, id string) error {
 		s.notifyHistoryChanged()
 	}
 	return nil
+}
+
+// ConvertObject converts one object to a different kind. Today only the
+// doodad ↔ destructable pair is supported (they share roughly the same shape:
+// a placed environment object with a model + pathing footprint), so the
+// "convert" operation is essentially:
+//
+//  1. Build a new custom in dstKind, copying the source's MergedObject overrides
+//     for any field whose FourCC ALSO exists in the destination kind's metadata.
+//     Fields that have no analogue in the destination are silently dropped.
+//  2. If the source was itself a custom row, DELETE it from the source kind
+//     (so the user doesn't end up with two near-duplicates). If the source was
+//     STOCK, leave it alone — stock objects can't be deleted and continue to
+//     exist, with a console log noting the situation.
+//  3. The whole thing is recorded as one convertObjectCmd so Ctrl+Z restores
+//     everything: source custom (if it existed) comes back, destination custom
+//     is removed.
+//
+// Returns the new destination custom's ID. The caller (UI) typically switches
+// to dstKind + selects the new id after the call.
+//
+// Unsupported kind pairs return a clear error rather than half-converting —
+// kind shapes vary enough (units have race/inventory, abilities have levels)
+// that a generic blind copy across arbitrary pairs would produce broken
+// objects. Extending to a new pair is intentionally explicit.
+func (s *Session) ConvertObject(srcKind, srcID, dstKind string) (string, error) {
+	if srcKind == dstKind {
+		return "", fmt.Errorf("source and destination kinds are identical (%q)", srcKind)
+	}
+	// Whitelist: doodad↔destructable only for now. Add more pairs explicitly
+	// when each pair's field-mapping semantics have been thought through.
+	pair := srcKind + "→" + dstKind
+	switch pair {
+	case "doodads→destructables", "destructables→doodads":
+		// ok
+	default:
+		return "", fmt.Errorf("conversion %s is not supported (only doodads↔destructables)", pair)
+	}
+
+	srcCfg, err := resolveKind(srcKind)
+	if err != nil {
+		return "", err
+	}
+	dstCfg, err := resolveKind(dstKind)
+	if err != nil {
+		return "", err
+	}
+
+	// Snapshot source object's merged view OUTSIDE the write lock — MergedObjects
+	// takes its own RLock. We need overrides + base id + (for the delete branch)
+	// whether the source was a custom.
+	merged, _, err := MergedObjects(srcCfg)
+	if err != nil {
+		return "", fmt.Errorf("load src %s: %w", srcKind, err)
+	}
+	if _, ok := merged[srcID]; !ok {
+		return "", fmt.Errorf("no %s object with id %q", srcKind, srcID)
+	}
+	// Source base id — for a stock row this IS srcID; for a custom it's the
+	// row's BaseID. We use the SOURCE's base id to find an analogous base in
+	// the destination kind — doodads and destructables don't share FourCCs so
+	// there's no automatic mapping. Today the simplest sensible default is:
+	// use the FIRST stock row of the destination kind as the new custom's base.
+	// The user can edit it afterwards via the right-pane "base" pseudo-field
+	// (or just edit field-by-field).
+	dstBase, _, err := loadObjectBase(dstCfg)
+	if err != nil {
+		return "", fmt.Errorf("load dst %s: %w", dstKind, err)
+	}
+	if dstBase == nil || len(dstBase.Rows) == 0 {
+		return "", fmt.Errorf("destination kind %q has no stock rows to base on", dstKind)
+	}
+	// Pick a deterministic base — sort the stock ids and grab the first. Avoids
+	// flakiness in tests + makes round-trip behavior predictable.
+	var dstBaseID string
+	{
+		ids := make([]string, 0, len(dstBase.Rows))
+		for id := range dstBase.Rows {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		dstBaseID = ids[0]
+	}
+
+	// Identify which source overrides translate. For a CUSTOM source, the
+	// overrides live on the custom's row directly; for a STOCK source they're
+	// in OriginalEdits. MergedObjects already merged both onto src.Fields but we
+	// want the raw on-disk overrides for translation (not the merged base+ovr).
+	//
+	// Take a read lock + copy the maps so the subsequent mutation under the undo
+	// group can't race the snapshot read.
+	var srcOverrides w3objmod.Overrides
+	var srcCustomSnapshot *w3objmod.CustomObject
+	s.mu.RLock()
+	if srcMods := srcCfg.GetMods(s); srcMods != nil {
+		if ci := findCustomIndex(srcMods, srcID); ci >= 0 {
+			c := srcMods.Customs[ci]
+			srcCustomSnapshot = &c
+			srcOverrides = w3objmod.Overrides{}
+			for k, v := range c.Overrides {
+				srcOverrides[k] = v
+			}
+		} else if ei := findOriginalEditIndex(srcMods, srcID); ei >= 0 {
+			srcOverrides = w3objmod.Overrides{}
+			for k, v := range srcMods.OriginalEdits[ei].Overrides {
+				srcOverrides[k] = v
+			}
+		}
+	}
+	s.mu.RUnlock()
+
+	// Translate overrides — only FourCCs the destination metadata knows about.
+	_, dstMeta, _ := loadObjectBase(dstCfg)
+	carriedOverrides := w3objmod.Overrides{}
+	dropped := 0
+	for fourCC, val := range srcOverrides {
+		if dstMeta != nil {
+			if _, has := dstMeta.ByID[fourCC]; has {
+				carriedOverrides[fourCC] = val
+				continue
+			}
+		}
+		dropped++
+	}
+
+	// Lock + apply: add destination custom + populate overrides + (optionally)
+	// delete source custom. All under one group so a single Ctrl+Z reverts.
+	s.BeginUndoGroup("Convert " + srcKind + " → " + dstKind)
+	dstID, addErr := s.AddCustomObject(dstCfg, "", dstBaseID)
+	if addErr != nil {
+		_ = s.EndUndoGroup()
+		return "", fmt.Errorf("create destination custom: %w", addErr)
+	}
+	// Populate carried overrides — each SetObjectField records its own
+	// command under the group; Revert unwinds them in reverse order.
+	for fourCC, val := range carriedOverrides {
+		if err := s.SetObjectField(dstCfg, dstID, fourCC, val); err != nil {
+			// Field FourCC came from dstMeta.ByID; the mutator's "unknown field"
+			// path should not fire. Log and continue so we don't half-convert.
+			log.Printf("ConvertObject: skip field %s: %v", fourCC, err)
+		}
+	}
+	if srcCustomSnapshot != nil {
+		if err := s.DeleteCustomObject(srcCfg, srcID); err != nil {
+			log.Printf("ConvertObject: failed to delete source custom %s/%s: %v", srcKind, srcID, err)
+		}
+	} else {
+		log.Printf("ConvertObject: source %s/%s is stock — leaving it in place (created %s/%s)", srcKind, srcID, dstKind, dstID)
+	}
+	if err := s.EndUndoGroup(); err != nil {
+		return "", fmt.Errorf("close convert group: %w", err)
+	}
+	if dropped > 0 {
+		log.Printf("ConvertObject: %s/%s → %s/%s: dropped %d override(s) with no analogue in destination", srcKind, srcID, dstKind, dstID, dropped)
+	}
+	return dstID, nil
 }
 
 // anyDirtyLocked reports whether the session holds any pending edit to any

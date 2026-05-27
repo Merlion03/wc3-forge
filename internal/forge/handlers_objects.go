@@ -518,6 +518,43 @@ func makeDeleteCustomHandler(cfg *KindConfig) bridge.Handler {
 	}
 }
 
+// objectsConvertParams is the wire shape for objects.convert. Kind names are
+// the same wire tags KindConfig.Kind uses; today only doodads↔destructables
+// is accepted.
+type objectsConvertParams struct {
+	SrcKind string `json:"src_kind"`
+	SrcID   string `json:"src_id"`
+	DstKind string `json:"dst_kind"`
+}
+
+type objectsConvertResult struct {
+	ID     string                 `json:"id"`
+	Detail *objectsUnitsGetResult `json:"detail"`
+}
+
+// handleObjectsConvert is the MCP handler for objects.convert. Wraps
+// Session.ConvertObject. Returns the new destination custom's id + its full
+// detail payload so the JS caller doesn't need a follow-up Get round-trip.
+func handleObjectsConvert(params json.RawMessage) (any, error) {
+	var p objectsConvertParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.SrcKind == "" || p.SrcID == "" || p.DstKind == "" {
+		return nil, errors.New("src_kind, src_id, dst_kind are required")
+	}
+	id, err := Current.ConvertObject(p.SrcKind, p.SrcID, p.DstKind)
+	if err != nil {
+		return nil, err
+	}
+	dstCfg, _ := resolveKind(p.DstKind)
+	detail, err := getObject(dstCfg, id)
+	if err != nil {
+		return objectsConvertResult{ID: id}, nil
+	}
+	return objectsConvertResult{ID: id, Detail: detail}, nil
+}
+
 // registerObjectKind wires the six MCP handlers for one kind into the
 // bridge. RegisterAll calls this once per kind (today: units; Phase 2b adds
 // the other six). `reg` is RegisterAll's local closure that goes through the

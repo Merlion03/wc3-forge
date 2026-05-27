@@ -33,6 +33,9 @@ interface WailsApp {
   SetObjectField: (kind: ObjectKind, id: string, column: string, value: string) => Promise<main.UnitObjectDetail>
   CreateCustomObject: (kind: ObjectKind, baseID: string, id: string) => Promise<CreateCustomObjectResult>
   DeleteCustomObject: (kind: ObjectKind, id: string) => Promise<void>
+  // Phase-3 polish.
+  ConvertObject: (srcKind: ObjectKind, srcID: string, dstKind: ObjectKind) => Promise<ConvertObjectResult>
+  ListCommandButtons: () => Promise<CommandButtonEntry[]>
 }
 
 // The Wails autobind surface — populated by the Go side at startup, so it
@@ -109,4 +112,31 @@ export function DeleteCustomObject(
   id: string,
 ): Promise<void> {
   return app().DeleteCustomObject(kind, id)
+}
+
+// Phase 3 — cross-kind conversion. Currently only doodads↔destructables is
+// accepted on the Go side; other pairs return an error.
+export interface ConvertObjectResult {
+  id: string
+  detail: main.UnitObjectDetail | null
+}
+
+export function ConvertObject(
+  srcKind: ObjectKind,
+  srcID: string,
+  dstKind: ObjectKind,
+): Promise<ConvertObjectResult> {
+  return app().ConvertObject(srcKind, srcID, dstKind)
+}
+
+// Phase 3 — icon picker. ListCommandButtons enumerates BLP icons under
+// CASC's replaceabletextures/commandbuttons/ prefix. Cached per-process by
+// the Go side so subsequent calls are O(1).
+export interface CommandButtonEntry {
+  path: string // full asset path, lowercase, forward-slash
+  name: string // basename without extension (e.g. "BTNFootman")
+}
+
+export function ListCommandButtons(): Promise<CommandButtonEntry[]> {
+  return app().ListCommandButtons()
 }
