@@ -46,6 +46,14 @@ var (
 	procCloseFile    *syscall.LazyProc
 	procReadFile     *syscall.LazyProc
 	procGetFileSize  *syscall.LazyProc
+
+	// Find* are used by ListByPrefix; loaded lazily on first call since most
+	// wc3-forge sessions never enumerate the storage and the symbols add to
+	// startup load time.
+	findLoadOnce      sync.Once
+	procFindFirstFile *syscall.LazyProc
+	procFindNextFile  *syscall.LazyProc
+	procFindClose     *syscall.LazyProc
 )
 
 // DLLPath, if non-empty, overrides the auto-locate. Set this before any
@@ -248,6 +256,95 @@ var hdCascPrefixes = []string{
 //
 // Deprecated: use the Storage's reforged-aware ReadFile.
 var cascPrefixes = sdCascPrefixes
+
+// loadFindSymbols binds the CASC enumeration symbols on first use. Idempotent
+// + cheap when already loaded.
+func loadFindSymbols() {
+	findLoadOnce.Do(func() {
+		dllOnce.Do(loadDLL)
+		if dllErr != nil {
+			return
+		}
+		procFindFirstFile = dll.NewProc("CascFindFirstFile")
+		procFindNextFile = dll.NewProc("CascFindNextFile")
+		procFindClose = dll.NewProc("CascFindClose")
+	})
+}
+
+// ListByPrefix returns every CASC entry whose lowercased name starts with
+// prefix (forward-slash form). prefix MUST end with a "/" — e.g.
+// "replaceabletextures/commandbuttons/". The returned names are lowercased +
+// forward-slash. Backed by CascFindFirstFile/CascFindNextFile; expensive
+// (~10-15ms for a full enumeration on a modern CASC install) so callers
+// should cache the result.
+//
+// Returns an empty slice + nil error when no entries match; a real error
+// only when CASC enumeration fails outright (storage closed, missing
+// symbols on this build of CascLib).
+func (s *Storage) ListByPrefix(prefix string) ([]string, error) {
+	loadFindSymbols()
+	if dllErr != nil {
+		return nil, fmt.Errorf("load CASC library: %w", dllErr)
+	}
+	if procFindFirstFile == nil || procFindNextFile == nil || procFindClose == nil {
+		return nil, fmt.Errorf("CASC enumeration symbols unavailable on this CascLib build")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handle == 0 {
+		return nil, fmt.Errorf("storage closed")
+	}
+
+	// CASC_FIND_DATA layout from CascLib.h: 0x1108 bytes total. szFileName
+	// is at offset 0x18, MAX_PATH = 0x400 bytes wide.
+	var data [0x1108]byte
+	mask := append([]byte("*"), 0)
+	listfileName := append([]byte(""), 0)
+	hFindRet, _, _ := procFindFirstFile.Call(
+		s.handle,
+		uintptr(unsafe.Pointer(&mask[0])),
+		uintptr(unsafe.Pointer(&data[0])),
+		uintptr(unsafe.Pointer(&listfileName[0])),
+	)
+	hFind := hFindRet
+	if hFind == 0 || hFind == ^uintptr(0) {
+		// Empty storage or no listfile entries — treat as "no matches" rather
+		// than an error. CascLib doesn't distinguish these.
+		return nil, nil
+	}
+	defer procFindClose.Call(hFind)
+
+	prefixLC := strings.ToLower(prefix)
+	out := make([]string, 0, 256)
+	// Hard cap to avoid runaway loops on a corrupt storage. Real CASC
+	// installs have ~200k entries; we'll never legitimately need more.
+	for n := 0; n < 500_000; n++ {
+		name := readCStringFromBuf(data[0x18 : 0x18+0x400])
+		// CASC stores paths with backslashes; normalize before the prefix
+		// check.
+		lname := strings.ToLower(strings.ReplaceAll(name, `\`, "/"))
+		if strings.HasPrefix(lname, prefixLC) {
+			out = append(out, lname)
+		}
+		nextRet, _, _ := procFindNextFile.Call(hFind, uintptr(unsafe.Pointer(&data[0])))
+		if nextRet == 0 {
+			break
+		}
+	}
+	return out, nil
+}
+
+// readCStringFromBuf returns the bytes up to (but excluding) the first NUL
+// in b. Used by ListByPrefix to extract the szFileName field from a
+// CASC_FIND_DATA struct.
+func readCStringFromBuf(b []byte) string {
+	for i, c := range b {
+		if c == 0 {
+			return string(b[:i])
+		}
+	}
+	return string(b)
+}
 
 // openOne does the raw open-read-close for a single fully-qualified
 // CASC path. Caller assembles the path.

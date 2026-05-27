@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
@@ -1729,6 +1731,90 @@ func (a *App) ConvertObject(srcKind, srcID, dstKind string) (*ConvertObjectResul
 		return &ConvertObjectResult{ID: id}, nil
 	}
 	return &ConvertObjectResult{ID: id, Detail: toUnitObjectDetail(d)}, nil
+}
+
+// CommandButtonEntry is one icon listed by ListCommandButtons. Path is
+// lowercase + forward-slash, ready to pass to /asset/<path>; Name is the
+// basename without extension (the picker uses Name to filter by typed text).
+type CommandButtonEntry struct {
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
+// commandButtonsCache holds the per-process enumeration of CASC's command-
+// button icons. Built once on first request via commandButtonsOnce; CASC
+// contents don't change during a session so caching is safe.
+var (
+	commandButtonsOnce  sync.Once
+	commandButtonsList  []CommandButtonEntry
+	commandButtonsErr   error
+)
+
+// ListCommandButtons enumerates every BLP/DDS icon under CASC's
+// replaceabletextures/commandbuttons/ prefix (plus the disabled-state
+// commandbuttonsdisabled/ for completeness — the picker filters/groups in
+// the UI). Lazy-built + cached for the session.
+//
+// Returns an empty slice + nil error when CASC isn't reachable (the editor
+// degrades gracefully — the picker shows a single "no icons available" row).
+func (a *App) ListCommandButtons() []CommandButtonEntry {
+	commandButtonsOnce.Do(func() {
+		c, err := getCASC()
+		if err != nil || c == nil {
+			commandButtonsErr = err
+			return
+		}
+		var all []string
+		for _, prefix := range []string{
+			"replaceabletextures/commandbuttons/",
+			"replaceabletextures/commandbuttonsdisabled/",
+		} {
+			entries, err := c.ListByPrefix(prefix)
+			if err != nil {
+				commandButtonsErr = err
+				return
+			}
+			all = append(all, entries...)
+		}
+		// Dedupe + filter to image extensions. Some CASC entries can list both
+		// .blp and .dds variants of the same icon; we keep one entry per stem,
+		// preferring .blp (the broader-compat variant — the asset handler
+		// transparently swaps .blp ↔ .dds on miss).
+		seen := map[string]int{}
+		out := make([]CommandButtonEntry, 0, len(all))
+		for _, p := range all {
+			lp := strings.ToLower(p)
+			ext := ""
+			if i := strings.LastIndexByte(lp, '.'); i > 0 {
+				ext = lp[i:]
+			}
+			if ext != ".blp" && ext != ".dds" {
+				continue
+			}
+			stem := lp[:len(lp)-len(ext)]
+			// Prefer .blp over .dds on collision.
+			if idx, ok := seen[stem]; ok {
+				if ext == ".blp" && strings.HasSuffix(out[idx].Path, ".dds") {
+					out[idx].Path = lp
+				}
+				continue
+			}
+			base := stem
+			if i := strings.LastIndexByte(base, '/'); i >= 0 {
+				base = base[i+1:]
+			}
+			out = append(out, CommandButtonEntry{Path: lp, Name: base})
+			seen[stem] = len(out) - 1
+		}
+		// Sort by name for deterministic UI ordering (the picker grid renders
+		// in this order; no point shuffling per call).
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+		commandButtonsList = out
+	})
+	if commandButtonsErr != nil {
+		return []CommandButtonEntry{}
+	}
+	return commandButtonsList
 }
 
 // GameplayConstantRow is the JSON-friendly shape for one row in the

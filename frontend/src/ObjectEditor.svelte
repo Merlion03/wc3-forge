@@ -32,6 +32,7 @@
   import { loadIconURL } from './icon-loader'
   import AssetPreview from './AssetPreview.svelte'
   import { parseWC3Color } from './wc3color'
+  import IconPicker from './IconPicker.svelte'
 
   let {
     open = $bindable(false),
@@ -446,6 +447,36 @@
     editingFields = next
   }
 
+  // Icon-picker state. Open the modal with `openIconPicker(field)` from any
+  // icon/art row; on commit, we route through commitField so the same dirty/
+  // history/event pipeline fires as a manual edit.
+  let iconPickerOpen: boolean = $state(false)
+  let iconPickerField: main.UnitObjectField | null = $state(null)
+
+  function openIconPicker(field: main.UnitObjectField) {
+    iconPickerField = field
+    iconPickerOpen = true
+  }
+
+  function onIconPicked(path: string) {
+    if (iconPickerField) {
+      void commitField(iconPickerField, path)
+    }
+    iconPickerField = null
+    iconPickerOpen = false
+  }
+
+  function onIconPickerClose() {
+    iconPickerField = null
+  }
+
+  // isIconField: spec says icon picker activates for `field.type === 'icon'`
+  // OR `field.type === 'art'`. Some metadata rows use either string —
+  // both refer to BLP/DDS command-button paths.
+  function isIconField(t: string): boolean {
+    return t === 'icon' || t === 'art'
+  }
+
   function inputTypeFor(t: string): 'bool' | 'int' | 'real' | 'text' {
     switch (t) {
       case 'bool':
@@ -754,44 +785,84 @@
                               }}
                             />
                           {:else if editingFields.has(f.id)}
-                            <input
-                              type="text"
-                              class="oe-edit w-full bg-background border border-border rounded px-1.5 py-0.5 text-xs font-mono"
-                              value={f.value}
-                              autofocus
-                              onblur={(e) => {
-                                commitField(
-                                  f,
-                                  (e.currentTarget as HTMLInputElement).value,
-                                )
-                                stopEdit(f.id)
-                              }}
-                              onkeydown={(e) => {
-                                if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
-                                else if (e.key === 'Escape') stopEdit(f.id)
-                              }}
-                            />
+                            <div class="flex items-center gap-1">
+                              {#if isIconField(f.type)}
+                                {#await loadIconURL(f.value) then iconURL}
+                                  {#if iconURL}
+                                    <img class="oe-fld-icon" src={iconURL} alt="" />
+                                  {:else}
+                                    <span class="oe-fld-icon oe-icon-placeholder"></span>
+                                  {/if}
+                                {/await}
+                              {/if}
+                              <input
+                                type="text"
+                                class="oe-edit flex-1 bg-background border border-border rounded px-1.5 py-0.5 text-xs font-mono"
+                                value={f.value}
+                                autofocus
+                                onblur={(e) => {
+                                  commitField(
+                                    f,
+                                    (e.currentTarget as HTMLInputElement).value,
+                                  )
+                                  stopEdit(f.id)
+                                }}
+                                onkeydown={(e) => {
+                                  if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
+                                  else if (e.key === 'Escape') stopEdit(f.id)
+                                }}
+                              />
+                              {#if isIconField(f.type)}
+                                <button
+                                  type="button"
+                                  class="oe-fld-pick text-xs px-1.5 py-0.5 rounded border border-border hover:bg-accent"
+                                  onclick={() => openIconPicker(f)}
+                                  title="Pick from icon library"
+                                >Pick…</button>
+                              {/if}
+                            </div>
                           {:else}
                             <!-- Display mode: render WC3 color codes as inline
                                  colored spans (parser preserves segment
                                  boundaries even for unterminated |c). Click
                                  to enter edit mode, which flips to a raw
-                                 input so the user can edit the codes. -->
-                            <button
-                              type="button"
-                              class="oe-edit oe-display w-full text-left bg-background border border-transparent rounded px-1.5 py-0.5 text-xs font-mono hover:border-border"
-                              onclick={() => startEdit(f.id)}
-                              title={f.value}
-                            >
-                              {#if f.value}
-                                {#each parseWC3Color(f.display_raw || f.display || f.value) as seg, i (i)}
-                                  <span style={seg.color ? `color: ${seg.color}` : undefined}
-                                  >{seg.text}</span>
-                                {/each}
-                              {:else}
-                                <span class="text-muted-foreground">—</span>
+                                 input so the user can edit the codes. Icon-
+                                 typed fields also show the live thumbnail +
+                                 a Pick… button alongside the text. -->
+                            <div class="flex items-center gap-1">
+                              {#if isIconField(f.type)}
+                                {#await loadIconURL(f.value) then iconURL}
+                                  {#if iconURL}
+                                    <img class="oe-fld-icon" src={iconURL} alt="" />
+                                  {:else}
+                                    <span class="oe-fld-icon oe-icon-placeholder"></span>
+                                  {/if}
+                                {/await}
                               {/if}
-                            </button>
+                              <button
+                                type="button"
+                                class="oe-edit oe-display flex-1 text-left bg-background border border-transparent rounded px-1.5 py-0.5 text-xs font-mono hover:border-border"
+                                onclick={() => startEdit(f.id)}
+                                title={f.value}
+                              >
+                                {#if f.value}
+                                  {#each parseWC3Color(f.display_raw || f.display || f.value) as seg, i (i)}
+                                    <span style={seg.color ? `color: ${seg.color}` : undefined}
+                                    >{seg.text}</span>
+                                  {/each}
+                                {:else}
+                                  <span class="text-muted-foreground">—</span>
+                                {/if}
+                              </button>
+                              {#if isIconField(f.type)}
+                                <button
+                                  type="button"
+                                  class="oe-fld-pick text-xs px-1.5 py-0.5 rounded border border-border hover:bg-accent"
+                                  onclick={() => openIconPicker(f)}
+                                  title="Pick from icon library"
+                                >Pick…</button>
+                              {/if}
+                            </div>
                           {/if}
                         </td>
                       </tr>
@@ -810,6 +881,13 @@
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
+
+<IconPicker
+  bind:open={iconPickerOpen}
+  currentValue={iconPickerField?.value ?? ''}
+  onPick={onIconPicked}
+  onClose={onIconPickerClose}
+/>
 
 {#snippet objectRow(u: main.UnitObjectListEntity)}
   <li>
@@ -931,5 +1009,15 @@
   }
   .oe-edit {
     height: 1.6em;
+  }
+  .oe-fld-icon {
+    width: 22px;
+    height: 22px;
+    object-fit: cover;
+    border-radius: 2px;
+    flex: none;
+  }
+  .oe-fld-pick {
+    flex: none;
   }
 </style>
