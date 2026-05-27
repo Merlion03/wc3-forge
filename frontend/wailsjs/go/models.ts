@@ -1653,6 +1653,7 @@ export namespace wtg {
 	    unknown?: number;
 	    is_array?: boolean;
 	    array_index?: Parameter;
+	    resolved_display?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Parameter(source);
@@ -1667,6 +1668,7 @@ export namespace wtg {
 	        this.unknown = source["unknown"];
 	        this.is_array = source["is_array"];
 	        this.array_index = this.convertValues(source["array_index"], Parameter);
+	        this.resolved_display = source["resolved_display"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
