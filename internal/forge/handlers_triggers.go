@@ -78,6 +78,16 @@ func registerTriggerHandlers(reg func(method string, h bridge.Handler)) {
 	reg("triggers.list_destructable_instances", handleTriggersListDestructableInstances)
 	reg("triggers.list_regions", handleTriggersListRegions)
 	reg("triggers.list_cameras", handleTriggersListCameras)
+	// Phase 3 — Lua codegen + Test Map + cross-trigger search.
+	//
+	//   triggers.generate_script — generates the war3map.lua text, does NOT write
+	//   triggers.save_script     — generates + writes war3map.lua to the source
+	//   triggers.test_map        — generate + save + launch WC3 with the map preloaded
+	//   triggers.search          — fuzzy substring search across all triggers
+	reg("triggers.generate_script", handleTriggersGenerateScript)
+	reg("triggers.save_script", handleTriggersSaveScript)
+	reg("triggers.test_map", handleTriggersTestMap)
+	reg("triggers.search", handleTriggersSearch)
 }
 
 // TriggerTreeNode is the one-shot tree-shape DTO. The frontend stitches
@@ -1165,4 +1175,85 @@ func buildCamerasList() []TriggerCameraInfo {
 		})
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Lua codegen + Test Map + search handlers.
+// ---------------------------------------------------------------------------
+
+// triggerScriptResult is the wire shape for generate_script / save_script.
+// Text is the Lua source (always populated for generate_script; only when
+// the caller asks for it on save_script). Bytes is the file-size in bytes
+// (populated on save_script).
+type triggerScriptResult struct {
+	Text  string `json:"text,omitempty"`
+	Bytes int    `json:"bytes,omitempty"`
+}
+
+// handleTriggersGenerateScript generates the Lua war3map.lua text and
+// returns it WITHOUT writing. Honors ErrLuaOnly + ErrPreserveScript.
+func handleTriggersGenerateScript(_ json.RawMessage) (any, error) {
+	text, err := Current.GenerateTriggerScript()
+	if err != nil {
+		return nil, err
+	}
+	return triggerScriptResult{Text: text, Bytes: len(text)}, nil
+}
+
+// handleTriggersSaveScript generates + writes war3map.lua via the session's
+// source. Returns the byte count; the text is omitted from the response to
+// keep the wire payload small (callers wanting both should call
+// generate_script first).
+func handleTriggersSaveScript(_ json.RawMessage) (any, error) {
+	n, err := Current.SaveTriggerScript()
+	if err != nil {
+		return nil, err
+	}
+	return triggerScriptResult{Bytes: n}, nil
+}
+
+// handleTriggersTestMap is the full pipeline: save pending edits, regen +
+// write war3map.lua, launch WC3 with the map preloaded. Errors propagate
+// to the caller (the JS layer toasts them).
+func handleTriggersTestMap(_ json.RawMessage) (any, error) {
+	if err := Current.TestMap(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+// triggersSearchParams is the wire shape for triggers.search.
+type triggersSearchParams struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+// triggersSearchResponse wraps the hits + a flag telling the UI whether
+// the result was truncated at the cap.
+type triggersSearchResponse struct {
+	Hits      []TriggerSearchHit `json:"hits"`
+	Truncated bool               `json:"truncated,omitempty"`
+}
+
+// handleTriggersSearch performs the cross-trigger fuzzy search and returns
+// the top N hits. Empty query returns the first N triggers by name (so the
+// search palette renders a non-empty initial view).
+func handleTriggersSearch(params json.RawMessage) (any, error) {
+	var p triggersSearchParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+	}
+	limit := p.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	hits := Current.SearchTriggers(p.Query, limit+1) // ask for one extra to detect truncation
+	truncated := false
+	if len(hits) > limit {
+		hits = hits[:limit]
+		truncated = true
+	}
+	return triggersSearchResponse{Hits: hits, Truncated: truncated}, nil
 }

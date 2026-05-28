@@ -627,6 +627,79 @@ type TriggerCameraInfoDTO struct {
 	GGRef    string  `json:"gg_ref"`
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3 — Lua codegen + Test Map + search Wails surface.
+// ---------------------------------------------------------------------------
+
+// TriggerScriptResultDTO mirrors forge.triggerScriptResult.
+type TriggerScriptResultDTO struct {
+	Text  string `json:"text,omitempty"`
+	Bytes int    `json:"bytes,omitempty"`
+}
+
+// GenerateTriggerScript returns the Lua war3map.lua source for the loaded
+// map without writing. Errors propagate verbatim (ErrLuaOnly for JASS
+// maps; ErrPreserveScript when the existing war3map.lua starts with the
+// preserve marker; "no map loaded" otherwise).
+func (a *App) GenerateTriggerScript() (TriggerScriptResultDTO, error) {
+	text, err := forge.Current.GenerateTriggerScript()
+	if err != nil {
+		return TriggerScriptResultDTO{}, err
+	}
+	return TriggerScriptResultDTO{Text: text, Bytes: len(text)}, nil
+}
+
+// SaveTriggerScript generates + writes war3map.lua into the loaded map's
+// source. Returns the byte count.
+func (a *App) SaveTriggerScript() (TriggerScriptResultDTO, error) {
+	n, err := forge.Current.SaveTriggerScript()
+	if err != nil {
+		return TriggerScriptResultDTO{}, err
+	}
+	return TriggerScriptResultDTO{Bytes: n}, nil
+}
+
+// TestMap runs the full pipeline: save pending edits → regen war3map.lua →
+// launch WC3 with the map preloaded. Returns nil on success; errors from
+// any step propagate so the JS layer can toast appropriately.
+func (a *App) TestMap() error {
+	return forge.Current.TestMap()
+}
+
+// TriggerSearchHitDTO mirrors forge.TriggerSearchHit.
+type TriggerSearchHitDTO struct {
+	TriggerID   int32  `json:"trigger_id"`
+	TriggerName string `json:"trigger_name"`
+	Kind        string `json:"kind"`
+	Path        []int  `json:"path,omitempty"`
+	ECAName     string `json:"eca_name,omitempty"`
+	Snippet     string `json:"snippet"`
+	Category    string `json:"category,omitempty"`
+}
+
+// SearchTriggers performs the cross-trigger fuzzy search. Empty query
+// returns up to `limit` trigger names alphabetically (so the palette feels
+// populated on first open). Limit defaults to 50 when ≤ 0.
+func (a *App) SearchTriggers(query string, limit int) []TriggerSearchHitDTO {
+	if limit <= 0 {
+		limit = 50
+	}
+	hits := forge.Current.SearchTriggers(query, limit)
+	out := make([]TriggerSearchHitDTO, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, TriggerSearchHitDTO{
+			TriggerID:   h.TriggerID,
+			TriggerName: h.TriggerName,
+			Kind:        h.Kind,
+			Path:        h.Path,
+			ECAName:     h.ECAName,
+			Snippet:     h.Snippet,
+			Category:    h.Category,
+		})
+	}
+	return out
+}
+
 // ListTriggerCameras returns the war3map.w3c contents (or empty when absent).
 func (a *App) ListTriggerCameras() []TriggerCameraInfoDTO {
 	src := forge.BuildTriggerCameras()
