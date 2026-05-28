@@ -26,11 +26,15 @@ export function CanRedo():Promise<boolean>;
 
 export function CanUndo():Promise<boolean>;
 
+export function CheckConvertToLua():Promise<main.ConvertToLuaResultDTO>;
+
 export function ClearSelection():Promise<main.SelectionDTO>;
 
 export function ClearTriggerParamSubFunction(arg1:number,arg2:Array<number>,arg3:Array<number>):Promise<main.TriggerMutationResultDTO>;
 
 export function CloseMap():Promise<main.MapStatus>;
+
+export function ConvertMapToLua():Promise<main.ConvertToLuaResultDTO>;
 
 export function ConvertObject(arg1:string,arg2:string,arg3:string):Promise<main.ConvertObjectResult>;
 

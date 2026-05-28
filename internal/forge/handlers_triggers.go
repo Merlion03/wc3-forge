@@ -88,6 +88,12 @@ func registerTriggerHandlers(reg func(method string, h bridge.Handler)) {
 	reg("triggers.save_script", handleTriggersSaveScript)
 	reg("triggers.test_map", handleTriggersTestMap)
 	reg("triggers.search", handleTriggersSearch)
+	// Convert Map to Lua. Two-step: check (read-only blocker scan) then
+	// convert (apply if clean, refuse if blocked). The convert handler
+	// returns the blocker list rather than erroring when blocked, so the
+	// UI can render the dedicated blocker dialog instead of a toast.
+	reg("triggers.check_convert_to_lua", handleTriggersCheckConvertToLua)
+	reg("triggers.convert_to_lua", handleTriggersConvertToLua)
 }
 
 // TriggerTreeNode is the one-shot tree-shape DTO. The frontend stitches
@@ -1233,6 +1239,35 @@ type triggersSearchParams struct {
 type triggersSearchResponse struct {
 	Hits      []TriggerSearchHit `json:"hits"`
 	Truncated bool               `json:"truncated,omitempty"`
+}
+
+// handleTriggersCheckConvertToLua surfaces the blocker scan via MCP. Always
+// returns the result payload (Blockers may be empty) — never an error other
+// than "no map loaded". UIs poll this from a "Convert to Lua…" preview.
+func handleTriggersCheckConvertToLua(_ json.RawMessage) (any, error) {
+	res, err := Current.CheckConvertToLua()
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// handleTriggersConvertToLua runs the full conversion. When blockers are
+// found, the underlying ConvertToLua returns ErrConvertBlocked with the
+// blocker list embedded in the result; we surface that as a NON-error
+// response carrying {blockers: [...]} so the UI's blocker dialog renders
+// from a typed payload instead of an error-string parse. Other errors
+// (ErrAlreadyLua, codegen failures, disk errors) propagate as errors.
+func handleTriggersConvertToLua(_ json.RawMessage) (any, error) {
+	res, err := Current.ConvertToLua()
+	if err != nil {
+		if errors.Is(err, ErrConvertBlocked) {
+			// Refuse + report — not a real error from the caller's POV.
+			return res, nil
+		}
+		return nil, err
+	}
+	return res, nil
 }
 
 // handleTriggersSearch performs the cross-trigger fuzzy search and returns

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
@@ -664,6 +665,68 @@ func (a *App) SaveTriggerScript() (TriggerScriptResultDTO, error) {
 // any step propagate so the JS layer can toast appropriately.
 func (a *App) TestMap() error {
 	return forge.Current.TestMap()
+}
+
+// ConvertBlockerDTO mirrors forge.ConvertBlocker for the Wails boundary so
+// the binding generator picks it up in the main package.
+type ConvertBlockerDTO struct {
+	TriggerID   int32  `json:"trigger_id"`
+	TriggerName string `json:"trigger_name"`
+	Kind        string `json:"kind"`
+	Reason      string `json:"reason"`
+}
+
+// ConvertToLuaResultDTO mirrors forge.ConvertToLuaCheckResult. Blockers is
+// non-nil (possibly empty) — JS callers should branch on length.
+type ConvertToLuaResultDTO struct {
+	Blockers []ConvertBlockerDTO `json:"blockers"`
+}
+
+// CheckConvertToLua scans the loaded map for unconvertable JASS content.
+// Returns a result with empty Blockers when conversion is safe; errors only
+// when no map is loaded. The UI uses this to gate the confirm dialog vs.
+// the blocker dialog.
+func (a *App) CheckConvertToLua() (*ConvertToLuaResultDTO, error) {
+	res, err := forge.Current.CheckConvertToLua()
+	if err != nil {
+		return nil, err
+	}
+	return convertResultToDTO(res), nil
+}
+
+// ConvertMapToLua runs the full convert flow. Returns the blocker list
+// (instead of erroring) when blockers are found — same shape as Check,
+// letting the JS caller route to the blocker dialog without a separate
+// error-message-parse path. Other failure modes (ErrAlreadyLua, codegen
+// errors, disk errors) propagate as Go errors.
+func (a *App) ConvertMapToLua() (*ConvertToLuaResultDTO, error) {
+	res, err := forge.Current.ConvertToLua()
+	if err != nil {
+		if errors.Is(err, forge.ErrConvertBlocked) {
+			return convertResultToDTO(res), nil
+		}
+		return nil, err
+	}
+	return convertResultToDTO(res), nil
+}
+
+// convertResultToDTO copies forge.ConvertToLuaCheckResult into the main-
+// package DTO so Wails picks up the shape. nil-in / nil-out, but always
+// returns a non-nil Blockers slice so JS .length doesn't blow up on null.
+func convertResultToDTO(in *forge.ConvertToLuaCheckResult) *ConvertToLuaResultDTO {
+	if in == nil {
+		return &ConvertToLuaResultDTO{Blockers: []ConvertBlockerDTO{}}
+	}
+	out := &ConvertToLuaResultDTO{Blockers: make([]ConvertBlockerDTO, 0, len(in.Blockers))}
+	for _, b := range in.Blockers {
+		out.Blockers = append(out.Blockers, ConvertBlockerDTO{
+			TriggerID:   b.TriggerID,
+			TriggerName: b.TriggerName,
+			Kind:        b.Kind,
+			Reason:      b.Reason,
+		})
+	}
+	return out
 }
 
 // TriggerSearchHitDTO mirrors forge.TriggerSearchHit.

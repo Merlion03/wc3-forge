@@ -42,6 +42,10 @@ export function CanUndo() {
   return window['go']['main']['App']['CanUndo']();
 }
 
+export function CheckConvertToLua() {
+  return window['go']['main']['App']['CheckConvertToLua']();
+}
+
 export function ClearSelection() {
   return window['go']['main']['App']['ClearSelection']();
 }
@@ -52,6 +56,10 @@ export function ClearTriggerParamSubFunction(arg1, arg2, arg3) {
 
 export function CloseMap() {
   return window['go']['main']['App']['CloseMap']();
+}
+
+export function ConvertMapToLua() {
+  return window['go']['main']['App']['ConvertMapToLua']();
 }
 
 export function ConvertObject(arg1, arg2, arg3) {

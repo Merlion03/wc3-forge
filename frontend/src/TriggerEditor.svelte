@@ -174,7 +174,25 @@
       await TestMap()
       showToast('Test Map launched — opening Warcraft III…', 'ok')
     } catch (e) {
-      showToast(`Test Map failed: ${e}`, 'err')
+      const msg = String(e)
+      // Codegen refuses on JASS maps with ErrLuaOnly. Surface a friendlier
+      // toast that routes the user to the Convert to Lua flow. The exact
+      // sentinel text matches forge.ErrLuaOnly in triggers_codegen.go.
+      if (/wc3-forge generates Lua only/i.test(msg)) {
+        const opener = (typeof window !== 'undefined') ? (window as any).__openConvertToLua : null
+        if (typeof opener === 'function') {
+          // Close the Trigger Editor so the convert dialog gets focus.
+          open = false
+          showToast('JASS map detected — opening Convert to Lua…', 'err')
+          // Defer to next tick so the editor closes cleanly before the
+          // convert flow's CheckConvertToLua call runs.
+          setTimeout(() => { opener() }, 50)
+        } else {
+          showToast('JASS map: open File → Convert to Lua… first.', 'err')
+        }
+      } else {
+        showToast(`Test Map failed: ${e}`, 'err')
+      }
     } finally {
       testMapBusy = false
     }

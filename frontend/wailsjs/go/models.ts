@@ -156,6 +156,24 @@ export namespace main {
 	        this.name = source["name"];
 	    }
 	}
+	export class ConvertBlockerDTO {
+	    trigger_id: number;
+	    trigger_name: string;
+	    kind: string;
+	    reason: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ConvertBlockerDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.trigger_id = source["trigger_id"];
+	        this.trigger_name = source["trigger_name"];
+	        this.kind = source["kind"];
+	        this.reason = source["reason"];
+	    }
+	}
 	export class UnitObjectField {
 	    id: string;
 	    field: string;
@@ -246,6 +264,36 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.detail = this.convertValues(source["detail"], UnitObjectDetail);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ConvertToLuaResultDTO {
+	    blockers: ConvertBlockerDTO[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ConvertToLuaResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.blockers = this.convertValues(source["blockers"], ConvertBlockerDTO);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -379,6 +427,7 @@ export namespace main {
 	    path?: string;
 	    name?: string;
 	    unit_count: number;
+	    lua: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new MapStatus(source);
@@ -390,6 +439,7 @@ export namespace main {
 	        this.path = source["path"];
 	        this.name = source["name"];
 	        this.unit_count = source["unit_count"];
+	        this.lua = source["lua"];
 	    }
 	}
 	export class MinimapDTO {

@@ -265,11 +265,17 @@ func (a *App) OpenMapFileDialog() (string, error) {
 }
 
 // MapStatus mirrors the wire shape used by map.status / bridge.ping.
+//
+// Lua reflects info.Lua — true when the loaded map's script is Lua, false
+// for JASS-era maps. The frontend uses it to gate the File → Convert to Lua
+// menu item (disabled when already Lua) and the Test Map error toast (shows
+// a "Convert to Lua…" suggestion when ErrLuaOnly surfaces from codegen).
 type MapStatus struct {
 	Loaded    bool   `json:"loaded"`
 	Path      string `json:"path,omitempty"`
 	Name      string `json:"name,omitempty"`
 	UnitCount int    `json:"unit_count"`
+	Lua       bool   `json:"lua"`
 }
 
 // OpenMap loads the map at the given path. Returns the post-open status so
@@ -343,6 +349,7 @@ func (a *App) Status() MapStatus {
 	s.Path = forge.Current.Path()
 	if info := forge.Current.Info(); info != nil {
 		s.Name = info.Name
+		s.Lua = info.Lua
 	}
 	if units := forge.Current.Units(); units != nil {
 		s.UnitCount = len(units.Entities)

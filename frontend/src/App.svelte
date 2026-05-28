@@ -10,6 +10,7 @@
     MoveUnit, MoveDoodad, IsDirty, SaveMap,
     LaunchInWC3,
     Undo, Redo, CanUndo, CanRedo, HistoryList,
+    CheckConvertToLua,
     ForceQuit,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
@@ -26,6 +27,7 @@
   import ObjectEditor from './ObjectEditor.svelte'
   import TriggerEditor from './TriggerEditor.svelte'
   import SwapTilesetDialog from './SwapTilesetDialog.svelte'
+  import ConvertToLuaDialog from './ConvertToLuaDialog.svelte'
   import GameplayConstantsEditor from './GameplayConstantsEditor.svelte'
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
@@ -56,7 +58,7 @@
     icon_art: string
   }
 
-  let status: main.MapStatus = $state({ loaded: false, unit_count: 0 })
+  let status: main.MapStatus = $state({ loaded: false, unit_count: 0, lua: false })
   let units: main.UnitDTO[] = $state([])
   let doodads: main.DoodadDTO[] = $state([])
   let unitTypes: Record<string, UnitTypeInfo> = $state({})
@@ -218,6 +220,54 @@
   function closeTriggerEditor() {
     showTriggerEditor = false
     triggerEditorInitialId = null
+  }
+
+  // ----- Convert to Lua modal -----
+  //
+  // The flow: user clicks File → Convert to Lua…. We synchronously call
+  // CheckConvertToLua to see if the map has unconvertable JASS content; the
+  // dialog renders either the confirm path (no blockers) or the blocker list
+  // path. The Convert button itself goes through ConvertMapToLua on the Go
+  // side. Result is undoable until Save (Ctrl+S) persists it.
+  //
+  // Hidden when the loaded map is already Lua (info.Lua=true). The File menu
+  // item disables in that case so this never reaches the dialog, but defensive
+  // guards live in the Go layer too.
+  let showConvertToLua: boolean = $state(false)
+  let convertBlockers: { trigger_id: number; trigger_name: string; kind: string; reason: string }[] = $state([])
+  let convertChecking: boolean = $state(false)
+  async function openConvertToLua() {
+    if (!status.loaded) return
+    if (status.lua) {
+      showToast('Map is already Lua — nothing to convert.', 'info')
+      return
+    }
+    if (convertChecking) return
+    convertChecking = true
+    try {
+      const res = await CheckConvertToLua()
+      convertBlockers = (res?.blockers ?? []) as typeof convertBlockers
+      showConvertToLua = true
+    } catch (e) {
+      showToast(`Convert check failed: ${e instanceof Error ? e.message : String(e)}`, 'error')
+    } finally {
+      convertChecking = false
+    }
+  }
+  function closeConvertToLua() {
+    showConvertToLua = false
+    convertBlockers = []
+  }
+  async function onConvertedToLua() {
+    // Refresh status (Lua flag flipped) + dirty flag (info dirty after convert).
+    try { status = await Status() } catch {}
+    try { dirty = await IsDirty() } catch {}
+  }
+  // Public bridge for child components (TriggerEditor's Test Map error toast)
+  // that need to launch the convert flow without prop-drilling. Same pattern
+  // as the existing __runPickSelfTest / __showToast globals on window.
+  if (typeof window !== 'undefined') {
+    ;(window as any).__openConvertToLua = openConvertToLua
   }
 
   // ----- Swap Tileset modal -----
@@ -1632,6 +1682,17 @@
           <span class="flex-1">Trigger Editor</span>
           <DropdownMenu.Shortcut>F4</DropdownMenu.Shortcut>
         </DropdownMenu.Item>
+        <DropdownMenu.Item
+          onSelect={runMenuAction(openConvertToLua)}
+          disabled={!status.loaded || !!status.lua || convertChecking}
+          title={status.lua
+            ? 'Map is already Lua — nothing to convert.'
+            : 'Modernize an old JASS map: regenerate war3map.lua from GUI triggers, delete war3map.j, flip MapInfo.Lua=true. Undoable until Save.'}
+        >
+          <span class="flex-1">
+            {status.lua ? 'Convert to Lua (already Lua)' : 'Convert to Lua…'}
+          </span>
+        </DropdownMenu.Item>
         <DropdownMenu.Separator />
         <DropdownMenu.Item onSelect={runMenuAction(close)} disabled={!status.loaded || busy}>
           <span class="flex-1">Close</span>
@@ -2167,6 +2228,16 @@
     <SwapTilesetDialog
       bind:open={showSwapTileset}
       onClose={closeSwapTileset}
+    />
+  {/if}
+
+  {#if showConvertToLua}
+    <ConvertToLuaDialog
+      bind:open={showConvertToLua}
+      blockers={convertBlockers}
+      onClose={closeConvertToLua}
+      onConverted={onConvertedToLua}
+      onOpenTrigger={(id) => openTriggerEditor(id)}
     />
   {/if}
 

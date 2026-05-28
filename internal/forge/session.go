@@ -43,6 +43,11 @@ type fileSource interface {
 	// Folder sources write to disk; MPQ sources currently return
 	// ErrMPQWriteNotImplemented (extract to a folder first).
 	write(name string, data []byte) error
+	// delete removes the named file from the source. Returns nil if the
+	// file is already absent (idempotent — used by Convert-to-Lua to drop
+	// war3map.j after the .lua replacement has been written). MPQ sources
+	// return ErrMPQWriteNotImplemented.
+	delete(name string) error
 	// close releases any open handles. Safe to call once at end of Open.
 	close() error
 }
@@ -77,6 +82,21 @@ func (f folderSource) write(name string, data []byte) error {
 	return os.WriteFile(filepath.Join(f.root, clean), data, 0o644)
 }
 
+// delete removes the named file under f.root. Returns nil if the file is
+// absent — callers (Convert-to-Lua) treat the operation as idempotent.
+// Same path-traversal defense as write.
+func (f folderSource) delete(name string) error {
+	clean := filepath.Clean(name)
+	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, string(filepath.Separator)+"..") {
+		return fmt.Errorf("delete %q: unsafe path", name)
+	}
+	err := os.Remove(filepath.Join(f.root, clean))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func (f folderSource) close() error { return nil }
 
 type mpqSource struct{ a *mpq.Archive }
@@ -97,6 +117,13 @@ func (m mpqSource) read(name string) ([]byte, bool, error) {
 // offsets, optional compression) that wc3-forge defers in favour of the
 // folder-source path. Callers should extract the .w3x to a folder first.
 func (m mpqSource) write(name string, data []byte) error {
+	return fmt.Errorf("%w (file=%q)", ErrMPQWriteNotImplemented, name)
+}
+
+// delete on an MPQ source is intentionally unsupported (same rationale as
+// write — MPQ writing is a large unfinished project; folder sources are the
+// supported edit path).
+func (m mpqSource) delete(name string) error {
 	return fmt.Errorf("%w (file=%q)", ErrMPQWriteNotImplemented, name)
 }
 
