@@ -4,29 +4,34 @@
 //
 // Two-step protocol:
 //
-//   1. CheckConvertToLua scans the loaded map's triggers for content that
-//      can't be auto-translated (whole-trigger JASS in is_script triggers,
-//      per-trigger custom_text overlays on GUI triggers, hand-rolled JASS
-//      in war3map.j when there's no .wtg). Returns a Blockers list — empty
-//      means safe to convert.
+//   1. CheckConvertToLua scans the loaded map's triggers for vJASS-specific
+//      content that can't be auto-translated (the JassHelper preprocessor is
+//      out of scope). Pure JASS — function/if/loop/set/call/return/globals —
+//      is NOT a blocker; the jass2lua transpiler handles it.
 //
-//   2. ConvertToLua re-emits the script as Lua via the Phase 3 codegen,
-//      writes war3map.lua, deletes war3map.j, sets info.Lua=true. Marks
-//      info + script dirty so Save persists. Records ONE undo Command
-//      that restores the original war3map.j bytes + info.Lua=false on
-//      Revert + drops the generated war3map.lua.
+//   2. ConvertToLua transpiles every pure-JASS section, concatenates with the
+//      GUI codegen output, writes war3map.lua, deletes war3map.j, sets
+//      info.Lua=true. Optionally backs up the map source first (folder copy
+//      or .w3x file copy). Marks info + script dirty so Save persists.
+//      Records ONE undo Command that restores the original war3map.j bytes +
+//      info.Lua=false on Revert + drops the generated war3map.lua. The backup
+//      file is NOT auto-deleted on Undo — it stays as the user's belt-and-
+//      suspenders fallback.
 //
-// JASS conversion is intentionally out of scope: the trigger-editor surface
-// is GUI + Lua only, and translating arbitrary JASS to Lua is a multi-pass
-// compiler problem we don't attempt. The blocker dialog asks the user to
-// either delete the offending triggers (most are usually third-party
-// debugging hooks) or rewrite them by hand before retrying.
+// JASS-vs-vJASS triage is driven by jass2lua.FindVJASSKeyword (the keyword
+// regex is centralized there alongside the transpiler so both stay in sync).
 package forge
 
 import (
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/StephenSHorton/wc3-forge/internal/forge/jass2lua"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wtg"
 )
@@ -34,9 +39,10 @@ import (
 // ConvertBlocker describes one trigger / synthetic node that blocks
 // auto-conversion. Kind discriminates the source:
 //
-//	"script"       — is_script=true trigger (whole-trigger custom JASS)
-//	"custom_text"  — GUI trigger with non-empty CustomText (overlay JASS)
-//	"map_header"   — synthetic Map Header script (hand-rolled war3map.j)
+//	"script_vjass"      — is_script=true trigger whose body uses vJASS keywords
+//	"custom_text_vjass" — GUI trigger whose CustomText overlay uses vJASS
+//	"map_header_vjass"  — hand-rolled war3map.j containing vJASS
+//	"global_jass_vjass" — war3map.wct GlobalJASS block containing vJASS
 //
 // Reason is a short human-readable explanation the UI surfaces verbatim.
 type ConvertBlocker struct {
@@ -57,33 +63,35 @@ type ConvertToLuaCheckResult struct {
 // are present. The Wails wrapper translates this to a non-error response
 // carrying the blocker list (the UI prefers a typed payload over an opaque
 // error string for the blocker-list dialog).
-var ErrConvertBlocked = errors.New("map has unconvertable JASS content")
+var ErrConvertBlocked = errors.New("map has unconvertable vJASS content")
 
 // ErrAlreadyLua is returned by ConvertToLua when the loaded map is already
 // flagged as Lua (info.Lua == true). The UI disables the menu item in this
 // case, so this is mostly belt-and-suspenders for direct MCP callers.
 var ErrAlreadyLua = errors.New("map is already Lua (info.Lua == true) — nothing to convert")
 
-// CheckConvertToLua scans the loaded map's triggers for content that can't
-// be automatically translated from JASS to Lua. Returns an empty Blockers
-// slice when the map is safe to convert.
+// ErrBackupFailed is returned when the backup step fails. We refuse to proceed
+// to a conversion the user can't easily undo.
+var ErrBackupFailed = errors.New("backup failed; refusing to convert without a backup the user asked for")
+
+// CheckConvertToLua scans the loaded map for vJASS-specific script content
+// (the JassHelper preprocessor is out of scope; pure JASS is transpiled
+// automatically). Returns an empty Blockers slice when the map is safe to
+// convert.
 //
 // Blockers (we refuse on these):
-//   - is_script triggers (whole-trigger JASS): the trigger's custom_text
-//     IS the JASS. We can't translate arbitrary JASS to Lua.
-//   - GUI triggers with non-empty custom_text: per-trigger custom JASS
-//     overlays the GUI code. Same reason.
-//   - The synthetic Map Header script (when info.Lua==false and a hand-
-//     rolled war3map.j exists): the whole script is hand-written JASS.
+//   - is_script triggers using vJASS keywords (library, struct, scope, etc.)
+//   - GUI triggers whose CustomText overlay uses vJASS keywords
+//   - Hand-rolled war3map.j containing vJASS
+//   - war3map.wct GlobalJASS header containing vJASS
 //
-// NOT blockers:
-//   - Comment triggers (CommentString ECAs) — no script content.
-//   - Pure GUI triggers (is_script==false, custom_text=="") — the
-//     codegen handles every GUI ECA.
-//   - Disabled triggers (is_enabled==false) — the codegen skips them, so
-//     a disabled is_script trigger doesn't actually appear in output.
-//     We still flag it though: the user might re-enable later and the
-//     content would re-introduce JASS.
+// NOT blockers (handled by the transpiler):
+//   - is_script triggers with pure JASS (function/if/loop/set/call/etc.)
+//   - GUI triggers with pure-JASS CustomText overlays
+//   - Pure-JASS hand-rolled war3map.j
+//   - Pure-JASS GlobalJASS
+//   - Pure-GUI triggers with no script content
+//   - Comment triggers
 func (s *Session) CheckConvertToLua() (*ConvertToLuaCheckResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -91,86 +99,222 @@ func (s *Session) CheckConvertToLua() (*ConvertToLuaCheckResult, error) {
 		return nil, fmt.Errorf("no map loaded")
 	}
 	res := &ConvertToLuaCheckResult{Blockers: []ConvertBlocker{}}
-	// Hand-rolled war3map.j case: no .wtg in the map, the loader synthesized
-	// a "Map Header" script trigger holding the raw JASS source. The whole
-	// thing is hand-written JASS so the only "convert" we could offer is
-	// "drop the script" — which would destroy gameplay. Surface as a single
-	// blocker with a clear explanation.
+
+	// Hand-rolled war3map.j case: scan the synthesized Map Header trigger's
+	// custom_text for vJASS. Pure-JASS hand-rolled maps are now convertible
+	// (the transpiler handles them).
 	if s.triggerIsHandRolled {
-		name := s.mapHeaderScriptName
-		if name == "" {
-			name = "war3map.j"
-		}
-		var tid int32
 		if s.triggers != nil && len(s.triggers.Triggers) > 0 {
-			tid = s.triggers.Triggers[0].ID
+			tr := &s.triggers.Triggers[0]
+			if kw, found := jass2lua.FindVJASSKeyword(tr.CustomText); found {
+				name := s.mapHeaderScriptName
+				if name == "" {
+					name = "war3map.j"
+				}
+				res.Blockers = append(res.Blockers, ConvertBlocker{
+					TriggerID:   tr.ID,
+					TriggerName: "Map Header (" + name + ")",
+					Kind:        "map_header_vjass",
+					Reason:      "war3map.j uses the vJASS keyword `" + kw + "`. vJASS requires the JassHelper preprocessor; auto-transpile to Lua isn't supported. Rewrite the script as pure JASS or Lua first.",
+				})
+			}
 		}
-		res.Blockers = append(res.Blockers, ConvertBlocker{
-			TriggerID:   tid,
-			TriggerName: "Map Header (" + name + ")",
-			Kind:        "map_header",
-			Reason:      "The whole map script is hand-rolled JASS in " + name + ". Auto-conversion would destroy gameplay logic. Convert the script manually first, or open this map in WC3 World Editor and use Map → Convert to Lua.",
-		})
 		return res, nil
 	}
+
 	if s.triggers == nil {
-		// No triggers + no hand-rolled script → conversion is a no-op
-		// (the codegen will still emit the scaffolding). Safe.
+		// No triggers and no hand-rolled script → trivially safe.
 		return res, nil
 	}
+
+	// Per-trigger vJASS scan.
 	for i := range s.triggers.Triggers {
 		tr := &s.triggers.Triggers[i]
-		// Comment triggers don't have script content. Skip.
 		if tr.IsComment {
 			continue
 		}
-		// is_script trigger — the trigger's custom_text IS the trigger's
-		// body (in JASS for a JASS map). We can't translate arbitrary
-		// JASS to Lua.
-		if tr.IsScript || tr.Classifier == wtg.ClassifierScript {
-			res.Blockers = append(res.Blockers, ConvertBlocker{
-				TriggerID:   tr.ID,
-				TriggerName: tr.Name,
-				Kind:        "script",
-				Reason:      "Custom-script trigger (whole-trigger JASS). Rewrite it as a GUI trigger, convert it to Lua by hand, or delete it before retrying.",
-			})
+		if (tr.IsScript || tr.Classifier == wtg.ClassifierScript) && tr.CustomText != "" {
+			if kw, found := jass2lua.FindVJASSKeyword(tr.CustomText); found {
+				res.Blockers = append(res.Blockers, ConvertBlocker{
+					TriggerID:   tr.ID,
+					TriggerName: tr.Name,
+					Kind:        "script_vjass",
+					Reason:      "Custom-script trigger uses the vJASS keyword `" + kw + "`. vJASS needs the JassHelper preprocessor; rewrite as pure JASS or Lua, or delete this trigger before retrying.",
+				})
+			}
 			continue
 		}
-		// GUI trigger with non-empty custom_text — the user pasted a JASS
-		// snippet on top of the GUI body. Same translation problem.
 		if tr.CustomText != "" {
+			if kw, found := jass2lua.FindVJASSKeyword(tr.CustomText); found {
+				res.Blockers = append(res.Blockers, ConvertBlocker{
+					TriggerID:   tr.ID,
+					TriggerName: tr.Name,
+					Kind:        "custom_text_vjass",
+					Reason:      "GUI trigger has a custom-script overlay using the vJASS keyword `" + kw + "`. Clear the overlay or rewrite it as pure JASS before retrying.",
+				})
+			}
+		}
+	}
+
+	// GlobalJASS in war3map.wct — also subject to the vJASS gate.
+	if s.triggersWct != nil && strings.TrimSpace(s.triggersWct.GlobalJASS) != "" {
+		if kw, found := jass2lua.FindVJASSKeyword(s.triggersWct.GlobalJASS); found {
 			res.Blockers = append(res.Blockers, ConvertBlocker{
-				TriggerID:   tr.ID,
-				TriggerName: tr.Name,
-				Kind:        "custom_text",
-				Reason:      "GUI trigger with a custom-script overlay (JASS in custom_text). Clear the custom_text or rewrite it as Lua by hand before retrying.",
+				TriggerID:   -1,
+				TriggerName: "war3map.wct GlobalJASS",
+				Kind:        "global_jass_vjass",
+				Reason:      "war3map.wct's global JASS header uses the vJASS keyword `" + kw + "`. Rewrite as pure JASS first.",
 			})
 		}
 	}
+
 	return res, nil
 }
 
-// ConvertToLua re-emits the loaded map's script as Lua:
-//   - Generates war3map.lua via the existing Phase 3 codegen.
-//   - Writes war3map.lua to the map source.
-//   - Deletes war3map.j from the map source.
-//   - Sets info.Lua = true.
+// TranspilePreview is the read-only DTO returned by TranspilePreview() — every
+// pure-JASS section the convert flow would translate, with both sides of the
+// diff prepared. ConvertToLua's actual write path re-runs this internally to
+// stay deterministic.
+type TranspilePreview struct {
+	Sections []TranspileSection `json:"sections"`
+}
+
+// TranspileSection is one piece of the preview. ID:
 //
-// Marks info + script dirty so Save persists. Records a single Command for
-// undo (which restores the original war3map.j + reverts info.Lua + drops
-// the generated war3map.lua).
+//	>=0 — trigger id (per-trigger script trigger or GUI custom_text overlay)
+//	-1  — war3map.wct GlobalJASS header
+//	-2  — hand-rolled war3map.j (entire file)
+//
+// Errors is non-nil only when the transpiler flagged trouble; UI uses it to
+// warn the user before they hit Convert.
+type TranspileSection struct {
+	ID         int32    `json:"id"`
+	Label      string   `json:"label"`
+	Kind       string   `json:"kind"` // "script", "custom_text", "global_jass", "map_header"
+	Original   string   `json:"original"`
+	Transpiled string   `json:"transpiled"`
+	Errors     []string `json:"errors,omitempty"`
+}
+
+// TranspilePreview returns a pure-read diff payload for the convert dialog.
+// Empty Sections when the map has no transpilable script content (a pure-GUI
+// map). The preview never writes to disk.
+func (s *Session) TranspilePreview() (*TranspilePreview, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.loaded {
+		return nil, fmt.Errorf("no map loaded")
+	}
+	out := &TranspilePreview{Sections: []TranspileSection{}}
+
+	// Hand-rolled map_header path.
+	if s.triggerIsHandRolled {
+		if s.triggers != nil && len(s.triggers.Triggers) > 0 {
+			tr := &s.triggers.Triggers[0]
+			if strings.TrimSpace(tr.CustomText) != "" {
+				lua, err := jass2lua.TranspileScript(tr.CustomText)
+				sec := TranspileSection{
+					ID:         tr.ID,
+					Label:      "Map Header (war3map.j)",
+					Kind:       "map_header",
+					Original:   tr.CustomText,
+					Transpiled: lua,
+				}
+				if err != nil {
+					sec.Errors = append(sec.Errors, err.Error())
+				}
+				out.Sections = append(out.Sections, sec)
+			}
+		}
+		return out, nil
+	}
+
+	// Global JASS header (war3map.wct) — top of the diff so the user sees it first.
+	if s.triggersWct != nil && strings.TrimSpace(s.triggersWct.GlobalJASS) != "" {
+		lua, err := jass2lua.TranspileScript(s.triggersWct.GlobalJASS)
+		sec := TranspileSection{
+			ID:         -1,
+			Label:      "war3map.wct GlobalJASS",
+			Kind:       "global_jass",
+			Original:   s.triggersWct.GlobalJASS,
+			Transpiled: lua,
+		}
+		if err != nil {
+			sec.Errors = append(sec.Errors, err.Error())
+		}
+		out.Sections = append(out.Sections, sec)
+	}
+
+	if s.triggers == nil {
+		return out, nil
+	}
+
+	// Per-trigger sections.
+	for i := range s.triggers.Triggers {
+		tr := &s.triggers.Triggers[i]
+		if tr.IsComment {
+			continue
+		}
+		if (tr.IsScript || tr.Classifier == wtg.ClassifierScript) && strings.TrimSpace(tr.CustomText) != "" {
+			lua, err := jass2lua.TranspileScript(tr.CustomText)
+			sec := TranspileSection{
+				ID:         tr.ID,
+				Label:      "Custom Script: " + tr.Name,
+				Kind:       "script",
+				Original:   tr.CustomText,
+				Transpiled: lua,
+			}
+			if err != nil {
+				sec.Errors = append(sec.Errors, err.Error())
+			}
+			out.Sections = append(out.Sections, sec)
+			continue
+		}
+		if strings.TrimSpace(tr.CustomText) != "" {
+			// GUI trigger with custom_text overlay — auto-wrap as a function.
+			lua, err := jass2lua.TranspileFunction(tr.Name+"_CustomText", tr.CustomText)
+			sec := TranspileSection{
+				ID:         tr.ID,
+				Label:      "Custom Text: " + tr.Name,
+				Kind:       "custom_text",
+				Original:   tr.CustomText,
+				Transpiled: lua,
+			}
+			if err != nil {
+				sec.Errors = append(sec.Errors, err.Error())
+			}
+			out.Sections = append(out.Sections, sec)
+		}
+	}
+	return out, nil
+}
+
+// ConvertToLuaOptions is the new params shape for ConvertToLua. Backup=true
+// duplicates the map's source (folder or .w3x file) before any conversion
+// happens; on backup failure the operation refuses (no half-baked state).
+type ConvertToLuaOptions struct {
+	Backup bool `json:"backup"`
+}
+
+// ConvertToLua is the legacy wrapper (backup defaults to true). New callers
+// should prefer ConvertToLuaWithOptions.
+func (s *Session) ConvertToLua() (*ConvertToLuaCheckResult, error) {
+	return s.ConvertToLuaWithOptions(ConvertToLuaOptions{Backup: true})
+}
+
+// ConvertToLuaWithOptions runs the full convert flow:
+//   - If opts.Backup, snapshot the map source (folder copy or .w3x file copy
+//     to "<name>.backup<.w3x>"). Refuse on backup failure.
+//   - Transpile each pure-JASS section (per-trigger custom_text + script
+//     triggers + war3map.wct GlobalJASS).
+//   - Concatenate the transpiled Lua with the GUI codegen output.
+//   - Write war3map.lua, delete war3map.j, set info.Lua=true.
 //
 // Returns ErrConvertBlocked + the blocker list embedded in the result when
-// CheckConvertToLua finds unconvertable content. The Wails wrapper unpacks
-// this into a non-error response so the UI can show the dedicated blocker
-// dialog rather than a generic toast.
-//
-// Returns ErrAlreadyLua if the map is already flagged as Lua.
-func (s *Session) ConvertToLua() (*ConvertToLuaCheckResult, error) {
-	// CheckConvertToLua takes a read lock; release before re-acquiring under
-	// a write lock for the mutation. The check is racy if a concurrent
-	// trigger mutation lands between Check and Convert, but the Trigger
-	// Editor is modal in practice + this is a one-shot user action.
+// CheckConvertToLua finds vJASS content. Returns ErrAlreadyLua if the map is
+// already flagged as Lua. Returns ErrBackupFailed if the requested backup
+// couldn't be created.
+func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToLuaCheckResult, error) {
 	check, err := s.CheckConvertToLua()
 	if err != nil {
 		return nil, err
@@ -197,12 +341,19 @@ func (s *Session) ConvertToLua() (*ConvertToLuaCheckResult, error) {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("no source for writing")
 	}
-	// Snapshot the on-disk war3map.j so Revert can restore byte-for-byte.
-	// Use the source's read path so MPQ-backed sessions go through the
-	// same abstraction (they'd fail at write/delete time anyway). When
-	// the map has no war3map.j on disk (extremely rare for a JASS-flagged
-	// map, but defensively handled), originalJASS stays nil — Revert
-	// will delete the synthesized war3map.lua and not write anything.
+	mapPath := s.path
+	s.mu.Unlock()
+
+	// Backup BEFORE any other work — the whole point is to give the user a
+	// fallback if anything later goes wrong.
+	if opts.Backup {
+		if err := backupMapSource(mapPath); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBackupFailed, err)
+		}
+	}
+
+	// Re-acquire lock for the rest of the flow.
+	s.mu.Lock()
 	originalJASS, hadJASS, readErr := src.read("war3map.j")
 	if readErr != nil {
 		s.mu.Unlock()
@@ -211,29 +362,8 @@ func (s *Session) ConvertToLua() (*ConvertToLuaCheckResult, error) {
 	if !hadJASS {
 		originalJASS = nil
 	}
-	// Build codegen inputs identically to GenerateTriggerScript, except we
-	// temporarily flip info.Lua=true so the codegen accepts the call (it
-	// refuses with ErrLuaOnly when info.Lua is false). We don't mutate
-	// s.info under the lock yet — that flip is part of the convert step
-	// below and needs to be on the Command for undo.
-	in := CodegenInputs{
-		Triggers: s.triggers,
-		Units:    s.units,
-		Doodads:  s.doodads,
-		Terrain:  s.terrain,
-		Info:     s.info,
-		Regions:  s.regions,
-		Cameras:  s.cameras,
-		TD:       TriggerDataSnapshot(),
-	}
-	if s.triggersWct != nil {
-		in.GlobalJASS = s.triggersWct.GlobalJASS
-	}
-	// Honor the same preserve-marker peek that GenerateTriggerScript does.
-	// A map with a hand-edited war3map.lua marked with PreserveScriptMarker
-	// should not be silently overwritten — even when we're converting from
-	// JASS, the marker means "don't touch the .lua file". Surface a clear
-	// error so the user removes the marker first.
+
+	// Honor preserve-marker on existing war3map.lua.
 	if existing, ok, _ := src.read("war3map.lua"); ok && len(existing) > 0 {
 		first := existing
 		for i, b := range existing {
@@ -247,12 +377,46 @@ func (s *Session) ConvertToLua() (*ConvertToLuaCheckResult, error) {
 			return nil, ErrPreserveScript
 		}
 	}
-	// Spoof Info.Lua=true for the codegen call. GenerateLuaScript refuses
-	// (with ErrLuaOnly) when Info.Lua is false, but the whole point of
-	// this method is to flip JASS maps to Lua — we need to run the codegen
-	// before flipping the in-memory flag. Hand the codegen a shallow copy
-	// of Info with Lua=true; the codegen only reads from Info, so a shallow
-	// copy is safe (it shares the players/forces slices with the original).
+
+	// Build the per-trigger transpiled overlay (custom_texts that need
+	// translation feed into CustomTexts as Lua, so the codegen treats them
+	// as already-Lua and concatenates them verbatim).
+	customTextsLua := map[int32]string{}
+	if s.triggers != nil {
+		for i := range s.triggers.Triggers {
+			tr := &s.triggers.Triggers[i]
+			if tr.IsComment {
+				continue
+			}
+			if strings.TrimSpace(tr.CustomText) == "" {
+				continue
+			}
+			if tr.IsScript || tr.Classifier == wtg.ClassifierScript {
+				lua, _ := jass2lua.TranspileScript(tr.CustomText)
+				customTextsLua[tr.ID] = lua
+			} else {
+				lua, _ := jass2lua.TranspileFunction(tr.Name+"_CustomText", tr.CustomText)
+				customTextsLua[tr.ID] = lua
+			}
+		}
+	}
+
+	in := CodegenInputs{
+		Triggers:    s.triggers,
+		Units:       s.units,
+		Doodads:     s.doodads,
+		Terrain:     s.terrain,
+		Info:        s.info,
+		Regions:     s.regions,
+		Cameras:     s.cameras,
+		TD:          TriggerDataSnapshot(),
+		CustomTexts: customTextsLua,
+	}
+	if s.triggersWct != nil && strings.TrimSpace(s.triggersWct.GlobalJASS) != "" {
+		lua, _ := jass2lua.TranspileScript(s.triggersWct.GlobalJASS)
+		in.GlobalJASS = lua
+	}
+
 	infoCopy := *s.info
 	infoCopy.Lua = true
 	in.Info = &infoCopy
@@ -263,9 +427,6 @@ func (s *Session) ConvertToLua() (*ConvertToLuaCheckResult, error) {
 		return nil, fmt.Errorf("generate war3map.lua: %w", err)
 	}
 
-	// Re-acquire the write lock for the mutation + Command record. Apply
-	// the changes (lua write, j delete, info flag flip) inside the command's
-	// Apply method so undo/redo flows through identical code.
 	s.mu.Lock()
 	if !s.loaded || s.info == nil || s.source == nil {
 		s.mu.Unlock()
@@ -275,7 +436,7 @@ func (s *Session) ConvertToLua() (*ConvertToLuaCheckResult, error) {
 		originalJASS:    originalJASS,
 		hadOriginalJASS: hadJASS,
 		generatedLua:    []byte(luaText),
-		wasLua:          s.info.Lua, // false by construction (checked above)
+		wasLua:          s.info.Lua,
 		oldFileVersion:  s.info.FileVersion,
 	}
 	if err := cmd.Apply(s); err != nil {
@@ -284,7 +445,7 @@ func (s *Session) ConvertToLua() (*ConvertToLuaCheckResult, error) {
 	}
 	wasDirty := s.anyDirtyLocked()
 	s.dirtyInfo = true
-	s.mapHeaderScriptDirty = false // conversion isn't a hand-rolled-script edit
+	s.mapHeaderScriptDirty = false
 	s.recordCommand(cmd)
 	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
@@ -298,6 +459,99 @@ func (s *Session) ConvertToLua() (*ConvertToLuaCheckResult, error) {
 	return &ConvertToLuaCheckResult{Blockers: []ConvertBlocker{}}, nil
 }
 
+// backupMapSource snapshots the map source so the user can roll back if the
+// converted Lua misbehaves. The backup is NOT touched by Undo — it sits next
+// to the original until the user manually deletes it.
+//
+// Naming:
+//   - Folder source (e.g. `C:/path/to/MyMap`)        → `C:/path/to/MyMap.backup` (folder copy)
+//   - .w3x file source (`C:/path/to/MyMap.w3x`)      → `C:/path/to/MyMap.backup.w3x` (file copy)
+//
+// If a backup with the chosen name already exists, we append `-N` until we
+// find a free path. This costs a stat per attempt but is bounded — users
+// rarely have more than a handful of historical backups around.
+func backupMapSource(mapPath string) error {
+	if mapPath == "" {
+		return fmt.Errorf("no map path available for backup")
+	}
+	st, err := os.Stat(mapPath)
+	if err != nil {
+		return fmt.Errorf("stat map %q: %w", mapPath, err)
+	}
+	dest := pickBackupPath(mapPath, st.IsDir())
+	if st.IsDir() {
+		return copyDir(mapPath, dest)
+	}
+	return copyFile(mapPath, dest)
+}
+
+// pickBackupPath finds a non-colliding backup path for mapPath. For folders
+// the suffix is `.backup`; for files we splice `.backup` before the original
+// extension (`.backup.w3x` reads naturally and keeps the extension's MIME
+// hint intact). Collisions append `-1`, `-2`, ... to the .backup token.
+func pickBackupPath(mapPath string, isDir bool) string {
+	if isDir {
+		base := mapPath + ".backup"
+		try := base
+		for i := 1; pathExists(try); i++ {
+			try = fmt.Sprintf("%s-%d", base, i)
+		}
+		return try
+	}
+	ext := filepath.Ext(mapPath)
+	noExt := strings.TrimSuffix(mapPath, ext)
+	base := noExt + ".backup" + ext
+	try := base
+	for i := 1; pathExists(try); i++ {
+		try = fmt.Sprintf("%s.backup-%d%s", noExt, i, ext)
+	}
+	return try
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		// Make sure parent exists (WalkDir visits files before symlinks
+		// sometimes; defensive).
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return copyFile(path, target)
+	})
+}
+
 // convertToLuaCmd captures everything needed to undo a Convert-to-Lua step:
 //   - the original war3map.j bytes (nil + hadOriginalJASS=false when the map
 //     had no .j file on disk to begin with)
@@ -307,41 +561,19 @@ func (s *Session) ConvertToLua() (*ConvertToLuaCheckResult, error) {
 //   - the wasLua flag (always false in practice — ConvertToLua refuses when
 //     info.Lua is already true — but stored for symmetry)
 //
-// Apply (initial run + Redo): writes war3map.lua, deletes war3map.j, flips
-// info.Lua=true, sets dirtyInfo + clears the script file from dirty state
-// (we just wrote it directly).
-//
-// Revert: writes war3map.j back (if hadOriginalJASS), deletes war3map.lua,
-// flips info.Lua=false. Marks dirtyInfo so Save re-writes the w3i with the
-// reverted flag.
-//
-// IMPORTANT: This Command writes files DIRECTLY rather than going through
-// the Save loop. The rationale: ConvertToLua is a coarse "modernize the
-// map" operation — leaving war3map.j on disk until next Save would produce
-// a transient invalid state where both .j and .lua exist + info.Lua=true,
-// which WC3 itself doesn't reliably handle. We commit the file shuffle
-// atomically with the in-memory flag flip; only the info file's encode-to-
-// disk happens on Save (it's a small struct and matches the other dirty
-// patterns in session.go).
+// IMPORTANT: backup is NOT tracked by this command — undo restores the
+// pre-conversion state in-place; the backup file is the user's belt-and-
+// suspenders fallback and we never auto-delete it.
 type convertToLuaCmd struct {
 	originalJASS    []byte
 	hadOriginalJASS bool
 	generatedLua    []byte
 	wasLua          bool
-	// oldFileVersion captures the .w3i FileVersion BEFORE conversion. The
-	// Lua flag is only written when FileVersion >= FileVersionRefV28, so a
-	// TFT-era (v25) map must be bumped to v28 before Save flushes Lua=true.
-	// Undo restores the original version so the round-trip is faithful.
-	oldFileVersion int32
+	oldFileVersion  int32
 }
 
 func (c *convertToLuaCmd) Label() string { return "Convert to Lua" }
 
-// Apply writes the .lua, deletes the .j, flips Lua=true. Caller holds s.mu.
-// Errors abort early — partial state is possible (e.g. wrote .lua but
-// failed to delete .j) but the caller is responsible for retrying via
-// Save / re-running the convert flow. Each step is idempotent (writes
-// overwrite; delete tolerates absent file).
 func (c *convertToLuaCmd) Apply(s *Session) error {
 	if s.source == nil || s.info == nil {
 		return fmt.Errorf("convert: no map loaded")
@@ -353,9 +585,6 @@ func (c *convertToLuaCmd) Apply(s *Session) error {
 		return fmt.Errorf("delete war3map.j: %w", err)
 	}
 	s.info.Lua = true
-	// The Lua flag is only serialized at FileVersion >= 28 (encode.go L119).
-	// Bump older maps so the persisted .w3i reflects Lua=true on next Save.
-	// Most TFT-era maps are FileVersion=25; modern Reforged maps are >=28.
 	if s.info.FileVersion < w3i.FileVersionRefV28 {
 		s.info.FileVersion = w3i.FileVersionRefV28
 	}
@@ -363,9 +592,6 @@ func (c *convertToLuaCmd) Apply(s *Session) error {
 	return nil
 }
 
-// Revert restores war3map.j, deletes war3map.lua, flips Lua=false. Caller
-// holds s.mu. Symmetric to Apply: each step is idempotent, errors abort
-// early (the user can re-run Undo after fixing the underlying disk issue).
 func (c *convertToLuaCmd) Revert(s *Session) error {
 	if s.source == nil || s.info == nil {
 		return fmt.Errorf("convert revert: no map loaded")
@@ -375,9 +601,6 @@ func (c *convertToLuaCmd) Revert(s *Session) error {
 			return fmt.Errorf("restore war3map.j: %w", err)
 		}
 	} else {
-		// Belt-and-suspenders: defensively drop any war3map.j that might
-		// exist on disk now (e.g. a sibling process wrote one between
-		// Apply and Revert). Tolerates absent file.
 		if err := s.source.delete("war3map.j"); err != nil {
 			return fmt.Errorf("clear war3map.j: %w", err)
 		}
@@ -391,15 +614,8 @@ func (c *convertToLuaCmd) Revert(s *Session) error {
 	return nil
 }
 
-// Affected returns the entity-change event the UI subscribes to for the
-// Lua-flag flip. Kind="info" + Field="lua" is a new tag specific to this
-// command; existing info-event subscribers (Properties panel, Map Info
-// dialog) don't branch on Field beyond "info" so they'll repaint anyway.
 func (c *convertToLuaCmd) Affected(s *Session) []EntityChange {
 	return []EntityChange{{Kind: "info", ID: 0, Field: "lua"}}
 }
 
-// Compile-time assertion that convertToLuaCmd satisfies the Command
-// interface. Without this a typo in any of the four method names would
-// silently break the history machinery.
 var _ Command = (*convertToLuaCmd)(nil)

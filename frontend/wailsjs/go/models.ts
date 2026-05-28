@@ -721,6 +721,59 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class TranspileSectionDTO {
+	    id: number;
+	    label: string;
+	    kind: string;
+	    original: string;
+	    transpiled: string;
+	    errors?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new TranspileSectionDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.label = source["label"];
+	        this.kind = source["kind"];
+	        this.original = source["original"];
+	        this.transpiled = source["transpiled"];
+	        this.errors = source["errors"];
+	    }
+	}
+	export class TranspilePreviewDTO {
+	    sections: TranspileSectionDTO[];
+	
+	    static createFrom(source: any = {}) {
+	        return new TranspilePreviewDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sections = this.convertValues(source["sections"], TranspileSectionDTO);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class TriggerCameraInfoDTO {
 	    name: string;
 	    target_x: number;

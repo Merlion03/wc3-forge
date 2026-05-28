@@ -94,6 +94,7 @@ func registerTriggerHandlers(reg func(method string, h bridge.Handler)) {
 	// UI can render the dedicated blocker dialog instead of a toast.
 	reg("triggers.check_convert_to_lua", handleTriggersCheckConvertToLua)
 	reg("triggers.convert_to_lua", handleTriggersConvertToLua)
+	reg("triggers.transpile_preview", handleTriggersTranspilePreview)
 }
 
 // TriggerTreeNode is the one-shot tree-shape DTO. The frontend stitches
@@ -1258,16 +1259,34 @@ func handleTriggersCheckConvertToLua(_ json.RawMessage) (any, error) {
 // response carrying {blockers: [...]} so the UI's blocker dialog renders
 // from a typed payload instead of an error-string parse. Other errors
 // (ErrAlreadyLua, codegen failures, disk errors) propagate as errors.
-func handleTriggersConvertToLua(_ json.RawMessage) (any, error) {
-	res, err := Current.ConvertToLua()
+//
+// Accepts an optional {backup: bool} param. Defaults to true (safer default
+// for the "modernize my map" workflow).
+func handleTriggersConvertToLua(params json.RawMessage) (any, error) {
+	opts := ConvertToLuaOptions{Backup: true}
+	if len(params) > 0 && string(params) != "null" {
+		if err := json.Unmarshal(params, &opts); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+	}
+	res, err := Current.ConvertToLuaWithOptions(opts)
 	if err != nil {
 		if errors.Is(err, ErrConvertBlocked) {
-			// Refuse + report — not a real error from the caller's POV.
 			return res, nil
 		}
 		return nil, err
 	}
 	return res, nil
+}
+
+// handleTriggersTranspilePreview returns the read-only diff payload the
+// Convert-to-Lua dialog renders before the user commits. No writes occur.
+func handleTriggersTranspilePreview(_ json.RawMessage) (any, error) {
+	preview, err := Current.TranspilePreview()
+	if err != nil {
+		return nil, err
+	}
+	return preview, nil
 }
 
 // handleTriggersSearch performs the cross-trigger fuzzy search and returns

@@ -694,13 +694,21 @@ func (a *App) CheckConvertToLua() (*ConvertToLuaResultDTO, error) {
 	return convertResultToDTO(res), nil
 }
 
-// ConvertMapToLua runs the full convert flow. Returns the blocker list
-// (instead of erroring) when blockers are found — same shape as Check,
-// letting the JS caller route to the blocker dialog without a separate
-// error-message-parse path. Other failure modes (ErrAlreadyLua, codegen
-// errors, disk errors) propagate as Go errors.
+// ConvertMapToLua runs the full convert flow with backup=true (the historical
+// default). New UIs should call ConvertMapToLuaWithOptions instead. Returns
+// the blocker list (instead of erroring) when blockers are found — same shape
+// as Check, letting the JS caller route to the blocker dialog without a
+// separate error-message-parse path. Other failure modes (ErrAlreadyLua,
+// codegen errors, disk errors) propagate as Go errors.
 func (a *App) ConvertMapToLua() (*ConvertToLuaResultDTO, error) {
-	res, err := forge.Current.ConvertToLua()
+	return a.ConvertMapToLuaWithOptions(true)
+}
+
+// ConvertMapToLuaWithOptions is the Phase-3.5 convert-flow entry. `backup`
+// is the only knob today; defaults are baked into ConvertToLuaOptions on the
+// Go side.
+func (a *App) ConvertMapToLuaWithOptions(backup bool) (*ConvertToLuaResultDTO, error) {
+	res, err := forge.Current.ConvertToLuaWithOptions(forge.ConvertToLuaOptions{Backup: backup})
 	if err != nil {
 		if errors.Is(err, forge.ErrConvertBlocked) {
 			return convertResultToDTO(res), nil
@@ -708,6 +716,44 @@ func (a *App) ConvertMapToLua() (*ConvertToLuaResultDTO, error) {
 		return nil, err
 	}
 	return convertResultToDTO(res), nil
+}
+
+// TranspileSectionDTO mirrors forge.TranspileSection — one diff entry the
+// review dialog renders.
+type TranspileSectionDTO struct {
+	ID         int32    `json:"id"`
+	Label      string   `json:"label"`
+	Kind       string   `json:"kind"`
+	Original   string   `json:"original"`
+	Transpiled string   `json:"transpiled"`
+	Errors     []string `json:"errors,omitempty"`
+}
+
+// TranspilePreviewDTO mirrors forge.TranspilePreview.
+type TranspilePreviewDTO struct {
+	Sections []TranspileSectionDTO `json:"sections"`
+}
+
+// GetTranspilePreview returns the read-only diff payload for the Convert-to-Lua
+// review dialog. The whole preview is rebuilt per call (the dialog opens
+// rarely; cache invalidation isn't worth the complexity).
+func (a *App) GetTranspilePreview() (*TranspilePreviewDTO, error) {
+	preview, err := forge.Current.TranspilePreview()
+	if err != nil {
+		return nil, err
+	}
+	out := &TranspilePreviewDTO{Sections: make([]TranspileSectionDTO, 0, len(preview.Sections))}
+	for _, s := range preview.Sections {
+		out.Sections = append(out.Sections, TranspileSectionDTO{
+			ID:         s.ID,
+			Label:      s.Label,
+			Kind:       s.Kind,
+			Original:   s.Original,
+			Transpiled: s.Transpiled,
+			Errors:     s.Errors,
+		})
+	}
+	return out, nil
 }
 
 // convertResultToDTO copies forge.ConvertToLuaCheckResult into the main-

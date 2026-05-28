@@ -62,6 +62,10 @@ export function ConvertMapToLua() {
   return window['go']['main']['App']['ConvertMapToLua']();
 }
 
+export function ConvertMapToLuaWithOptions(arg1) {
+  return window['go']['main']['App']['ConvertMapToLuaWithOptions'](arg1);
+}
+
 export function ConvertObject(arg1, arg2, arg3) {
   return window['go']['main']['App']['ConvertObject'](arg1, arg2, arg3);
 }
@@ -156,6 +160,10 @@ export function GetSelection() {
 
 export function GetTerrain() {
   return window['go']['main']['App']['GetTerrain']();
+}
+
+export function GetTranspilePreview() {
+  return window['go']['main']['App']['GetTranspilePreview']();
 }
 
 export function GetTrigger(arg1) {

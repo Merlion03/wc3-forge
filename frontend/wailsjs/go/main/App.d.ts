@@ -36,6 +36,8 @@ export function CloseMap():Promise<main.MapStatus>;
 
 export function ConvertMapToLua():Promise<main.ConvertToLuaResultDTO>;
 
+export function ConvertMapToLuaWithOptions(arg1:boolean):Promise<main.ConvertToLuaResultDTO>;
+
 export function ConvertObject(arg1:string,arg2:string,arg3:string):Promise<main.ConvertObjectResult>;
 
 export function CreateCustomObject(arg1:string,arg2:string,arg3:string):Promise<main.CreateCustomObjectResult>;
@@ -83,6 +85,8 @@ export function GetReforgedMode():Promise<boolean>;
 export function GetSelection():Promise<main.SelectionDTO>;
 
 export function GetTerrain():Promise<main.TerrainDTO>;
+
+export function GetTranspilePreview():Promise<main.TranspilePreviewDTO>;
 
 export function GetTrigger(arg1:number):Promise<main.TriggerDetailDTO>;
 
