@@ -1169,6 +1169,637 @@ func setTriggerVariable(s *Session, id int32, v wtg.Variable) error {
 	return nil
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2b1 — ECA mutators (add/delete/move/enable/set_param). All mutators
+// take an ecaPath (a sequence of child indices) so 2b2 can reuse the same
+// surface for nested ECAs without reshuffling. For 2b1 the picker only ever
+// addresses top-level ECAs, so paths are length-1 in practice.
+//
+// All mutators reach into wtg.Trigger.ECAs via resolveECA, which walks the
+// path step by step under s.mu and returns the parent slice + the trailing
+// index so the caller can mutate the slot in place. Encode reads from the
+// same in-memory slice, so a successful mutation is round-trip-byte-equal
+// with the wtg encoder Phase 2a shipped.
+// ---------------------------------------------------------------------------
+
+// resolveECA walks a *wtg.Trigger's ECA tree along ecaPath, returning the
+// parent slice + the trailing leaf index. The caller can read/write the leaf
+// at parent[idx]. Errors out when the path is empty, malformed, or runs off
+// the end of an actual children slice.
+//
+// Caller MUST hold s.mu (read or write, as appropriate for the operation).
+func resolveECA(tr *wtg.Trigger, ecaPath []int) (parent []wtg.ECA, idx int, err error) {
+	if tr == nil {
+		return nil, 0, fmt.Errorf("nil trigger")
+	}
+	if len(ecaPath) == 0 {
+		return nil, 0, fmt.Errorf("empty eca_path")
+	}
+	cur := tr.ECAs
+	for i, step := range ecaPath {
+		if step < 0 || step >= len(cur) {
+			return nil, 0, fmt.Errorf("eca_path[%d]=%d out of range (len=%d)", i, step, len(cur))
+		}
+		if i == len(ecaPath)-1 {
+			return cur, step, nil
+		}
+		cur = cur[step].Children
+	}
+	return nil, 0, fmt.Errorf("unreachable")
+}
+
+// validateECATypeForFunction confirms that `name` exists in TriggerData and
+// is defined in the section corresponding to ecaType. A TriggerActions
+// function added as an Event would silently misalign the parser on re-load;
+// the validation prevents that class of bug at the mutation entry point.
+func validateECATypeForFunction(td *wtg.TriggerData, ecaType wtg.ECAType, name string) error {
+	if td == nil {
+		return fmt.Errorf("trigger data snapshot unavailable")
+	}
+	if _, ok := td.Argc(name); !ok {
+		return fmt.Errorf("unknown function %q (not in TriggerData)", name)
+	}
+	sect := td.FunctionSection(name)
+	var want string
+	switch ecaType {
+	case wtg.ECAEvent:
+		want = "TriggerEvents"
+	case wtg.ECACondition:
+		want = "TriggerConditions"
+	case wtg.ECAAction:
+		want = "TriggerActions"
+	case wtg.ECACall:
+		want = "TriggerCalls"
+	default:
+		return fmt.Errorf("unknown eca_type %d", ecaType)
+	}
+	if sect != want {
+		return fmt.Errorf("function %q is in section %q, not %q (mismatched eca_type)", name, sect, want)
+	}
+	return nil
+}
+
+// buildDefaultECA builds a fresh ECA value with parameters seeded from
+// TriggerData's _Foo_Defaults companion (when present) and parameter slots
+// allocated per argc. Caller picks the ECAType.
+//
+// New parameters default to ParamPreset when the default value is non-empty
+// (defaults are preset/literal names like "Player00") or ParamInvalid (-1)
+// when the slot has no default — matching HiveWE's "user must fill" UI cue.
+func buildDefaultECA(td *wtg.TriggerData, ecaType wtg.ECAType, name string) wtg.ECA {
+	eca := wtg.ECA{
+		Type:    ecaType,
+		Name:    name,
+		Enabled: true,
+	}
+	n, _ := td.Argc(name)
+	if n == 0 {
+		return eca
+	}
+	defaults := td.FunctionDefaults(name)
+	argTypes := td.FunctionArgTypes(name)
+	eca.Parameters = make([]wtg.Parameter, n)
+	for i := 0; i < n; i++ {
+		def := ""
+		if i < len(defaults) {
+			def = defaults[i]
+		}
+		argType := ""
+		if i < len(argTypes) {
+			argType = argTypes[i]
+		}
+		eca.Parameters[i] = paramFromDefault(td, def, argType)
+	}
+	return eca
+}
+
+// paramFromDefault constructs a default Parameter for one slot. The default
+// token comes from `_Foo_Defaults`; argType is the slot's declared type
+// (`integer`, `player`, `unitcode`, …). Logic:
+//
+//   - Empty default → ParamInvalid, empty value (user must fill).
+//   - Default token is a [TriggerParams] key → ParamPreset with the preset
+//     name as Value (this is what HiveWE writes; the encoder re-emits the
+//     preset name and the engine looks it up at run time via the script).
+//   - Otherwise → ParamPreset fallback with the raw default text (matches
+//     HiveWE's "type a real / int directly" path — the GUI editor stores
+//     numeric literals in the preset slot since there's no dedicated
+//     "literal int" wire type).
+func paramFromDefault(td *wtg.TriggerData, def, argType string) wtg.Parameter {
+	_ = argType
+	if def == "" {
+		return wtg.Parameter{Type: wtg.ParamInvalid, Value: ""}
+	}
+	if rows, ok := td.Sections["TriggerParams"]; ok {
+		if _, ok := rows[def]; ok {
+			return wtg.Parameter{Type: wtg.ParamPreset, Value: def}
+		}
+	}
+	return wtg.Parameter{Type: wtg.ParamPreset, Value: def}
+}
+
+// AddECA appends a new ECA of the given type+name to the trigger's top-level
+// ECA list, or inserts it at `position` when 0 <= position <= len. position
+// = -1 means "append". Parameters are seeded from TriggerData defaults.
+//
+// Returns the path to the newly-inserted ECA (length 1 for top-level adds).
+// Mutates s.dirtyTriggers, records the command, fires entity-changed.
+func (s *Session) AddECA(triggerID int32, ecaType wtg.ECAType, name string, position int) ([]int, error) {
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	td := TriggerDataSnapshot()
+	if err := validateECATypeForFunction(td, ecaType, name); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("no map loaded")
+	}
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	if tr.IsScript || tr.IsComment {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("trigger %d is script/comment; cannot add ECAs", triggerID)
+	}
+	eca := buildDefaultECA(td, ecaType, name)
+	insertAt := len(tr.ECAs)
+	if position >= 0 && position <= len(tr.ECAs) {
+		insertAt = position
+	}
+	tr.ECAs = append(tr.ECAs, wtg.ECA{})
+	copy(tr.ECAs[insertAt+1:], tr.ECAs[insertAt:])
+	tr.ECAs[insertAt] = eca
+	wasDirty := s.anyDirtyLocked()
+	s.dirtyTriggers = true
+	s.recordCommand(&addECACmd{triggerID: triggerID, position: insertAt, saved: cloneECA(eca)})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	markDirtyAndNotify(s, wasDirty, historyChanged, EntityChange{Kind: "trigger", ID: uint32(triggerID), Field: "eca_add"})
+	return []int{insertAt}, nil
+}
+
+// DeleteECA removes the ECA at ecaPath from the trigger. The full ECA value
+// (including children) is captured in the Command for Undo to replay.
+func (s *Session) DeleteECA(triggerID int32, ecaPath []int) error {
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, ecaPath)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	saved := cloneECA(parent[idx])
+	newParent := append(parent[:idx], parent[idx+1:]...)
+	writeECAParent(tr, ecaPath[:len(ecaPath)-1], newParent)
+	wasDirty := s.anyDirtyLocked()
+	s.dirtyTriggers = true
+	s.recordCommand(&deleteECACmd{triggerID: triggerID, path: append([]int(nil), ecaPath...), saved: saved})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	markDirtyAndNotify(s, wasDirty, historyChanged, EntityChange{Kind: "trigger", ID: uint32(triggerID), Field: "eca_delete"})
+	return nil
+}
+
+// MoveECA reorders the ECA at ecaPath within its parent slice to newPosition.
+// newPosition is the post-removal target index in the same parent slice
+// (matches the .splice() semantics the JS side will use). No-op when the
+// move would leave the path unchanged.
+func (s *Session) MoveECA(triggerID int32, ecaPath []int, newPosition int) error {
+	if len(ecaPath) == 0 {
+		return fmt.Errorf("empty eca_path")
+	}
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, ecaPath)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	clamped := newPosition
+	if clamped < 0 {
+		clamped = 0
+	}
+	if clamped >= len(parent) {
+		clamped = len(parent) - 1
+	}
+	if clamped == idx {
+		s.mu.Unlock()
+		return nil
+	}
+	moved := parent[idx]
+	without := append(parent[:idx], parent[idx+1:]...)
+	without = append(without, wtg.ECA{})
+	copy(without[clamped+1:], without[clamped:])
+	without[clamped] = moved
+	writeECAParent(tr, ecaPath[:len(ecaPath)-1], without)
+	wasDirty := s.anyDirtyLocked()
+	s.dirtyTriggers = true
+	s.recordCommand(&moveECACmd{triggerID: triggerID, path: append([]int(nil), ecaPath...), oldIndex: idx, newIndex: clamped})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	markDirtyAndNotify(s, wasDirty, historyChanged, EntityChange{Kind: "trigger", ID: uint32(triggerID), Field: "eca_move"})
+	return nil
+}
+
+// SetECAEnabled toggles the per-ECA Enabled flag (HiveWE's right-click "Toggle
+// Enabled" — disabled ECAs are skipped at codegen but persist in the wtg).
+func (s *Session) SetECAEnabled(triggerID int32, ecaPath []int, enabled bool) error {
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, ecaPath)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if parent[idx].Enabled == enabled {
+		s.mu.Unlock()
+		return nil
+	}
+	parent[idx].Enabled = enabled
+	wasDirty := s.anyDirtyLocked()
+	s.dirtyTriggers = true
+	s.recordCommand(&setECAEnabledCmd{triggerID: triggerID, path: append([]int(nil), ecaPath...), oldVal: !enabled, newVal: enabled})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	markDirtyAndNotify(s, wasDirty, historyChanged, EntityChange{Kind: "trigger", ID: uint32(triggerID), Field: "eca_enabled"})
+	return nil
+}
+
+// SetParamValue updates one Parameter slot at (triggerID, ecaPath, paramIndex)
+// to (paramType, value). Clears HasSubParameter when set — the user is
+// replacing a sub-function with a literal/preset/variable. paramType must be
+// one of ParamPreset / ParamVariable / ParamString (the three "simple" flavors
+// 2b1 supports); ParamFunction is reserved for 2b2's sub-function builder.
+func (s *Session) SetParamValue(triggerID int32, ecaPath []int, paramIndex int, value string, paramType wtg.ParamType) error {
+	switch paramType {
+	case wtg.ParamPreset, wtg.ParamVariable, wtg.ParamString:
+		// ok
+	default:
+		return fmt.Errorf("paramType must be ParamPreset / ParamVariable / ParamString (got %d)", paramType)
+	}
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, ecaPath)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	eca := &parent[idx]
+	if paramIndex < 0 || paramIndex >= len(eca.Parameters) {
+		s.mu.Unlock()
+		return fmt.Errorf("paramIndex %d out of range (have %d)", paramIndex, len(eca.Parameters))
+	}
+	old := eca.Parameters[paramIndex]
+	if old.Type == paramType && old.Value == value && !old.HasSubParameter {
+		s.mu.Unlock()
+		return nil
+	}
+	savedOld := cloneParameter(old)
+	eca.Parameters[paramIndex] = wtg.Parameter{Type: paramType, Value: value}
+	wasDirty := s.anyDirtyLocked()
+	s.dirtyTriggers = true
+	s.recordCommand(&setParamValueCmd{
+		triggerID:  triggerID,
+		path:       append([]int(nil), ecaPath...),
+		paramIndex: paramIndex,
+		oldParam:   savedOld,
+		newParam:   wtg.Parameter{Type: paramType, Value: value},
+	})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	markDirtyAndNotify(s, wasDirty, historyChanged, EntityChange{Kind: "trigger", ID: uint32(triggerID), Field: "eca_param"})
+	return nil
+}
+
+// writeECAParent rewrites the parent slice at parentPath back into the
+// trigger's ECA tree. For top-level edits parentPath is empty and we just
+// replace tr.ECAs. For nested edits we walk down to the right Children slot
+// and assign there. Required because mutators capture parent as a slice
+// header — Go's append/copy mutations to a sub-slice don't necessarily
+// propagate back through the wtg.ECA value-type Children field.
+func writeECAParent(tr *wtg.Trigger, parentPath []int, newSlice []wtg.ECA) {
+	if len(parentPath) == 0 {
+		tr.ECAs = newSlice
+		return
+	}
+	cur := tr.ECAs
+	for i, step := range parentPath {
+		if i == len(parentPath)-1 {
+			cur[step].Children = newSlice
+			return
+		}
+		cur = cur[step].Children
+	}
+}
+
+// cloneECA deep-copies an ECA so saved Command snapshots survive future
+// mutations to the live tree.
+func cloneECA(e wtg.ECA) wtg.ECA {
+	out := e
+	if len(e.Parameters) > 0 {
+		out.Parameters = make([]wtg.Parameter, len(e.Parameters))
+		for i := range e.Parameters {
+			out.Parameters[i] = cloneParameter(e.Parameters[i])
+		}
+	}
+	if len(e.Children) > 0 {
+		out.Children = make([]wtg.ECA, len(e.Children))
+		for i := range e.Children {
+			out.Children[i] = cloneECA(e.Children[i])
+		}
+	}
+	return out
+}
+
+// cloneParameter deep-copies a Parameter — needed for SubParameter pointer
+// + ArrayIndex pointer, which would otherwise be shared between the live
+// tree and the Command snapshot.
+func cloneParameter(p wtg.Parameter) wtg.Parameter {
+	out := p
+	if p.SubParameter != nil {
+		sub := cloneECA(*p.SubParameter)
+		out.SubParameter = &sub
+	}
+	if p.ArrayIndex != nil {
+		ix := cloneParameter(*p.ArrayIndex)
+		out.ArrayIndex = &ix
+	}
+	return out
+}
+
+// parentOfECAPath returns the parent slice for the given path (one fewer
+// step than the leaf). For an empty path (top-level), returns tr.ECAs.
+func parentOfECAPath(tr *wtg.Trigger, parentPath []int) []wtg.ECA {
+	if len(parentPath) == 0 {
+		return tr.ECAs
+	}
+	cur := tr.ECAs
+	for i, step := range parentPath {
+		if step < 0 || step >= len(cur) {
+			return nil
+		}
+		if i == len(parentPath)-1 {
+			return cur[step].Children
+		}
+		cur = cur[step].Children
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// ECA Commands. Each captures the minimal Apply/Revert pair under s.mu.
+// ---------------------------------------------------------------------------
+
+type addECACmd struct {
+	triggerID int32
+	position  int
+	saved     wtg.ECA // the inserted ECA (deep-copied at record time)
+}
+
+func (c *addECACmd) Label() string { return "Add ECA" }
+func (c *addECACmd) Apply(s *Session) error {
+	ti := findTriggerIndex(s.triggers, c.triggerID)
+	if ti < 0 {
+		return fmt.Errorf("no trigger with id %d", c.triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	pos := c.position
+	if pos < 0 || pos > len(tr.ECAs) {
+		pos = len(tr.ECAs)
+	}
+	tr.ECAs = append(tr.ECAs, wtg.ECA{})
+	copy(tr.ECAs[pos+1:], tr.ECAs[pos:])
+	tr.ECAs[pos] = cloneECA(c.saved)
+	s.dirtyTriggers = true
+	return nil
+}
+func (c *addECACmd) Revert(s *Session) error {
+	ti := findTriggerIndex(s.triggers, c.triggerID)
+	if ti < 0 {
+		return fmt.Errorf("no trigger with id %d", c.triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	if c.position < 0 || c.position >= len(tr.ECAs) {
+		return fmt.Errorf("addECACmd revert: position %d out of range", c.position)
+	}
+	tr.ECAs = append(tr.ECAs[:c.position], tr.ECAs[c.position+1:]...)
+	s.dirtyTriggers = true
+	return nil
+}
+func (c *addECACmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "trigger", ID: uint32(c.triggerID), Field: "eca_add"}}
+}
+
+type deleteECACmd struct {
+	triggerID int32
+	path      []int
+	saved     wtg.ECA
+}
+
+func (c *deleteECACmd) Label() string { return "Delete ECA" }
+func (c *deleteECACmd) Apply(s *Session) error {
+	ti := findTriggerIndex(s.triggers, c.triggerID)
+	if ti < 0 {
+		return fmt.Errorf("no trigger with id %d", c.triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, c.path)
+	if err != nil {
+		return err
+	}
+	writeECAParent(tr, c.path[:len(c.path)-1], append(parent[:idx], parent[idx+1:]...))
+	s.dirtyTriggers = true
+	return nil
+}
+func (c *deleteECACmd) Revert(s *Session) error {
+	ti := findTriggerIndex(s.triggers, c.triggerID)
+	if ti < 0 {
+		return fmt.Errorf("no trigger with id %d", c.triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parentPath := c.path[:len(c.path)-1]
+	insertAt := c.path[len(c.path)-1]
+	parent := parentOfECAPath(tr, parentPath)
+	if parent == nil && len(parentPath) > 0 {
+		return fmt.Errorf("deleteECACmd revert: parent path missing")
+	}
+	if insertAt < 0 {
+		insertAt = 0
+	}
+	if insertAt > len(parent) {
+		insertAt = len(parent)
+	}
+	parent = append(parent, wtg.ECA{})
+	copy(parent[insertAt+1:], parent[insertAt:])
+	parent[insertAt] = cloneECA(c.saved)
+	writeECAParent(tr, parentPath, parent)
+	s.dirtyTriggers = true
+	return nil
+}
+func (c *deleteECACmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "trigger", ID: uint32(c.triggerID), Field: "eca_delete"}}
+}
+
+type moveECACmd struct {
+	triggerID int32
+	path      []int
+	oldIndex  int
+	newIndex  int
+}
+
+func (c *moveECACmd) Label() string { return "Reorder ECA" }
+func (c *moveECACmd) Apply(s *Session) error {
+	return swapECAIndex(s, c.triggerID, c.path, c.oldIndex, c.newIndex)
+}
+func (c *moveECACmd) Revert(s *Session) error {
+	return swapECAIndex(s, c.triggerID, c.path, c.newIndex, c.oldIndex)
+}
+func (c *moveECACmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "trigger", ID: uint32(c.triggerID), Field: "eca_move"}}
+}
+
+func swapECAIndex(s *Session, triggerID int32, path []int, from, to int) error {
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		return fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent := parentOfECAPath(tr, path[:len(path)-1])
+	if parent == nil {
+		return fmt.Errorf("swapECAIndex: parent path missing")
+	}
+	if from < 0 || from >= len(parent) {
+		return fmt.Errorf("swapECAIndex: from %d out of range", from)
+	}
+	moved := parent[from]
+	parent = append(parent[:from], parent[from+1:]...)
+	if to < 0 {
+		to = 0
+	}
+	if to > len(parent) {
+		to = len(parent)
+	}
+	parent = append(parent, wtg.ECA{})
+	copy(parent[to+1:], parent[to:])
+	parent[to] = moved
+	writeECAParent(tr, path[:len(path)-1], parent)
+	s.dirtyTriggers = true
+	return nil
+}
+
+type setECAEnabledCmd struct {
+	triggerID int32
+	path      []int
+	oldVal    bool
+	newVal    bool
+}
+
+func (c *setECAEnabledCmd) Label() string { return "Toggle ECA enabled" }
+func (c *setECAEnabledCmd) Apply(s *Session) error {
+	return setECAEnabledRaw(s, c.triggerID, c.path, c.newVal)
+}
+func (c *setECAEnabledCmd) Revert(s *Session) error {
+	return setECAEnabledRaw(s, c.triggerID, c.path, c.oldVal)
+}
+func (c *setECAEnabledCmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "trigger", ID: uint32(c.triggerID), Field: "eca_enabled"}}
+}
+
+func setECAEnabledRaw(s *Session, triggerID int32, path []int, val bool) error {
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		return fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, path)
+	if err != nil {
+		return err
+	}
+	parent[idx].Enabled = val
+	s.dirtyTriggers = true
+	return nil
+}
+
+type setParamValueCmd struct {
+	triggerID  int32
+	path       []int
+	paramIndex int
+	oldParam   wtg.Parameter
+	newParam   wtg.Parameter
+}
+
+func (c *setParamValueCmd) Label() string { return "Edit ECA parameter" }
+func (c *setParamValueCmd) Apply(s *Session) error {
+	return setParamValueRaw(s, c.triggerID, c.path, c.paramIndex, c.newParam)
+}
+func (c *setParamValueCmd) Revert(s *Session) error {
+	return setParamValueRaw(s, c.triggerID, c.path, c.paramIndex, c.oldParam)
+}
+func (c *setParamValueCmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "trigger", ID: uint32(c.triggerID), Field: "eca_param"}}
+}
+
+func setParamValueRaw(s *Session, triggerID int32, path []int, paramIndex int, p wtg.Parameter) error {
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		return fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, path)
+	if err != nil {
+		return err
+	}
+	eca := &parent[idx]
+	if paramIndex < 0 || paramIndex >= len(eca.Parameters) {
+		return fmt.Errorf("setParamValueRaw: paramIndex %d out of range", paramIndex)
+	}
+	eca.Parameters[paramIndex] = cloneParameter(p)
+	s.dirtyTriggers = true
+	return nil
+}
+
 // Compile-time guard that wct stays imported for package callers even if
 // goimports decides we don't need it (Save uses it).
 var _ = wct.File{}

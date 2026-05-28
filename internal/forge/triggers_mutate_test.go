@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/StephenSHorton/wc3-forge/internal/formats/wtg"
 )
 
 // loadFixtureSession copies a folder-backed map fixture into a tempdir and
@@ -270,5 +272,220 @@ func TestSetMapHeaderScript_HandRolledMap(t *testing.T) {
 	}
 	if string(got) != newContent {
 		t.Errorf("script content = %q, want %q", string(got), newContent)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2b1 — ECA mutator tests.
+// ---------------------------------------------------------------------------
+
+// guiTriggerForTest finds (or creates) a GUI trigger inside the fixture so the
+// ECA-mutator tests have something to append to. Returns the trigger id.
+func guiTriggerForTest(t *testing.T, s *Session) int32 {
+	t.Helper()
+	tt := s.Triggers()
+	if tt == nil {
+		t.Skip("no triggers in fixture")
+	}
+	for _, tr := range tt.Triggers {
+		if !tr.IsScript && !tr.IsComment {
+			return tr.ID
+		}
+	}
+	// No GUI trigger present — synthesize one under the first category.
+	if len(tt.Categories) == 0 {
+		t.Skip("no categories in fixture")
+	}
+	parent := tt.Categories[0].ID
+	id, err := s.AddGUITrigger("___wc3-forge-eca-test-trig___", parent)
+	if err != nil {
+		t.Fatalf("AddGUITrigger: %v", err)
+	}
+	return id
+}
+
+// TestAddECA_AppendsAndDirties — happy path: AddECA seeds defaults, dirty
+// flips, history records.
+func TestAddECA_AppendsAndDirties(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	// MapInitializationEvent is a stable arg-free event present in every
+	// snapshot of TriggerData.txt.
+	path, err := s.AddECA(id, 0 /*ECAEvent*/, "MapInitializationEvent", -1)
+	if err != nil {
+		t.Fatalf("AddECA: %v", err)
+	}
+	if len(path) != 1 {
+		t.Errorf("expected length-1 path, got %v", path)
+	}
+	if !s.IsDirty() {
+		t.Errorf("expected dirty after AddECA")
+	}
+	tr := s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
+	if len(tr.ECAs) == 0 || tr.ECAs[path[0]].Name != "MapInitializationEvent" {
+		t.Errorf("expected MapInitializationEvent at path %v, got %#v", path, tr.ECAs)
+	}
+}
+
+// TestAddECA_MismatchedTypeFails — adding a TriggerActions function as an
+// Event should fail validation.
+func TestAddECA_MismatchedTypeFails(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	// DoNothing is a TriggerActions entry — passing ECAEvent should error.
+	if _, err := s.AddECA(id, 0 /*ECAEvent*/, "DoNothing", -1); err == nil {
+		t.Errorf("expected error for mismatched ECA type")
+	}
+}
+
+// TestDeleteECA_RoundTrip — Add then Delete returns the slice to its
+// original length.
+func TestDeleteECA_RoundTrip(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	origLen := len(s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)].ECAs)
+	path, err := s.AddECA(id, 2 /*ECAAction*/, "DoNothing", -1)
+	if err != nil {
+		t.Fatalf("AddECA: %v", err)
+	}
+	if err := s.DeleteECA(id, path); err != nil {
+		t.Fatalf("DeleteECA: %v", err)
+	}
+	newLen := len(s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)].ECAs)
+	if newLen != origLen {
+		t.Errorf("ECA length after Add+Delete = %d, want %d", newLen, origLen)
+	}
+}
+
+// TestMoveECA_ReordersSiblings — add two ECAs then move the second to the
+// front; expect order to flip.
+func TestMoveECA_ReordersSiblings(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	// Clear existing ECAs by adding two known actions on top, then move.
+	pa, _ := s.AddECA(id, 2, "DoNothing", -1)
+	pb, _ := s.AddECA(id, 2, "CommentString", -1)
+	_ = pa
+	if err := s.MoveECA(id, pb, 0); err != nil {
+		t.Fatalf("MoveECA: %v", err)
+	}
+	ecas := s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)].ECAs
+	if len(ecas) < 2 || ecas[0].Name != "CommentString" {
+		t.Errorf("after move, expected CommentString first; got %v", namesOf(ecas))
+	}
+}
+
+func namesOf(ecas []wtg.ECA) []string {
+	out := make([]string, len(ecas))
+	for i, e := range ecas {
+		out[i] = e.Name
+	}
+	return out
+}
+
+// TestSetECAEnabled_Toggles — flipping enabled flips dirty + persists.
+func TestSetECAEnabled_Toggles(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	path, err := s.AddECA(id, 2, "DoNothing", -1)
+	if err != nil {
+		t.Fatalf("AddECA: %v", err)
+	}
+	if err := s.SetECAEnabled(id, path, false); err != nil {
+		t.Fatalf("SetECAEnabled: %v", err)
+	}
+	tr := s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
+	if tr.ECAs[path[0]].Enabled {
+		t.Errorf("expected enabled=false after toggle")
+	}
+}
+
+// TestSetParamValue_StringParam — write a string param into CommentString's
+// first slot; round-trip + undo restores.
+func TestSetParamValue_StringParam(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	path, err := s.AddECA(id, 2, "CommentString", -1)
+	if err != nil {
+		t.Fatalf("AddECA: %v", err)
+	}
+	if err := s.SetParamValue(id, path, 0, "hello world", 3 /*ParamString*/); err != nil {
+		t.Fatalf("SetParamValue: %v", err)
+	}
+	tr := s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
+	got := tr.ECAs[path[0]].Parameters[0]
+	if got.Value != "hello world" || int32(got.Type) != 3 {
+		t.Errorf("got %+v, want value='hello world' type=3", got)
+	}
+	if err := s.Undo(); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	tr = s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
+	if tr.ECAs[path[0]].Parameters[0].Value == "hello world" {
+		t.Errorf("undo did not revert param value")
+	}
+}
+
+// TestSetParamValue_RejectsFunctionType — Phase 2b1 explicitly does NOT
+// support paramType=ParamFunction; that's 2b2's surface.
+func TestSetParamValue_RejectsFunctionType(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	path, err := s.AddECA(id, 2, "CommentString", -1)
+	if err != nil {
+		t.Fatalf("AddECA: %v", err)
+	}
+	if err := s.SetParamValue(id, path, 0, "irrelevant", 2 /*ParamFunction*/); err == nil {
+		t.Errorf("expected error rejecting ParamFunction (Phase 2b2 territory)")
+	}
+}
+
+// TestAddECA_Undo — Add then Undo should remove the ECA AND restore dirty
+// state (single-action undo).
+func TestAddECA_Undo(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	origLen := len(s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)].ECAs)
+	if _, err := s.AddECA(id, 2, "DoNothing", -1); err != nil {
+		t.Fatalf("AddECA: %v", err)
+	}
+	if err := s.Undo(); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	if got := len(s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)].ECAs); got != origLen {
+		t.Errorf("after Undo, len=%d, want %d", got, origLen)
+	}
+}
+
+// TestAddECA_SaveReopen_Persists — verifies the new ECA round-trips through
+// wtg encode + reopen. Confirms the encoder accepts user-authored ECAs (the
+// existing wtg encode tests only cover Parse→Encode of pre-existing maps).
+func TestAddECA_SaveReopen_Persists(t *testing.T) {
+	s, tmp := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	if _, err := s.AddECA(id, 2, "DoNothing", -1); err != nil {
+		t.Fatalf("AddECA: %v", err)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	s2 := &Session{}
+	if err := s2.Open(tmp); err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	ti := findTriggerIndex(s2.Triggers(), id)
+	if ti < 0 {
+		t.Fatalf("trigger %d missing after reopen", id)
+	}
+	tr := s2.Triggers().Triggers[ti]
+	found := false
+	for _, e := range tr.ECAs {
+		if e.Name == "DoNothing" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("added DoNothing ECA did not survive save/reopen")
 	}
 }
