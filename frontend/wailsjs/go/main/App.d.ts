@@ -6,6 +6,16 @@ import {unitsdoo} from '../models';
 import {forge} from '../models';
 import {w3i} from '../models';
 
+export function AddCommentTrigger(arg1:string,arg2:number):Promise<main.TriggerMutationResultDTO>;
+
+export function AddGUITrigger(arg1:string,arg2:number):Promise<main.TriggerMutationResultDTO>;
+
+export function AddScriptTrigger(arg1:string,arg2:number):Promise<main.TriggerMutationResultDTO>;
+
+export function AddTriggerCategory(arg1:string,arg2:number):Promise<main.TriggerMutationResultDTO>;
+
+export function AddTriggerVariable(arg1:string,arg2:string,arg3:boolean,arg4:number,arg5:string):Promise<main.TriggerMutationResultDTO>;
+
 export function BeginUndoGroup(arg1:string):Promise<void>;
 
 export function CanRedo():Promise<boolean>;
@@ -25,6 +35,8 @@ export function CreateCustomUnit(arg1:string,arg2:string):Promise<main.CreateCus
 export function DeleteCustomObject(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteCustomUnit(arg1:string):Promise<void>;
+
+export function DeleteTriggerNode(arg1:number):Promise<main.TriggerMutationResultDTO>;
 
 export function DiscardTo(arg1:number):Promise<void>;
 
@@ -100,6 +112,8 @@ export function MapInfoGet():Promise<w3i.Info>;
 
 export function MoveDoodad(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
+export function MoveTriggerNode(arg1:number,arg2:number):Promise<main.TriggerMutationResultDTO>;
+
 export function MoveUnit(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
 export function NewWindow():Promise<void>;
@@ -114,6 +128,8 @@ export function OpenMapInNewWindow(arg1:string):Promise<void>;
 
 export function Redo():Promise<void>;
 
+export function RenameTriggerNode(arg1:number,arg2:string):Promise<main.TriggerMutationResultDTO>;
+
 export function RotateDoodad(arg1:number,arg2:number):Promise<void>;
 
 export function RotateUnit(arg1:number,arg2:number):Promise<void>;
@@ -126,6 +142,8 @@ export function ScaleUnit(arg1:number,arg2:number,arg3:number,arg4:number):Promi
 
 export function SelectUnit(arg1:number):Promise<main.SelectionDTO>;
 
+export function SetMapHeaderScript(arg1:string):Promise<main.TriggerMutationResultDTO>;
+
 export function SetObjectField(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.UnitObjectDetail>;
 
 export function SetReforgedMode(arg1:boolean):Promise<boolean>;
@@ -133,6 +151,18 @@ export function SetReforgedMode(arg1:boolean):Promise<boolean>;
 export function SetSelection(arg1:Array<main.SelectionItemDTO>):Promise<main.SelectionDTO>;
 
 export function SetSkyModel(arg1:string):Promise<string>;
+
+export function SetTriggerCustomText(arg1:number,arg2:string):Promise<main.TriggerMutationResultDTO>;
+
+export function SetTriggerDescription(arg1:number,arg2:string):Promise<main.TriggerMutationResultDTO>;
+
+export function SetTriggerEnabled(arg1:number,arg2:boolean):Promise<main.TriggerMutationResultDTO>;
+
+export function SetTriggerInitiallyOn(arg1:number,arg2:boolean):Promise<main.TriggerMutationResultDTO>;
+
+export function SetTriggerRunOnInit(arg1:number,arg2:boolean):Promise<main.TriggerMutationResultDTO>;
+
+export function SetTriggerVariable(arg1:number,arg2:string,arg3:string,arg4:boolean,arg5:number,arg6:string):Promise<main.TriggerMutationResultDTO>;
 
 export function SetUnitAnimation(arg1:number,arg2:string):Promise<void>;
 
