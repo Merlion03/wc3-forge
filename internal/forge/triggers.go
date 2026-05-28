@@ -91,15 +91,61 @@ func (s *Session) TriggersScripts() *wct.File {
 	return s.triggersWct
 }
 
-// loadTriggersForOpen is called from Session.Open AFTER the per-file reads
-// have happened. Sources both war3map.wtg + war3map.wct from src; if neither
-// is present and a script file (war3map.lua / war3map.j) IS, synthesizes a
-// hand-rolled-script "Map Header" entry.
-//
-// Returns the parsed (Triggers, wctFile) pair — caller swaps them into the
-// session under the write lock. Errors are logged + tolerated: a malformed
-// .wtg shouldn't fail the whole map open, since the rest of the editor still
-// works without trigger access.
+// loadTriggersForOpenV2 is the Phase 2a version of loadTriggersForOpen with
+// the extra return fields the Session needs to discriminate hand-rolled-script
+// maps at Save time (the boolean) and to know which script file to write
+// (the string). The legacy 2-return shape is preserved as a wrapper for any
+// caller still using it.
+func loadTriggersForOpenV2(src fileSource, isLuaMap bool) (*wtg.Triggers, *wct.File, bool, string) {
+	td := TriggerDataSnapshot()
+	if td == nil {
+		log.Printf("triggers: embedded snapshot unusable; trigger editor will be empty")
+		return nil, nil, false, ""
+	}
+	wtgBytes, hasWTG, err := src.read("war3map.wtg")
+	if err != nil {
+		log.Printf("triggers: read war3map.wtg: %v", err)
+	}
+	wctBytes, hasWCT, err := src.read("war3map.wct")
+	if err != nil {
+		log.Printf("triggers: read war3map.wct: %v", err)
+	}
+	var triggers *wtg.Triggers
+	var wctFile *wct.File
+	if hasWTG {
+		parsed, err := wtg.Parse(wtgBytes, td.ArgumentCounts)
+		if err != nil {
+			log.Printf("triggers: parse war3map.wtg: %v", err)
+		} else {
+			triggers = parsed
+		}
+	}
+	if hasWCT {
+		parsed, err := wct.Parse(wctBytes)
+		if err != nil {
+			log.Printf("triggers: parse war3map.wct: %v", err)
+		} else {
+			wctFile = parsed
+		}
+	}
+	if triggers != nil && wctFile != nil {
+		bindCustomTexts(triggers, wctFile)
+		return triggers, wctFile, false, ""
+	}
+	if triggers != nil {
+		return triggers, nil, false, ""
+	}
+	// No .wtg. If the map has a script source, synthesize a hand-rolled
+	// "Map Header" entry so the user can at least read it (and now: edit it).
+	if scriptPath, scriptBytes := readScriptSource(src, isLuaMap); scriptPath != "" {
+		return synthesizeHandRolledScriptTriggers(scriptPath, string(scriptBytes)), nil, true, scriptPath
+	}
+	return nil, nil, false, ""
+}
+
+// loadTriggersForOpen is the original 2-return wrapper, retained for any
+// test or external caller that wasn't migrated to V2. Discards the extra
+// hand-rolled-script metadata.
 func loadTriggersForOpen(src fileSource, isLuaMap bool) (*wtg.Triggers, *wct.File) {
 	td := TriggerDataSnapshot()
 	if td == nil {

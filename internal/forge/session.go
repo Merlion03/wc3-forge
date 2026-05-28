@@ -135,7 +135,7 @@ type Session struct {
 	strings          wts.Strings    // war3map.wts, for TRIGSTR_<n> resolution
 	gameplay         *miscdata.File // war3mapMisc.txt — per-map gameplay-constants overrides
 
-	// Trigger Editor data — Phase 1a (read-only). war3map.wtg is the GUI
+	// Trigger Editor data — Phase 2a (read-write). war3map.wtg is the GUI
 	// trigger tree (categories + variables + triggers + ECAs); war3map.wct
 	// holds the per-trigger custom-script blobs and the global JASS header.
 	// Open binds .wct entries onto their owning Trigger.CustomText via
@@ -144,9 +144,25 @@ type Session struct {
 	// script trigger holding the raw script text.
 	//
 	// Either can be nil — both are optional. The Trigger Editor handles nil
-	// gracefully (empty tree). Mutation lands in Phase 2a; no dirty flag yet.
+	// gracefully (empty tree).
 	triggers    *wtg.Triggers
 	triggersWct *wct.File
+
+	// triggerNextID is the per-session counter the mutators allocate from
+	// when creating a new trigger / category / variable. Initialized at Open
+	// to max(every existing id) + 1 so synthesized ids never collide with
+	// the parsed ones.
+	triggerNextID int32
+
+	// triggerIsHandRolled tracks whether the loaded map's triggers were
+	// synthesized by loadTriggersForOpen (no wtg, only a war3map.j/.lua).
+	// Save uses this to bypass the wtg/wct write path and instead echo the
+	// synthetic Map Header script entry's CustomText back into the script
+	// file. mapHeaderScriptName carries the chosen filename
+	// (war3map.lua | war3map.j).
+	triggerIsHandRolled    bool
+	mapHeaderScriptName    string
+	mapHeaderScriptDirty   bool
 
 	selection      SelectionState
 	listeners      []func(SelectionState)
@@ -183,7 +199,13 @@ type Session struct {
 	dirtyDestructibleMods bool
 	dirtyDoodadMods       bool
 	dirtyUpgradeMods      bool
-	dirtyListeners        []func(bool)
+	// dirtyTriggers tracks pending edits to the loaded map's wtg + wct
+	// (structural adds/deletes/renames, field-flag toggles, script-text
+	// edits). Save flushes both files atomically when set. Hand-rolled-script
+	// maps additionally bear mapHeaderScriptDirty for the script-source
+	// write path.
+	dirtyTriggers  bool
+	dirtyListeners []func(bool)
 
 	// Sky-model override: set by the Map Info → Sky picker (or any caller
 	// that wants to change the SetSkyModel call). nil = no pending change
@@ -444,7 +466,7 @@ func (s *Session) Open(path string) error {
 	// errors are logged but never fail the open (a malformed .wtg shouldn't
 	// block access to the rest of the map). We pass info.Lua so the
 	// hand-rolled-script synth picks the right script file when needed.
-	triggers, triggersWct := loadTriggersForOpen(src, info != nil && info.Lua)
+	triggers, triggersWct, isHandRolled, scriptName := loadTriggersForOpenV2(src, info != nil && info.Lua)
 
 	// Atomically swap state; close any previously-held source before stomping it.
 	s.mu.Lock()
@@ -470,6 +492,10 @@ func (s *Session) Open(path string) error {
 	s.gameplay = gameplay
 	s.triggers = triggers
 	s.triggersWct = triggersWct
+	s.triggerIsHandRolled = isHandRolled
+	s.mapHeaderScriptName = scriptName
+	s.mapHeaderScriptDirty = false
+	s.triggerNextID = computeNextTriggerID(triggers)
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	wasDirty := s.anyDirtyLocked()
 	s.dirtyUnits = false
@@ -484,6 +510,7 @@ func (s *Session) Open(path string) error {
 	s.dirtyDestructibleMods = false
 	s.dirtyDoodadMods = false
 	s.dirtyUpgradeMods = false
+	s.dirtyTriggers = false
 	// Reset history — previous map's undo stack must not leak across opens
 	// (creation_numbers would dangle and Revert would error). Mutating the
 	// slices directly under the existing write-lock; ClearHistory's own lock
@@ -552,6 +579,10 @@ func (s *Session) Close() {
 	s.gameplay = nil
 	s.triggers = nil
 	s.triggersWct = nil
+	s.triggerIsHandRolled = false
+	s.mapHeaderScriptName = ""
+	s.mapHeaderScriptDirty = false
+	s.triggerNextID = 0
 	s.selection = SelectionState{Items: nil, Primary: -1}
 	wasDirty := s.anyDirtyLocked()
 	s.dirtyUnits = false
@@ -566,6 +597,7 @@ func (s *Session) Close() {
 	s.dirtyDestructibleMods = false
 	s.dirtyDoodadMods = false
 	s.dirtyUpgradeMods = false
+	s.dirtyTriggers = false
 	hadHistory := len(s.history) > 0 || len(s.redoStack) > 0
 	s.history = nil
 	s.redoStack = nil
@@ -1743,7 +1775,8 @@ func (s *Session) anyDirtyLocked() bool {
 	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain ||
 		s.dirtyGameplay || s.dirtyUnitMods || s.dirtyItemMods ||
 		s.dirtyAbilityMods || s.dirtyBuffMods || s.dirtyDestructibleMods ||
-		s.dirtyDoodadMods || s.dirtyUpgradeMods
+		s.dirtyDoodadMods || s.dirtyUpgradeMods ||
+		s.dirtyTriggers || s.mapHeaderScriptDirty
 }
 
 // ---------------------------------------------------------------------------
@@ -1913,6 +1946,12 @@ func (s *Session) Save() error {
 	isLua := info != nil && info.Lua
 	saveTerrain := s.dirtyTerrain
 	saveGameplay := s.dirtyGameplay
+	saveTriggers := s.dirtyTriggers
+	saveMapHeader := s.mapHeaderScriptDirty
+	triggers := s.triggers
+	triggersWct := s.triggersWct
+	triggerHandRolled := s.triggerIsHandRolled
+	mapHeaderScriptName := s.mapHeaderScriptName
 	s.mu.Unlock()
 
 	if src == nil {
@@ -2009,6 +2048,77 @@ func (s *Session) Save() error {
 		if err := saveObjectMods(s, cfg, src); err != nil {
 			return err
 		}
+	}
+	// Trigger Editor saves. Hand-rolled-script maps bypass wtg/wct entirely
+	// and write straight to war3map.lua/.j; real wtg-backed maps write both
+	// files atomically (wtg first since wct's blob order depends on it).
+	//
+	// Skip if the loader synthesized but never edited the Map Header — the
+	// session-level dirty flag covers structural edits AND the script-text
+	// edit path; if neither fired, the in-memory representation already
+	// matches what's on disk.
+	if triggerHandRolled {
+		if saveMapHeader {
+			scriptName := mapHeaderScriptName
+			if scriptName == "" {
+				scriptName = "war3map.lua"
+				if !isLua {
+					scriptName = "war3map.j"
+				}
+			}
+			// The synthetic Map Header script trigger's CustomText is the
+			// authoritative source. loadTriggersForOpenV2 put one trigger
+			// at index 0; mutators preserved that invariant.
+			if triggers == nil || len(triggers.Triggers) == 0 {
+				return fmt.Errorf("hand-rolled-script map has no Map Header trigger to save")
+			}
+			content := triggers.Triggers[0].CustomText
+			if err := src.write(scriptName, []byte(content)); err != nil {
+				return fmt.Errorf("write %s: %w", scriptName, err)
+			}
+			s.mu.Lock()
+			s.mapHeaderScriptDirty = false
+			s.mu.Unlock()
+		}
+	} else if saveTriggers {
+		if triggers == nil {
+			return fmt.Errorf("dirtyTriggers set but no trigger tree loaded")
+		}
+		td := TriggerDataSnapshot()
+		var argc map[string]int
+		if td != nil {
+			argc = td.ArgumentCounts
+		}
+		wtgData, err := wtg.Encode(triggers, argc)
+		if err != nil {
+			return fmt.Errorf("encode war3map.wtg: %w", err)
+		}
+		if err := src.write("war3map.wtg", wtgData); err != nil {
+			return fmt.Errorf("write war3map.wtg: %w", err)
+		}
+		// wct is required for any map that has custom-script triggers OR
+		// a global JASS header. Allocate a default if the loaded map
+		// didn't ship one so newly-created script triggers persist.
+		wctFile := triggersWct
+		if wctFile == nil {
+			wctFile = &wct.File{Version: 0x80000004, SubVersion: 1}
+		}
+		// Re-derive the CustomTexts + RawSizes arrays from the in-memory
+		// trigger ordering so newly-added triggers + edited custom_text
+		// flow through. The encoder walks the wtg itself; this keeps the
+		// File's snapshot in sync for any caller that re-reads it.
+		wctFile.CustomTexts = collectOrderedCustomTexts(triggers, wctFile.IsPre131)
+		wctData, err := wct.Encode(wctFile, triggers)
+		if err != nil {
+			return fmt.Errorf("encode war3map.wct: %w", err)
+		}
+		if err := src.write("war3map.wct", wctData); err != nil {
+			return fmt.Errorf("write war3map.wct: %w", err)
+		}
+		s.mu.Lock()
+		s.dirtyTriggers = false
+		s.triggersWct = wctFile
+		s.mu.Unlock()
 	}
 	if pendingSky != nil {
 		scriptName := "war3map.j"
