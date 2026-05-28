@@ -126,10 +126,30 @@ export interface TriggerFunctionMeta {
   hint?: string
 }
 
+export interface TriggerPresetMeta {
+  name: string
+  type: string
+  value: string
+  display_name: string
+}
+
+export interface TriggerTypeMeta {
+  name: string
+  base_type?: string
+  display_name?: string
+  can_be_global?: boolean
+  can_compare?: boolean
+}
+
 export interface TriggerFunctionsMeta {
   functions: TriggerFunctionMeta[]
   categories?: Record<string, string>
   types?: Record<string, string>
+  // Phase 2b1 additions: enumerate every [TriggerParams] row and every
+  // [TriggerTypes] row so the picker + param-editor can build dropdowns
+  // without a per-click round-trip.
+  presets?: TriggerPresetMeta[]
+  type_meta?: TriggerTypeMeta[]
 }
 
 export interface TriggerMutationResult {
@@ -160,6 +180,15 @@ interface WailsApp {
   SetTriggerDescription: (id: number, text: string) => Promise<TriggerMutationResult>
   SetTriggerVariable: (id: number, name: string, varType: string, isArray: boolean, arraySize: number, initValue: string) => Promise<TriggerMutationResult>
   SetMapHeaderScript: (content: string) => Promise<TriggerMutationResult>
+  // Phase 2b1 — ECA / param mutation. ecaType: 0=event, 1=condition, 2=action,
+  // 3=call. paramType: 0=preset, 1=variable, 3=string (no 2=function in 2b1;
+  // sub-function building is 2b2's surface). ecaPath is a child-index path —
+  // length-1 for top-level ECAs the 2b1 UI addresses.
+  AddTriggerECA: (triggerID: number, ecaType: number, name: string, position: number) => Promise<TriggerMutationResult>
+  DeleteTriggerECA: (triggerID: number, ecaPath: number[]) => Promise<TriggerMutationResult>
+  MoveTriggerECA: (triggerID: number, ecaPath: number[], newPosition: number) => Promise<TriggerMutationResult>
+  SetTriggerECAEnabled: (triggerID: number, ecaPath: number[], enabled: boolean) => Promise<TriggerMutationResult>
+  SetTriggerParamValue: (triggerID: number, ecaPath: number[], paramIndex: number, value: string, paramType: number) => Promise<TriggerMutationResult>
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -226,6 +255,38 @@ export function SetTriggerVariable(id: number, name: string, varType: string, is
 }
 export function SetMapHeaderScript(content: string): Promise<TriggerMutationResult> {
   return app().SetMapHeaderScript(content)
+}
+
+// ECAType + ParamType constants — matches the Go-side wtg.ECAType /
+// wtg.ParamType enums. Kept here so call sites don't sprinkle magic numbers.
+export const ECAType = {
+  Event: 0,
+  Condition: 1,
+  Action: 2,
+  Call: 3,
+} as const
+export const ParamType = {
+  Invalid: -1,
+  Preset: 0,
+  Variable: 1,
+  Function: 2,
+  String: 3,
+} as const
+
+export function AddTriggerECA(triggerID: number, ecaType: number, name: string, position: number): Promise<TriggerMutationResult> {
+  return app().AddTriggerECA(triggerID, ecaType, name, position)
+}
+export function DeleteTriggerECA(triggerID: number, ecaPath: number[]): Promise<TriggerMutationResult> {
+  return app().DeleteTriggerECA(triggerID, ecaPath)
+}
+export function MoveTriggerECA(triggerID: number, ecaPath: number[], newPosition: number): Promise<TriggerMutationResult> {
+  return app().MoveTriggerECA(triggerID, ecaPath, newPosition)
+}
+export function SetTriggerECAEnabled(triggerID: number, ecaPath: number[], enabled: boolean): Promise<TriggerMutationResult> {
+  return app().SetTriggerECAEnabled(triggerID, ecaPath, enabled)
+}
+export function SetTriggerParamValue(triggerID: number, ecaPath: number[], paramIndex: number, value: string, paramType: number): Promise<TriggerMutationResult> {
+  return app().SetTriggerParamValue(triggerID, ecaPath, paramIndex, value, paramType)
 }
 
 // Stringify a parameter into a human-readable inline label. Mirrors
