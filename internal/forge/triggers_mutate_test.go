@@ -409,7 +409,7 @@ func TestSetParamValue_StringParam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddECA: %v", err)
 	}
-	if err := s.SetParamValue(id, path, 0, "hello world", 3 /*ParamString*/); err != nil {
+	if err := s.SetParamValue(id, path, []int{0}, "hello world", 3 /*ParamString*/); err != nil {
 		t.Fatalf("SetParamValue: %v", err)
 	}
 	tr := s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
@@ -426,17 +426,19 @@ func TestSetParamValue_StringParam(t *testing.T) {
 	}
 }
 
-// TestSetParamValue_RejectsFunctionType — Phase 2b1 explicitly does NOT
-// support paramType=ParamFunction; that's 2b2's surface.
-func TestSetParamValue_RejectsFunctionType(t *testing.T) {
+// TestSetParamValue_AcceptsFunctionType — Phase 2b2: ParamFunction is allowed.
+// The mutator writes Type=Function+Value=name + preserves any existing
+// SubParameter (callers compose the sub-function structure via
+// SetParamSubFunction separately when needed).
+func TestSetParamValue_AcceptsFunctionType(t *testing.T) {
 	s, _ := loadFixtureSession(t)
 	id := guiTriggerForTest(t, s)
 	path, err := s.AddECA(id, 2, "CommentString", -1)
 	if err != nil {
 		t.Fatalf("AddECA: %v", err)
 	}
-	if err := s.SetParamValue(id, path, 0, "irrelevant", 2 /*ParamFunction*/); err == nil {
-		t.Errorf("expected error rejecting ParamFunction (Phase 2b2 territory)")
+	if err := s.SetParamValue(id, path, []int{0}, "SomeCall", 2 /*ParamFunction*/); err != nil {
+		t.Errorf("expected ParamFunction to be accepted, got error: %v", err)
 	}
 }
 
@@ -454,6 +456,219 @@ func TestAddECA_Undo(t *testing.T) {
 	}
 	if got := len(s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)].ECAs); got != origLen {
 		t.Errorf("after Undo, len=%d, want %d", got, origLen)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2b2 — sub-function builder + paramPath tests.
+// ---------------------------------------------------------------------------
+
+// TestSetParamSubFunction_BuildsAndSaves — set a sub-function on a parameter
+// slot, save, reopen, confirm the sub-function survives + the inner Parameters
+// are seeded correctly from TriggerData defaults.
+func TestSetParamSubFunction_BuildsAndSaves(t *testing.T) {
+	s, tmp := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	// Use IfThenElseMultiple which takes a boolexpr — exactly the case the
+	// sub-function builder is designed for.
+	path, err := s.AddECA(id, 2 /*Action*/, "IfThenElse", -1)
+	if err != nil {
+		t.Fatalf("AddECA IfThenElseMultiple: %v", err)
+	}
+	// Set boolexpr slot to a sub-function. GetBooleanComparison is a stable
+	// [TriggerCalls] entry returning boolexpr.
+	if err := s.SetParamSubFunction(id, path, []int{0}, "GetBooleanAnd"); err != nil {
+		// If the snapshot doesn't have GetBooleanAnd, fall back to any
+		// boolexpr-returning call we can find.
+		td := TriggerDataSnapshot()
+		fallback := ""
+		if rows, ok := td.Sections["TriggerCalls"]; ok {
+			for k := range rows {
+				if k[0] == '_' {
+					continue
+				}
+				if td.FunctionReturnType(k) == "boolexpr" {
+					fallback = k
+					break
+				}
+			}
+		}
+		if fallback == "" {
+			t.Skipf("no TriggerCalls entry with return_type=boolexpr in TriggerData snapshot")
+		}
+		if err := s.SetParamSubFunction(id, path, []int{0}, fallback); err != nil {
+			t.Fatalf("SetParamSubFunction (%s): %v", fallback, err)
+		}
+	}
+	// Confirm in-memory.
+	tr := s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
+	p := tr.ECAs[path[0]].Parameters[0]
+	if !p.HasSubParameter || p.SubParameter == nil {
+		t.Fatalf("expected HasSubParameter+SubParameter, got %+v", p)
+	}
+	if p.Type != wtg.ParamFunction {
+		t.Errorf("expected Type=ParamFunction, got %d", p.Type)
+	}
+	// Save + reopen to confirm wtg encode survives the sub-parameter.
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	s2 := &Session{}
+	if err := s2.Open(tmp); err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	tr2 := s2.Triggers().Triggers[findTriggerIndex(s2.Triggers(), id)]
+	if len(tr2.ECAs) == 0 {
+		t.Fatalf("trigger has no ECAs after reopen")
+	}
+	var p2 wtg.Parameter
+	for _, e := range tr2.ECAs {
+		if e.Name == "IfThenElse" && len(e.Parameters) > 0 {
+			p2 = e.Parameters[0]
+			break
+		}
+	}
+	if !p2.HasSubParameter {
+		t.Errorf("sub-parameter did not survive save/reopen: %+v", p2)
+	}
+}
+
+// TestClearParamSubFunction_CollapsesBackToLiteral — set a sub-function then
+// clear it; expect HasSubParameter=false.
+func TestClearParamSubFunction_CollapsesBackToLiteral(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	path, err := s.AddECA(id, 2, "IfThenElse", -1)
+	if err != nil {
+		t.Fatalf("AddECA: %v", err)
+	}
+	td := TriggerDataSnapshot()
+	var subName string
+	if rows, ok := td.Sections["TriggerCalls"]; ok {
+		for k := range rows {
+			if k[0] == '_' {
+				continue
+			}
+			if td.FunctionReturnType(k) == "boolexpr" {
+				subName = k
+				break
+			}
+		}
+	}
+	if subName == "" {
+		t.Skip("no boolexpr call in snapshot")
+	}
+	if err := s.SetParamSubFunction(id, path, []int{0}, subName); err != nil {
+		t.Fatalf("SetParamSubFunction: %v", err)
+	}
+	if err := s.ClearParamSubFunction(id, path, []int{0}); err != nil {
+		t.Fatalf("ClearParamSubFunction: %v", err)
+	}
+	tr := s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
+	p := tr.ECAs[path[0]].Parameters[0]
+	if p.HasSubParameter {
+		t.Errorf("expected HasSubParameter=false after Clear, got %+v", p)
+	}
+}
+
+// TestSetParamArray_TogglesAndUndo — toggle array on, confirm ArrayIndex is
+// seeded; toggle off, confirm it clears; undo restores.
+func TestSetParamArray_TogglesAndUndo(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	path, err := s.AddECA(id, 2, "CommentString", -1)
+	if err != nil {
+		t.Fatalf("AddECA: %v", err)
+	}
+	// Enable array on slot 0.
+	if err := s.SetParamArray(id, path, []int{0}, true); err != nil {
+		t.Fatalf("SetParamArray on: %v", err)
+	}
+	tr := s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
+	p := tr.ECAs[path[0]].Parameters[0]
+	if !p.IsArray || p.ArrayIndex == nil {
+		t.Errorf("expected IsArray=true + ArrayIndex set, got %+v", p)
+	}
+	// Disable array.
+	if err := s.SetParamArray(id, path, []int{0}, false); err != nil {
+		t.Fatalf("SetParamArray off: %v", err)
+	}
+	tr = s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
+	p = tr.ECAs[path[0]].Parameters[0]
+	if p.IsArray || p.ArrayIndex != nil {
+		t.Errorf("expected IsArray=false + ArrayIndex=nil, got %+v", p)
+	}
+	// Undo (disable) → should re-enable.
+	if err := s.Undo(); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	tr = s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
+	if !tr.ECAs[path[0]].Parameters[0].IsArray {
+		t.Errorf("expected IsArray=true after Undo")
+	}
+}
+
+// TestSetParamValue_NestedPath — set a sub-function, then write into one of
+// its sub-parameters via paramPath [outerIdx, innerIdx].
+func TestSetParamValue_NestedPath(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	path, err := s.AddECA(id, 2, "IfThenElse", -1)
+	if err != nil {
+		t.Fatalf("AddECA: %v", err)
+	}
+	// Find a boolexpr-returning call that takes at least one parameter.
+	td := TriggerDataSnapshot()
+	var subName string
+	if rows, ok := td.Sections["TriggerCalls"]; ok {
+		for k := range rows {
+			if k[0] == '_' {
+				continue
+			}
+			if td.FunctionReturnType(k) == "boolexpr" {
+				if argc, _ := td.Argc(k); argc > 0 {
+					subName = k
+					break
+				}
+			}
+		}
+	}
+	if subName == "" {
+		t.Skip("no multi-arg boolexpr call in snapshot")
+	}
+	if err := s.SetParamSubFunction(id, path, []int{0}, subName); err != nil {
+		t.Fatalf("SetParamSubFunction: %v", err)
+	}
+	// Write into the sub-function's first inner parameter via path [0, 0].
+	if err := s.SetParamValue(id, path, []int{0, 0}, "test_nested", 3 /*ParamString*/); err != nil {
+		t.Fatalf("SetParamValue nested: %v", err)
+	}
+	tr := s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
+	p := tr.ECAs[path[0]].Parameters[0]
+	if !p.HasSubParameter || p.SubParameter == nil {
+		t.Fatalf("outer sub-parameter missing")
+	}
+	if len(p.SubParameter.Parameters) == 0 {
+		t.Fatalf("sub-parameter has no inner Parameters")
+	}
+	inner := p.SubParameter.Parameters[0]
+	if inner.Value != "test_nested" {
+		t.Errorf("inner Value=%q want test_nested", inner.Value)
+	}
+}
+
+// TestSetParamSubFunction_RejectsNonCalls — sub-function must come from
+// [TriggerCalls]; attempting to use a TriggerActions name should error.
+func TestSetParamSubFunction_RejectsNonCalls(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	path, err := s.AddECA(id, 2, "CommentString", -1)
+	if err != nil {
+		t.Fatalf("AddECA: %v", err)
+	}
+	// DoNothing is a TriggerActions entry; cannot be a sub-function.
+	if err := s.SetParamSubFunction(id, path, []int{0}, "DoNothing"); err == nil {
+		t.Errorf("expected error rejecting non-TriggerCalls sub-function name")
 	}
 }
 

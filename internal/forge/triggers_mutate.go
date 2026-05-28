@@ -1458,17 +1458,78 @@ func (s *Session) SetECAEnabled(triggerID int32, ecaPath []int, enabled bool) er
 	return nil
 }
 
-// SetParamValue updates one Parameter slot at (triggerID, ecaPath, paramIndex)
-// to (paramType, value). Clears HasSubParameter when set — the user is
-// replacing a sub-function with a literal/preset/variable. paramType must be
-// one of ParamPreset / ParamVariable / ParamString (the three "simple" flavors
-// 2b1 supports); ParamFunction is reserved for 2b2's sub-function builder.
-func (s *Session) SetParamValue(triggerID int32, ecaPath []int, paramIndex int, value string, paramType wtg.ParamType) error {
+// ---------------------------------------------------------------------------
+// Phase 2b2 — paramPath-based mutators.
+//
+// paramPath addressing convention (Option B from the phase plan):
+//
+//   paramPath[0] = the leaf ECA's Parameters[…] index
+//   paramPath[1] = SubParameter.Parameters[…] index  (one level deeper)
+//   paramPath[2] = SubParameter.SubParameter.Parameters[…] index
+//   …            = chain through Parameter.SubParameter.Parameters recursively
+//
+// This composes cleanly with the recursive ParamEditor on the frontend — each
+// nesting level adds one int to paramPath without touching ecaPath. The leaf
+// ECA continues to be addressed by ecaPath (through .Children for magic ECAs).
+//
+// SetParamValue / SetParamSubFunction / ClearParamSubFunction / SetParamArray
+// all use this addressing. The legacy 2b1 signature (paramIndex int) is
+// preserved as a backwards-compat wrapper at the MCP/Wails layer — it just
+// synthesizes paramPath = [paramIndex].
+// ---------------------------------------------------------------------------
+
+// resolveParameter walks an ECA's parameter tree along paramPath, returning a
+// pointer to the leaf Parameter the caller can read/write. Errors out when
+// paramPath is empty, has any out-of-range step, or steps into a non-existent
+// SubParameter chain.
+//
+// Caller MUST hold s.mu. The returned pointer is to the live parameter slot;
+// it remains valid only while s.mu is still held.
+func resolveParameter(eca *wtg.ECA, paramPath []int) (*wtg.Parameter, error) {
+	if eca == nil {
+		return nil, fmt.Errorf("nil eca")
+	}
+	if len(paramPath) == 0 {
+		return nil, fmt.Errorf("empty param_path")
+	}
+	step := paramPath[0]
+	if step < 0 || step >= len(eca.Parameters) {
+		return nil, fmt.Errorf("param_path[0]=%d out of range (have %d)", step, len(eca.Parameters))
+	}
+	cur := &eca.Parameters[step]
+	for i := 1; i < len(paramPath); i++ {
+		if !cur.HasSubParameter || cur.SubParameter == nil {
+			return nil, fmt.Errorf("param_path[%d]: parent has no sub_parameter", i)
+		}
+		sub := cur.SubParameter
+		s := paramPath[i]
+		if s < 0 || s >= len(sub.Parameters) {
+			return nil, fmt.Errorf("param_path[%d]=%d out of range (have %d)", i, s, len(sub.Parameters))
+		}
+		cur = &sub.Parameters[s]
+	}
+	return cur, nil
+}
+
+// SetParamValue updates the Parameter at (triggerID, ecaPath, paramPath) to a
+// (paramType, value) pair. Behavior matrix:
+//
+//   - paramType == ParamPreset / Variable / String → writes a literal slot;
+//     CLEARS HasSubParameter (sub-function replaced by a literal).
+//   - paramType == ParamFunction → writes Type=Function + Value=name AND
+//     leaves any existing SubParameter intact. The function name typically
+//     SHOULD match SubParameter.Name when used; the mutator does not enforce
+//     this so callers can split the operation (set name first, build the
+//     sub-function separately via SetParamSubFunction).
+//
+// Idempotent: same-value write is a no-op (no dirty flip, no history entry).
+// Preserves IsArray + ArrayIndex (those are addressed via SetParamArray).
+func (s *Session) SetParamValue(triggerID int32, ecaPath []int, paramPath []int, value string, paramType wtg.ParamType) error {
 	switch paramType {
-	case wtg.ParamPreset, wtg.ParamVariable, wtg.ParamString:
+	case wtg.ParamPreset, wtg.ParamVariable, wtg.ParamString, wtg.ParamFunction:
 		// ok
 	default:
-		return fmt.Errorf("paramType must be ParamPreset / ParamVariable / ParamString (got %d)", paramType)
+		return fmt.Errorf("paramType must be ParamPreset / ParamVariable / ParamString / ParamFunction (got %d)", paramType)
 	}
 	s.mu.Lock()
 	if !s.loaded {
@@ -1487,30 +1548,274 @@ func (s *Session) SetParamValue(triggerID int32, ecaPath []int, paramIndex int, 
 		return err
 	}
 	eca := &parent[idx]
-	if paramIndex < 0 || paramIndex >= len(eca.Parameters) {
+	p, err := resolveParameter(eca, paramPath)
+	if err != nil {
 		s.mu.Unlock()
-		return fmt.Errorf("paramIndex %d out of range (have %d)", paramIndex, len(eca.Parameters))
+		return err
 	}
-	old := eca.Parameters[paramIndex]
-	if old.Type == paramType && old.Value == value && !old.HasSubParameter {
+	old := cloneParameter(*p)
+	// For literal types, REPLACE the parameter wholesale (clearing any prior
+	// SubParameter). For ParamFunction, preserve SubParameter so the caller
+	// can immediately reference an existing sub-function structure.
+	var newParam wtg.Parameter
+	if paramType == wtg.ParamFunction {
+		newParam = wtg.Parameter{
+			Type:            wtg.ParamFunction,
+			Value:           value,
+			HasSubParameter: p.HasSubParameter,
+			SubParameter:    p.SubParameter,
+			Unknown:         p.Unknown,
+			IsArray:         p.IsArray,
+			ArrayIndex:      p.ArrayIndex,
+		}
+	} else {
+		newParam = wtg.Parameter{
+			Type:       paramType,
+			Value:      value,
+			IsArray:    p.IsArray,
+			ArrayIndex: p.ArrayIndex,
+		}
+	}
+	if paramEqual(*p, newParam) {
 		s.mu.Unlock()
 		return nil
 	}
-	savedOld := cloneParameter(old)
-	eca.Parameters[paramIndex] = wtg.Parameter{Type: paramType, Value: value}
+	*p = newParam
 	wasDirty := s.anyDirtyLocked()
 	s.dirtyTriggers = true
 	s.recordCommand(&setParamValueCmd{
-		triggerID:  triggerID,
-		path:       append([]int(nil), ecaPath...),
-		paramIndex: paramIndex,
-		oldParam:   savedOld,
-		newParam:   wtg.Parameter{Type: paramType, Value: value},
+		triggerID: triggerID,
+		ecaPath:   append([]int(nil), ecaPath...),
+		paramPath: append([]int(nil), paramPath...),
+		oldParam:  old,
+		newParam:  cloneParameter(newParam),
 	})
 	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
 	markDirtyAndNotify(s, wasDirty, historyChanged, EntityChange{Kind: "trigger", ID: uint32(triggerID), Field: "eca_param"})
 	return nil
+}
+
+// SetParamSubFunction replaces the parameter at (triggerID, ecaPath, paramPath)
+// with a sub-function call to subName. Seeds SubParameter.Parameters from
+// TriggerData defaults — same logic AddECA uses for top-level adds. Sets
+// HasSubParameter = true, Type = ParamFunction, Value = subName.
+//
+// Used by the recursive ParamEditor's "Function" tab. To collapse the
+// sub-function back to a literal, use ClearParamSubFunction.
+//
+// Validates that subName exists in [TriggerCalls] (sub-functions are always
+// calls — events/conditions/actions don't compose into a parameter slot).
+func (s *Session) SetParamSubFunction(triggerID int32, ecaPath []int, paramPath []int, subName string) error {
+	if subName == "" {
+		return fmt.Errorf("subName is required")
+	}
+	td := TriggerDataSnapshot()
+	if td == nil {
+		return fmt.Errorf("trigger data snapshot unavailable")
+	}
+	if td.FunctionSection(subName) != "TriggerCalls" {
+		return fmt.Errorf("function %q is not a [TriggerCalls] entry (sub-function must be a Call)", subName)
+	}
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, ecaPath)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	eca := &parent[idx]
+	p, err := resolveParameter(eca, paramPath)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	old := cloneParameter(*p)
+	sub := buildDefaultECA(td, wtg.ECACall, subName)
+	// Sub-parameter ECAs carry Type=ECACall on disk (HiveWE always emits 3
+	// for sub-parameters; the parser doesn't enforce this but Encode does).
+	sub.HasParameters = len(sub.Parameters) > 0
+	newParam := wtg.Parameter{
+		Type:            wtg.ParamFunction,
+		Value:           subName,
+		HasSubParameter: true,
+		SubParameter:    &sub,
+		IsArray:         p.IsArray,
+		ArrayIndex:      p.ArrayIndex,
+	}
+	*p = newParam
+	wasDirty := s.anyDirtyLocked()
+	s.dirtyTriggers = true
+	s.recordCommand(&setParamValueCmd{
+		triggerID: triggerID,
+		ecaPath:   append([]int(nil), ecaPath...),
+		paramPath: append([]int(nil), paramPath...),
+		oldParam:  old,
+		newParam:  cloneParameter(newParam),
+	})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	markDirtyAndNotify(s, wasDirty, historyChanged, EntityChange{Kind: "trigger", ID: uint32(triggerID), Field: "eca_param"})
+	return nil
+}
+
+// ClearParamSubFunction collapses a sub-function back to an empty preset value.
+// Used by the recursive ParamEditor's "remove function call" affordance. The
+// previous SubParameter is captured in the Command for Undo.
+func (s *Session) ClearParamSubFunction(triggerID int32, ecaPath []int, paramPath []int) error {
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, ecaPath)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	eca := &parent[idx]
+	p, err := resolveParameter(eca, paramPath)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if !p.HasSubParameter {
+		s.mu.Unlock()
+		return nil // already cleared
+	}
+	old := cloneParameter(*p)
+	newParam := wtg.Parameter{
+		Type:       wtg.ParamPreset,
+		Value:      "",
+		IsArray:    p.IsArray,
+		ArrayIndex: p.ArrayIndex,
+	}
+	*p = newParam
+	wasDirty := s.anyDirtyLocked()
+	s.dirtyTriggers = true
+	s.recordCommand(&setParamValueCmd{
+		triggerID: triggerID,
+		ecaPath:   append([]int(nil), ecaPath...),
+		paramPath: append([]int(nil), paramPath...),
+		oldParam:  old,
+		newParam:  cloneParameter(newParam),
+	})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	markDirtyAndNotify(s, wasDirty, historyChanged, EntityChange{Kind: "trigger", ID: uint32(triggerID), Field: "eca_param"})
+	return nil
+}
+
+// SetParamArray toggles array-mode on the parameter at (triggerID, ecaPath,
+// paramPath). When enabling, initializes ArrayIndex to an unfilled preset
+// Parameter (Type=ParamPreset, Value="0"). When disabling, clears ArrayIndex.
+//
+// Idempotent: same-value toggle is a no-op. Used by the recursive ParamEditor's
+// array checkbox; the array index slot itself is editable via the standard
+// SetParamValue / SetParamSubFunction recursing through the deeper paramPath
+// (paramPath[N+1] addresses into ArrayIndex's sub-parameter chain — but for
+// 2b2 the UI only walks SubParameter.Parameters for sub-function recursion;
+// the ArrayIndex slot uses its own dedicated mutator surface in the UI).
+func (s *Session) SetParamArray(triggerID int32, ecaPath []int, paramPath []int, isArray bool) error {
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, ecaPath)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	eca := &parent[idx]
+	p, err := resolveParameter(eca, paramPath)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if p.IsArray == isArray {
+		s.mu.Unlock()
+		return nil
+	}
+	old := cloneParameter(*p)
+	if isArray {
+		// Seed ArrayIndex if absent. Preset slot with Value="0" so encode + the
+		// recursive editor have a starting point.
+		if p.ArrayIndex == nil {
+			p.ArrayIndex = &wtg.Parameter{Type: wtg.ParamPreset, Value: "0"}
+		}
+		p.IsArray = true
+	} else {
+		p.IsArray = false
+		p.ArrayIndex = nil
+	}
+	newParam := cloneParameter(*p)
+	wasDirty := s.anyDirtyLocked()
+	s.dirtyTriggers = true
+	s.recordCommand(&setParamValueCmd{
+		triggerID: triggerID,
+		ecaPath:   append([]int(nil), ecaPath...),
+		paramPath: append([]int(nil), paramPath...),
+		oldParam:  old,
+		newParam:  newParam,
+	})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	markDirtyAndNotify(s, wasDirty, historyChanged, EntityChange{Kind: "trigger", ID: uint32(triggerID), Field: "eca_param"})
+	return nil
+}
+
+// paramEqual is the deep-equality check for the idempotency guard. Compares
+// Type, Value, IsArray, HasSubParameter; recurses into SubParameter +
+// ArrayIndex. ResolvedDisplay is ignored (it's the UI-only enrichment).
+func paramEqual(a, b wtg.Parameter) bool {
+	if a.Type != b.Type || a.Value != b.Value || a.IsArray != b.IsArray || a.HasSubParameter != b.HasSubParameter {
+		return false
+	}
+	if a.HasSubParameter {
+		if a.SubParameter == nil || b.SubParameter == nil {
+			return a.SubParameter == b.SubParameter
+		}
+		if a.SubParameter.Name != b.SubParameter.Name {
+			return false
+		}
+		if len(a.SubParameter.Parameters) != len(b.SubParameter.Parameters) {
+			return false
+		}
+		for i := range a.SubParameter.Parameters {
+			if !paramEqual(a.SubParameter.Parameters[i], b.SubParameter.Parameters[i]) {
+				return false
+			}
+		}
+	}
+	if a.IsArray {
+		if a.ArrayIndex == nil || b.ArrayIndex == nil {
+			return a.ArrayIndex == b.ArrayIndex
+		}
+		return paramEqual(*a.ArrayIndex, *b.ArrayIndex)
+	}
+	return true
 }
 
 // writeECAParent rewrites the parent slice at parentPath back into the
@@ -1763,39 +2068,40 @@ func setECAEnabledRaw(s *Session, triggerID int32, path []int, val bool) error {
 }
 
 type setParamValueCmd struct {
-	triggerID  int32
-	path       []int
-	paramIndex int
-	oldParam   wtg.Parameter
-	newParam   wtg.Parameter
+	triggerID int32
+	ecaPath   []int
+	paramPath []int
+	oldParam  wtg.Parameter
+	newParam  wtg.Parameter
 }
 
 func (c *setParamValueCmd) Label() string { return "Edit ECA parameter" }
 func (c *setParamValueCmd) Apply(s *Session) error {
-	return setParamValueRaw(s, c.triggerID, c.path, c.paramIndex, c.newParam)
+	return setParamValueRaw(s, c.triggerID, c.ecaPath, c.paramPath, c.newParam)
 }
 func (c *setParamValueCmd) Revert(s *Session) error {
-	return setParamValueRaw(s, c.triggerID, c.path, c.paramIndex, c.oldParam)
+	return setParamValueRaw(s, c.triggerID, c.ecaPath, c.paramPath, c.oldParam)
 }
 func (c *setParamValueCmd) Affected(s *Session) []EntityChange {
 	return []EntityChange{{Kind: "trigger", ID: uint32(c.triggerID), Field: "eca_param"}}
 }
 
-func setParamValueRaw(s *Session, triggerID int32, path []int, paramIndex int, p wtg.Parameter) error {
+func setParamValueRaw(s *Session, triggerID int32, ecaPath []int, paramPath []int, p wtg.Parameter) error {
 	ti := findTriggerIndex(s.triggers, triggerID)
 	if ti < 0 {
 		return fmt.Errorf("no trigger with id %d", triggerID)
 	}
 	tr := &s.triggers.Triggers[ti]
-	parent, idx, err := resolveECA(tr, path)
+	parent, idx, err := resolveECA(tr, ecaPath)
 	if err != nil {
 		return err
 	}
 	eca := &parent[idx]
-	if paramIndex < 0 || paramIndex >= len(eca.Parameters) {
-		return fmt.Errorf("setParamValueRaw: paramIndex %d out of range", paramIndex)
+	leaf, err := resolveParameter(eca, paramPath)
+	if err != nil {
+		return err
 	}
-	eca.Parameters[paramIndex] = cloneParameter(p)
+	*leaf = cloneParameter(p)
 	s.dirtyTriggers = true
 	return nil
 }
