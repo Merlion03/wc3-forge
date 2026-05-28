@@ -106,13 +106,21 @@ export function IsDirty():Promise<boolean>;
 
 export function LaunchInWC3():Promise<void>;
 
+export function ListCampaignLoadingScreens():Promise<Array<main.LoadingScreenOption>>;
+
 export function ListCommandButtons():Promise<Array<main.CommandButtonEntry>>;
 
 export function ListDoodads():Promise<Array<main.DoodadDTO>>;
 
+export function ListImportedLoadingScreens():Promise<Array<string>>;
+
 export function ListObjects(arg1:string):Promise<Array<main.UnitObjectListEntity>>;
 
 export function ListSkyModels():Promise<Array<main.SkyModelOption>>;
+
+export function ListSoundEnvironments():Promise<Array<main.LabeledOption>>;
+
+export function ListTilesetOptions():Promise<Array<main.LabeledOption>>;
 
 export function ListTilesets():Promise<Array<main.TilesetInfoDTO>>;
 
@@ -129,6 +137,8 @@ export function ListTriggerUnitInstances():Promise<Array<main.TriggerUnitInstanc
 export function ListUnitObjects():Promise<Array<main.UnitObjectListEntity>>;
 
 export function ListUnits():Promise<Array<main.UnitDTO>>;
+
+export function ListWeathers():Promise<Array<main.LabeledOption>>;
 
 export function LogJS(arg1:string):Promise<void>;
 

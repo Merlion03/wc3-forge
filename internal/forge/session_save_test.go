@@ -406,6 +406,208 @@ func TestApplyInfoUpdates_TypeMismatch(t *testing.T) {
 	}
 }
 
+// TestApplyInfoUpdates_OptionFlagBits asserts the option-tab checkboxes flip
+// the right bits of Flags.Raw AND that the named-bool mirror gets re-derived.
+// Encoders read Raw only, but Info consumers reading the bool view (e.g. the
+// JS infoToPending mapping) would otherwise see a stale value.
+func TestApplyInfoUpdates_OptionFlagBits(t *testing.T) {
+	info := &w3i.Info{}
+	updates := map[string]any{
+		"meleeMap":                   true,
+		"hideMinimapPreview":         true,
+		"maskedAreaPartiallyVisible": true,
+		"cliffShoreWaves":            true,
+		"rollingShoreWaves":          true,
+		"itemClassification":         true,
+		"waterTinting":               true,
+		"forceDefaultZoom":           true,
+		"forceMaxZoom":               true,
+		"forceMinZoom":               true,
+	}
+	changed := ApplyInfoUpdates(info, updates)
+	if changed != len(updates) {
+		t.Errorf("changed = %d, want %d", changed, len(updates))
+	}
+	// Spot-check Raw bits.
+	wantBits := uint32(0x000004 | 0x000001 | 0x000010 | 0x000800 | 0x001000 |
+		0x008000 | 0x010000 | 0x100000 | 0x200000 | 0x400000)
+	if info.Flags.Raw != wantBits {
+		t.Errorf("Flags.Raw = %#x, want %#x", info.Flags.Raw, wantBits)
+	}
+	// Named mirror must match — proves the DecodeFlags re-derivation fired.
+	if !info.Flags.MeleeMap || !info.Flags.ForceMinZoom || !info.Flags.WaterTinting {
+		t.Errorf("named-bool mirror not re-derived from Raw: %+v", info.Flags)
+	}
+	// Flipping off the bit should clear both Raw and the mirror.
+	off := ApplyInfoUpdates(info, map[string]any{"meleeMap": false})
+	if off != 1 {
+		t.Errorf("clear changed = %d, want 1", off)
+	}
+	if info.Flags.Raw&0x000004 != 0 {
+		t.Errorf("Flags.Raw still has melee bit set: %#x", info.Flags.Raw)
+	}
+	if info.Flags.MeleeMap {
+		t.Errorf("Flags.MeleeMap still true after clearing")
+	}
+}
+
+// TestApplyInfoUpdates_FogAndWater asserts the float/int/color wire shapes
+// are coerced correctly. JSON-decoded numbers come in as float64; the walker
+// must accept that without forcing every UI to send a typed value.
+func TestApplyInfoUpdates_FogAndWater(t *testing.T) {
+	info := &w3i.Info{Fog: w3i.Fog{Color: w3i.Color{A: 200}}}
+	updates := map[string]any{
+		"fogStyle":   float64(2),
+		"fogStartZ":  float64(1500),
+		"fogEndZ":    float64(8000.5),
+		"fogDensity": float64(0.42),
+		"fogColor":   map[string]any{"r": float64(255), "g": float64(64), "b": float64(0)},
+		"waterColor": map[string]any{"r": float64(10), "g": float64(20), "b": float64(30), "a": float64(180)},
+	}
+	changed := ApplyInfoUpdates(info, updates)
+	if changed != 6 {
+		t.Errorf("changed = %d, want 6", changed)
+	}
+	if info.Fog.Style != 2 {
+		t.Errorf("Fog.Style = %d, want 2", info.Fog.Style)
+	}
+	if info.Fog.StartZ != 1500 {
+		t.Errorf("Fog.StartZ = %v, want 1500", info.Fog.StartZ)
+	}
+	if info.Fog.EndZ != 8000.5 {
+		t.Errorf("Fog.EndZ = %v, want 8000.5", info.Fog.EndZ)
+	}
+	if info.Fog.Density != 0.42 {
+		t.Errorf("Fog.Density = %v, want 0.42", info.Fog.Density)
+	}
+	// Fog color: alpha not supplied in updates, must preserve prior value (200).
+	if info.Fog.Color != (w3i.Color{R: 255, G: 64, B: 0, A: 200}) {
+		t.Errorf("Fog.Color = %+v", info.Fog.Color)
+	}
+	// Water color: explicit alpha=180 wins.
+	if info.WaterColor != (w3i.Color{R: 10, G: 20, B: 30, A: 180}) {
+		t.Errorf("WaterColor = %+v", info.WaterColor)
+	}
+}
+
+// TestApplyInfoUpdates_WeatherIDPacking asserts FourCC strings round-trip to
+// the packed int32 the on-disk format uses, matching HiveWE's reinterpret_cast
+// trick. Empty string clears the field (= "no weather override").
+func TestApplyInfoUpdates_WeatherIDPacking(t *testing.T) {
+	info := &w3i.Info{}
+	ApplyInfoUpdates(info, map[string]any{"weatherID": "RAhr"})
+	wantInt := int32(uint32('R') | uint32('A')<<8 | uint32('h')<<16 | uint32('r')<<24)
+	if info.WeatherID != wantInt {
+		t.Errorf("WeatherID = %d, want %d", info.WeatherID, wantInt)
+	}
+	if Int32ToFourCC(info.WeatherID) != "RAhr" {
+		t.Errorf("Int32ToFourCC round-trip = %q, want %q", Int32ToFourCC(info.WeatherID), "RAhr")
+	}
+	// Clear.
+	ApplyInfoUpdates(info, map[string]any{"weatherID": ""})
+	if info.WeatherID != 0 {
+		t.Errorf("WeatherID after clear = %d, want 0", info.WeatherID)
+	}
+	if Int32ToFourCC(0) != "" {
+		t.Errorf("Int32ToFourCC(0) = %q, want empty", Int32ToFourCC(0))
+	}
+}
+
+// TestApplyInfoUpdates_CameraComplements asserts the {left,right,bottom,top}
+// wire shape maps to IVec4{A,B,C,D} exactly the way the parser stored them.
+func TestApplyInfoUpdates_CameraComplements(t *testing.T) {
+	info := &w3i.Info{}
+	updates := map[string]any{
+		"cameraComplements": map[string]any{
+			"left":   float64(7),
+			"right":  float64(8),
+			"bottom": float64(5),
+			"top":    float64(9),
+		},
+	}
+	changed := ApplyInfoUpdates(info, updates)
+	if changed != 1 {
+		t.Errorf("changed = %d, want 1", changed)
+	}
+	want := w3i.IVec4{A: 7, B: 8, C: 5, D: 9}
+	if info.CameraComplements != want {
+		t.Errorf("CameraComplements = %+v, want %+v", info.CameraComplements, want)
+	}
+}
+
+// TestApplyInfoUpdates_LoadingScreen asserts the three loading-screen modes
+// (default/campaign/imported) round-trip through the wire-key contract.
+func TestApplyInfoUpdates_LoadingScreen(t *testing.T) {
+	info := &w3i.Info{}
+	// Mode = campaign.
+	ApplyInfoUpdates(info, map[string]any{
+		"loadingScreenNumber":   float64(3),
+		"loadingScreenModel":    "",
+		"loadingScreenTitle":    "My Map",
+		"loadingScreenSubtitle": "A subtitle",
+		"loadingScreenText":     "Lorem ipsum.",
+	})
+	if info.LoadingScreen.Number != 3 {
+		t.Errorf("Number = %d, want 3", info.LoadingScreen.Number)
+	}
+	if info.LoadingScreen.Model != "" {
+		t.Errorf("Model = %q, want empty (campaign mode)", info.LoadingScreen.Model)
+	}
+	if info.LoadingScreen.Title != "My Map" {
+		t.Errorf("Title = %q", info.LoadingScreen.Title)
+	}
+	// Switch to imported mode.
+	ApplyInfoUpdates(info, map[string]any{
+		"loadingScreenNumber": float64(-1),
+		"loadingScreenModel":  "LoadingScreen\\Custom.mdx",
+	})
+	if info.LoadingScreen.Number != -1 {
+		t.Errorf("Number = %d, want -1", info.LoadingScreen.Number)
+	}
+	if info.LoadingScreen.Model != "LoadingScreen\\Custom.mdx" {
+		t.Errorf("Model = %q", info.LoadingScreen.Model)
+	}
+}
+
+// TestApplyInfoUpdates_AdvancedFields asserts the Reforged-tail Advanced-tab
+// fields (camera distances, supported modes, game data version) coerce
+// uint32-shaped JSON values.
+func TestApplyInfoUpdates_AdvancedFields(t *testing.T) {
+	info := &w3i.Info{}
+	updates := map[string]any{
+		"gameDataSet":        float64(2),
+		"supportedModes":     float64(3), // SD + HD bits
+		"gameDataVersion":    float64(10000),
+		"camDistanceDefault": float64(1650),
+		"camDistanceMax":     float64(3000),
+		"camDistanceMin":     float64(800),
+	}
+	changed := ApplyInfoUpdates(info, updates)
+	if changed != len(updates) {
+		t.Errorf("changed = %d, want %d", changed, len(updates))
+	}
+	if info.GameDataSet != 2 || info.SupportedModes != 3 || info.GameDataVersion != 10000 {
+		t.Errorf("Advanced int fields = %d/%d/%d", info.GameDataSet, info.SupportedModes, info.GameDataVersion)
+	}
+	if info.CamDistance != (w3i.CamDistance{Default: 1650, Max: 3000, Min: 800}) {
+		t.Errorf("CamDistance = %+v", info.CamDistance)
+	}
+}
+
+// TestApplyInfoUpdates_CustomLightTileset asserts the single-char tileset
+// code wire form ("L", "A", "") matches the on-disk byte field.
+func TestApplyInfoUpdates_CustomLightTileset(t *testing.T) {
+	info := &w3i.Info{CustomLightTileset: 'X'}
+	ApplyInfoUpdates(info, map[string]any{"customLightTileset": "L"})
+	if info.CustomLightTileset != 'L' {
+		t.Errorf("CustomLightTileset = %q, want 'L'", string(info.CustomLightTileset))
+	}
+	ApplyInfoUpdates(info, map[string]any{"customLightTileset": ""})
+	if info.CustomLightTileset != 0 {
+		t.Errorf("CustomLightTileset after clear = %d, want 0", info.CustomLightTileset)
+	}
+}
+
 // TestRotateUnit_Save_RoundTrip mirrors TestMoveUnit_Save_RoundTrip but for
 // rotation. Open, mutate Rotation, save, reopen, assert the new angle survived.
 func TestRotateUnit_Save_RoundTrip(t *testing.T) {

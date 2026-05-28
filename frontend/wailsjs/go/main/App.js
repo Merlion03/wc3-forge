@@ -202,6 +202,10 @@ export function LaunchInWC3() {
   return window['go']['main']['App']['LaunchInWC3']();
 }
 
+export function ListCampaignLoadingScreens() {
+  return window['go']['main']['App']['ListCampaignLoadingScreens']();
+}
+
 export function ListCommandButtons() {
   return window['go']['main']['App']['ListCommandButtons']();
 }
@@ -210,12 +214,24 @@ export function ListDoodads() {
   return window['go']['main']['App']['ListDoodads']();
 }
 
+export function ListImportedLoadingScreens() {
+  return window['go']['main']['App']['ListImportedLoadingScreens']();
+}
+
 export function ListObjects(arg1) {
   return window['go']['main']['App']['ListObjects'](arg1);
 }
 
 export function ListSkyModels() {
   return window['go']['main']['App']['ListSkyModels']();
+}
+
+export function ListSoundEnvironments() {
+  return window['go']['main']['App']['ListSoundEnvironments']();
+}
+
+export function ListTilesetOptions() {
+  return window['go']['main']['App']['ListTilesetOptions']();
 }
 
 export function ListTilesets() {
@@ -248,6 +264,10 @@ export function ListUnitObjects() {
 
 export function ListUnits() {
   return window['go']['main']['App']['ListUnits']();
+}
+
+export function ListWeathers() {
+  return window['go']['main']['App']['ListWeathers']();
 }
 
 export function LogJS(arg1) {

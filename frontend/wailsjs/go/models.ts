@@ -422,6 +422,34 @@ export namespace main {
 	        this.value = source["value"];
 	    }
 	}
+	export class LabeledOption {
+	    key: string;
+	    label: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LabeledOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.label = source["label"];
+	    }
+	}
+	export class LoadingScreenOption {
+	    index: number;
+	    label: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LoadingScreenOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.label = source["label"];
+	    }
+	}
 	export class MapStatus {
 	    loaded: boolean;
 	    path?: string;
