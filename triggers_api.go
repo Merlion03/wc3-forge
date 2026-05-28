@@ -514,6 +514,16 @@ func (a *App) SetTriggerParamArray(triggerID int32, ecaPath []int, paramPath []i
 	return a.buildTriggerMutationResult(triggerID), nil
 }
 
+// AddTriggerNestedECA appends a child ECA inside a magic-ECA parent (e.g. an
+// IfThenElseMultiple's Then-actions). groupID maps to ECA.Group; the magic
+// parent's renderer keys on group to bucket children.
+func (a *App) AddTriggerNestedECA(triggerID int32, parentPath []int, ecaType int, name string, groupID uint32) (TriggerMutationResultDTO, error) {
+	if _, err := forge.Current.AddNestedECA(triggerID, parentPath, wtg.ECAType(ecaType), name, groupID); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(triggerID), nil
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2b2 — entity instance picker Wails wrappers. Surface live-map data
 // (unit/destructable instances by creation_number, named regions, named

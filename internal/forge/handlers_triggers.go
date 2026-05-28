@@ -69,6 +69,9 @@ func registerTriggerHandlers(reg func(method string, h bridge.Handler)) {
 	reg("triggers.set_param_sub_function", handleTriggersSetParamSubFunction)
 	reg("triggers.clear_param_sub_function", handleTriggersClearParamSubFunction)
 	reg("triggers.set_param_array", handleTriggersSetParamArray)
+	// Phase 2b2 — nested ECA add. Targets magic-ECA children (IfThenElse Then-
+	// branch, ForLoop body, etc.). Independent from add_eca (top-level).
+	reg("triggers.add_nested_eca", handleTriggersAddNestedECA)
 	// Phase 2b2 — entity instance pickers. Live-map data for unit/destructible/
 	// region/camera entity-typed parameter slots.
 	reg("triggers.list_unit_instances", handleTriggersListUnitInstances)
@@ -951,6 +954,25 @@ func handleTriggersSetParamArray(params json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 	if err := Current.SetParamArray(p.TriggerID, p.ECAPath, p.ParamPath, p.IsArray); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.TriggerID), nil
+}
+
+type triggersAddNestedECAParams struct {
+	TriggerID  int32  `json:"trigger_id"`
+	ParentPath []int  `json:"parent_path"`
+	ECAType    int    `json:"eca_type"`
+	Name       string `json:"name"`
+	GroupID    uint32 `json:"group_id"`
+}
+
+func handleTriggersAddNestedECA(params json.RawMessage) (any, error) {
+	var p triggersAddNestedECAParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if _, err := Current.AddNestedECA(p.TriggerID, p.ParentPath, wtg.ECAType(p.ECAType), p.Name, p.GroupID); err != nil {
 		return nil, err
 	}
 	return buildMutationResponse(p.TriggerID), nil

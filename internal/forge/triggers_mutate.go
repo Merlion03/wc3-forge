@@ -1344,6 +1344,98 @@ func (s *Session) AddECA(triggerID int32, ecaType wtg.ECAType, name string, posi
 	return []int{insertAt}, nil
 }
 
+// AddNestedECA appends a child ECA inside an existing ECA's Children slice.
+// parentPath addresses the magic-ECA parent (e.g. IfThenElseMultiple at
+// path [3]); the new child is appended to parent.Children with its Group
+// field set to groupID. Used by the Trigger Editor's MagicECASection to add
+// rows under If-Conditions / Then-Actions / Else-Actions / Loop-Body.
+//
+// Returns the new child's full path (parentPath + [insertIdx]).
+func (s *Session) AddNestedECA(triggerID int32, parentPath []int, ecaType wtg.ECAType, name string, groupID uint32) ([]int, error) {
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	if len(parentPath) == 0 {
+		return nil, fmt.Errorf("AddNestedECA requires a non-empty parent_path; use AddECA for top-level")
+	}
+	td := TriggerDataSnapshot()
+	if err := validateECATypeForFunction(td, ecaType, name); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("no map loaded")
+	}
+	ti := findTriggerIndex(s.triggers, triggerID)
+	if ti < 0 {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("no trigger with id %d", triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, parentPath)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	child := buildDefaultECA(td, ecaType, name)
+	child.Group = groupID
+	parent[idx].Children = append(parent[idx].Children, child)
+	newPath := append(append([]int(nil), parentPath...), len(parent[idx].Children)-1)
+	wasDirty := s.anyDirtyLocked()
+	s.dirtyTriggers = true
+	s.recordCommand(&addNestedECACmd{triggerID: triggerID, parentPath: append([]int(nil), parentPath...), groupID: groupID, saved: cloneECA(child)})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	markDirtyAndNotify(s, wasDirty, historyChanged, EntityChange{Kind: "trigger", ID: uint32(triggerID), Field: "eca_add"})
+	return newPath, nil
+}
+
+type addNestedECACmd struct {
+	triggerID  int32
+	parentPath []int
+	groupID    uint32
+	saved      wtg.ECA
+}
+
+func (c *addNestedECACmd) Label() string { return "Add nested ECA" }
+func (c *addNestedECACmd) Apply(s *Session) error {
+	ti := findTriggerIndex(s.triggers, c.triggerID)
+	if ti < 0 {
+		return fmt.Errorf("no trigger with id %d", c.triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, c.parentPath)
+	if err != nil {
+		return err
+	}
+	saved := cloneECA(c.saved)
+	saved.Group = c.groupID
+	parent[idx].Children = append(parent[idx].Children, saved)
+	s.dirtyTriggers = true
+	return nil
+}
+func (c *addNestedECACmd) Revert(s *Session) error {
+	ti := findTriggerIndex(s.triggers, c.triggerID)
+	if ti < 0 {
+		return fmt.Errorf("no trigger with id %d", c.triggerID)
+	}
+	tr := &s.triggers.Triggers[ti]
+	parent, idx, err := resolveECA(tr, c.parentPath)
+	if err != nil {
+		return err
+	}
+	if len(parent[idx].Children) == 0 {
+		return nil
+	}
+	parent[idx].Children = parent[idx].Children[:len(parent[idx].Children)-1]
+	s.dirtyTriggers = true
+	return nil
+}
+func (c *addNestedECACmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "trigger", ID: uint32(c.triggerID), Field: "eca_add"}}
+}
+
 // DeleteECA removes the ECA at ecaPath from the trigger. The full ECA value
 // (including children) is captured in the Command for Undo to replay.
 func (s *Session) DeleteECA(triggerID int32, ecaPath []int) error {
