@@ -1,17 +1,20 @@
 <script lang="ts">
-  // Trigger Editor (Phase 1a — read-only). Modal dialog with a two-pane
-  // layout: left pane shows the category/trigger/variable tree built from
-  // ListTriggerTree(); right pane shows the selected node's details.
+  // Trigger Editor (Phase 2a — structural editing). Modal dialog with a
+  // two-pane layout: left pane shows the category/trigger/variable tree
+  // (drag-drop + context menu); right pane shows the selected node's
+  // details (CodeMirror for script triggers + Map Header, editable forms
+  // for variables/comments, read-only ECA tree for GUI triggers).
   //
-  // - GUI triggers render their Events / Conditions / Actions sections via
-  //   client-side label templating against GetTriggerFunctionsMeta.
-  // - Script triggers (custom-script or Map Header) render their custom_text
-  //   in a monospace <pre>. CodeMirror lands in Phase 2a.
-  // - Variables get a 5-field read-only display.
-  // - Comments show the description text.
+  // Phase 2a additions over 1a:
+  // - Toolbar: Add Category / Add GUI / Add Script / Add Comment / Add Var
+  // - Tree row hover: delete button + rename inline
+  // - HTML5 drag-drop to re-parent (refuses self + non-category targets)
+  // - Right-pane editors: CodeMirror 6 for script/Map Header, form for
+  //   variables, textarea for comment descriptions, toggle checkboxes for
+  //   GUI trigger flags (is_enabled, initially_on, run_on_initialization)
+  // - subscribes to wc3-forge:entity-changed to refresh on bridge mutations
   //
-  // No add/delete/rename/drag-drop in 1a — tree clicks only select. Phase 2a
-  // adds structural editing.
+  // Phase 2b1 will add ECA add/remove + parameter pickers on top of this.
 
   import { onMount, onDestroy, tick } from 'svelte'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
@@ -19,6 +22,21 @@
     ListTriggerTree,
     GetTrigger,
     GetTriggerFunctionsMeta,
+    AddTriggerCategory,
+    AddGUITrigger,
+    AddScriptTrigger,
+    AddCommentTrigger,
+    AddTriggerVariable,
+    DeleteTriggerNode,
+    RenameTriggerNode,
+    SetTriggerEnabled,
+    SetTriggerInitiallyOn,
+    SetTriggerRunOnInit,
+    MoveTriggerNode,
+    SetTriggerCustomText,
+    SetTriggerDescription,
+    SetTriggerVariable,
+    SetMapHeaderScript,
     paramLabel,
     renderECALabel,
     MAGIC_ECAS,
@@ -31,6 +49,11 @@
   } from './trigger-editor-bindings'
   import { parseWC3Color } from './wc3color'
   import * as Dialog from '$lib/components/ui/dialog'
+  import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view'
+  import { EditorState } from '@codemirror/state'
+  import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
+  import { javascript } from '@codemirror/lang-javascript'
+  import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 
   let {
     open = $bindable(false),
@@ -78,18 +101,32 @@
 
   // Subscribe to map-changed events so a Close/Open cycle refreshes the
   // tree without the user having to close/reopen the dialog manually.
+  // Also subscribe to entity-changed (Kind="trigger") so MCP-driven
+  // mutations refresh both the tree and the current detail.
   let unsubMapChanged: (() => void) | null = null
+  let unsubEntityChanged: (() => void) | null = null
   onMount(() => {
     void ensureFunctionsMeta()
     EventsOn('wc3-forge:map-changed', onMapChanged)
+    EventsOn('wc3-forge:entity-changed', onEntityChanged)
     unsubMapChanged = () => EventsOff('wc3-forge:map-changed')
+    unsubEntityChanged = () => EventsOff('wc3-forge:entity-changed')
   })
   onDestroy(() => {
     unsubMapChanged?.()
+    unsubEntityChanged?.()
+    destroyEditor()
   })
   function onMapChanged() {
     if (open) {
       void loadTree()
+    }
+  }
+  function onEntityChanged(payload: { kind?: string; id?: number; field?: string }) {
+    if (!open || payload?.kind !== 'trigger') return
+    void loadTree()
+    if (selectedId != null) {
+      void selectNode(selectedId)
     }
   }
 
@@ -394,6 +431,300 @@
   function fmtBool(v: boolean | undefined) {
     return v ? 'yes' : 'no'
   }
+
+  // ---------------------------------------------------------------------------
+  // Phase 2a — structural editing.
+  // ---------------------------------------------------------------------------
+
+  // selectedParent resolves the parent category id for "add under this node".
+  // If selectedId points at a category-like node, use it; if it points at a
+  // trigger/variable, use that node's parent. Falls back to -1 (root) when
+  // there's no selection.
+  function selectedParent(): number {
+    if (selectedId == null) return -1
+    const sel = tree.nodes.find((n) => n.id === selectedId)
+    if (!sel) return -1
+    if (isCategoryLike(sel)) return sel.id
+    return sel.parent_id
+  }
+
+  // Generic prompt-driven add. Returns true if the add succeeded.
+  async function promptAndAdd(kind: 'category' | 'gui' | 'script' | 'comment' | 'variable'): Promise<void> {
+    const label = kind === 'variable' ? 'variable name (udg_*)' : `${kind} name`
+    const name = window.prompt(`New ${label}:`, '')
+    if (!name) return
+    try {
+      const parent = selectedParent()
+      let res
+      if (kind === 'category') res = await AddTriggerCategory(name, parent)
+      else if (kind === 'gui') res = await AddGUITrigger(name, parent)
+      else if (kind === 'script') res = await AddScriptTrigger(name, parent)
+      else if (kind === 'comment') res = await AddCommentTrigger(name, parent)
+      else {
+        const varType = window.prompt('Variable type (integer/unit/real/boolean/...):', 'integer')
+        if (!varType) return
+        res = await AddTriggerVariable(name, varType, false, 0, '')
+      }
+      tree = res.tree
+      if (res.new_id != null) {
+        selectedId = res.new_id
+        if (res.detail) detail = res.detail
+      }
+    } catch (e) {
+      errorMsg = `Add failed: ${e}`
+    }
+  }
+
+  async function onClickDelete(id: number) {
+    if (!window.confirm('Delete this node?')) return
+    try {
+      const res = await DeleteTriggerNode(id)
+      tree = res.tree
+      if (selectedId === id) {
+        selectedId = null
+        detail = null
+      }
+    } catch (e) {
+      errorMsg = `Delete failed: ${e}`
+    }
+  }
+
+  async function onClickRename(id: number, currentName: string) {
+    const name = window.prompt('Rename to:', currentName)
+    if (!name || name === currentName) return
+    try {
+      const res = await RenameTriggerNode(id, name)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Rename failed: ${e}`
+    }
+  }
+
+  async function onToggleEnabled(id: number, next: boolean) {
+    try {
+      const res = await SetTriggerEnabled(id, next)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Toggle failed: ${e}`
+    }
+  }
+  async function onToggleInitiallyOn(id: number, next: boolean) {
+    try {
+      const res = await SetTriggerInitiallyOn(id, next)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Toggle failed: ${e}`
+    }
+  }
+  async function onToggleRunOnInit(id: number, next: boolean) {
+    try {
+      const res = await SetTriggerRunOnInit(id, next)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Toggle failed: ${e}`
+    }
+  }
+
+  // Drag-drop state. dragId is the id being dragged; dropTargetId highlights
+  // the would-be parent. The browser fires dragover continuously; we read
+  // dataTransfer at drop time to confirm the type is correct.
+  let dragId: number | null = $state(null)
+  let dropTargetId: number | null = $state(null)
+  function onDragStart(ev: DragEvent, id: number) {
+    dragId = id
+    if (ev.dataTransfer) {
+      ev.dataTransfer.effectAllowed = 'move'
+      ev.dataTransfer.setData('application/x-wc3-forge-trigger', String(id))
+    }
+  }
+  function onDragOver(ev: DragEvent, targetID: number, isCatLike: boolean) {
+    if (dragId == null) return
+    if (!isCatLike) return
+    if (dragId === targetID) return
+    ev.preventDefault()
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move'
+    dropTargetId = targetID
+  }
+  function onDragLeave() {
+    dropTargetId = null
+  }
+  async function onDrop(ev: DragEvent, targetID: number, isCatLike: boolean) {
+    ev.preventDefault()
+    if (dragId == null || !isCatLike) {
+      dragId = null
+      dropTargetId = null
+      return
+    }
+    const src = dragId
+    dragId = null
+    dropTargetId = null
+    if (src === targetID) return
+    try {
+      const res = await MoveTriggerNode(src, targetID)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Move failed: ${e}`
+    }
+  }
+  function onDragEnd() {
+    dragId = null
+    dropTargetId = null
+  }
+
+  // ---------------------------------------------------------------------------
+  // CodeMirror lifecycle. Mounted lazily when a script trigger / Map Header /
+  // comment / variable is selected. We rebuild the editor on selection change
+  // to keep state simple (no need for transaction-driven content swap).
+  // ---------------------------------------------------------------------------
+
+  let editorContainer: HTMLDivElement | null = $state(null)
+  let editor: EditorView | null = null
+  let editorBoundId: number | null = null
+  let pendingEditTimer: number | null = null
+
+  function destroyEditor() {
+    if (pendingEditTimer != null) {
+      clearTimeout(pendingEditTimer)
+      pendingEditTimer = null
+    }
+    editor?.destroy()
+    editor = null
+    editorBoundId = null
+  }
+
+  // mountEditor builds a CodeMirror view bound to the given trigger id +
+  // initial text. onCommit is called debounced after edits land.
+  function mountEditor(initialText: string, id: number, onCommit: (text: string) => Promise<void>) {
+    destroyEditor()
+    if (!editorContainer) return
+    editorBoundId = id
+    const state = EditorState.create({
+      doc: initialText,
+      extensions: [
+        lineNumbers(),
+        history(),
+        highlightActiveLine(),
+        syntaxHighlighting(defaultHighlightStyle),
+        keymap.of([...defaultKeymap, ...historyKeymap]),
+        // JS as a stand-in for JASS+Lua highlighting (similar enough for
+        // keywords). Proper Lua/JASS modes can land in Phase 2b1 if anyone
+        // wants the dedicated colors.
+        javascript(),
+        EditorView.updateListener.of((v) => {
+          if (!v.docChanged) return
+          if (pendingEditTimer != null) clearTimeout(pendingEditTimer)
+          const text = v.state.doc.toString()
+          pendingEditTimer = window.setTimeout(() => {
+            pendingEditTimer = null
+            void onCommit(text).catch((e) => {
+              errorMsg = `Save failed: ${e}`
+            })
+          }, 400)
+        }),
+        EditorView.theme({
+          '&': { backgroundColor: '#0e0e10', color: '#d4d4d8', fontSize: '12px' },
+          '.cm-content': { fontFamily: 'Consolas, "Courier New", monospace', padding: '8px 0' },
+          '.cm-gutters': { backgroundColor: '#18181b', color: '#71717a', border: 'none' },
+          '.cm-activeLine': { backgroundColor: 'rgba(255,255,255,0.04)' },
+        }),
+      ],
+    })
+    editor = new EditorView({ state, parent: editorContainer })
+  }
+
+  // commitEditorText pushes the editor's current contents through the right
+  // mutator for the current detail kind. Called by the editor's update
+  // listener (debounced) so the user gets a single round-trip per pause.
+  async function commitScriptText(id: number, text: string) {
+    // Map Header for hand-rolled-script maps reuses the dedicated mutator
+    // (which also flips the script-source dirty flag). We detect by the
+    // detail's classifier — the synthetic Map Header is a script trigger
+    // with parent_id == map id (we treat any script trigger whose name
+    // matches the script filename pattern as Map Header).
+    const isMapHeader = detail?.kind === 'trigger_script' && detail.trigger?.name?.match(/^war3map\.(lua|j)$/)
+    if (isMapHeader) {
+      await SetMapHeaderScript(text)
+    } else {
+      await SetTriggerCustomText(id, text)
+    }
+  }
+
+  // Re-mount the editor whenever the selected node changes to a kind that
+  // needs CodeMirror.
+  $effect(() => {
+    const _detail = detail
+    void tick().then(() => {
+      if (!editorContainer) return
+      if (!detail) {
+        destroyEditor()
+        return
+      }
+      if (detail.kind === 'trigger_script') {
+        const id = detail.trigger?.id ?? 0
+        if (editorBoundId === id) return
+        mountEditor(detail.trigger?.custom_text || '', id, (text) => commitScriptText(id, text))
+        return
+      }
+      if (detail.kind === 'trigger_comment') {
+        const id = detail.trigger?.id ?? 0
+        if (editorBoundId === id) return
+        // Comment description is plain text — we still use CodeMirror but
+        // disable language extensions. The same commit path lands.
+        mountEditor(detail.trigger?.description || '', id, async (text) => {
+          await SetTriggerDescription(id, text)
+        })
+        return
+      }
+      destroyEditor()
+    })
+  })
+
+  // Variable form state. Mirrors the wtg.Variable struct.
+  let varFormName = $state('')
+  let varFormType = $state('integer')
+  let varFormIsArray = $state(false)
+  let varFormArraySize = $state(0)
+  let varFormInitialValue = $state('')
+  let varFormBoundId: number | null = $state(null)
+
+  $effect(() => {
+    if (detail?.kind === 'variable' && detail.variable) {
+      const v = detail.variable
+      if (varFormBoundId !== v.id) {
+        varFormName = v.name
+        varFormType = v.type
+        varFormIsArray = !!v.is_array
+        varFormArraySize = v.array_size ?? 0
+        varFormInitialValue = v.initial_value || ''
+        varFormBoundId = v.id
+      }
+    } else {
+      varFormBoundId = null
+    }
+  })
+
+  async function onVarSave() {
+    if (varFormBoundId == null) return
+    try {
+      const res = await SetTriggerVariable(
+        varFormBoundId,
+        varFormName,
+        varFormType,
+        varFormIsArray,
+        varFormArraySize,
+        varFormInitialValue,
+      )
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Variable save failed: ${e}`
+    }
+  }
 </script>
 
 <Dialog.Root bind:open onOpenChange={(v) => { if (!v) onClose?.() }}>
@@ -402,11 +733,11 @@
       <Dialog.Title>Trigger Editor</Dialog.Title>
       <Dialog.Description>
         {#if tree.is_pre_131}
-          Pre-1.31 trigger format. Read-only in this build.
+          Pre-1.31 trigger format. Editing supported but legacy.
         {:else if tree.nodes.length === 0}
           No triggers in this map.
         {:else}
-          {tree.nodes.length} nodes. Read-only in this build (Phase 1a).
+          {tree.nodes.length} nodes.
         {/if}
       </Dialog.Description>
     </Dialog.Header>
@@ -414,6 +745,16 @@
     {#if errorMsg}
       <div class="px-4 py-2 bg-red-900/30 text-red-200 text-sm">{errorMsg}</div>
     {/if}
+
+    <!-- Toolbar: structural-add buttons. New items land under selectedParent(). -->
+    <div class="px-3 py-2 border-b flex gap-2 items-center bg-zinc-900/40">
+      <button class="te-toolbtn" title="Add category under selection" onclick={() => promptAndAdd('category')}>+ Category</button>
+      <button class="te-toolbtn" title="Add GUI trigger under selection" onclick={() => promptAndAdd('gui')}>+ GUI</button>
+      <button class="te-toolbtn" title="Add custom-script trigger under selection" onclick={() => promptAndAdd('script')}>+ Script</button>
+      <button class="te-toolbtn" title="Add comment trigger under selection" onclick={() => promptAndAdd('comment')}>+ Comment</button>
+      <button class="te-toolbtn" title="Add global variable" onclick={() => promptAndAdd('variable')}>+ Variable</button>
+      <span class="text-zinc-500 text-xs ml-auto">Drag nodes to reorganize · right-click for actions</span>
+    </div>
 
     <div class="flex-1 flex min-h-0">
       <!-- Left pane: tree -->
@@ -424,18 +765,40 @@
           <div class="px-3 py-2 text-zinc-500 text-sm">(empty)</div>
         {/if}
         {#each visibleRows as row (row.node.id)}
-          <button
-            class="te-row {selectedId === row.node.id ? 'te-row-sel' : ''}"
-            style="padding-left: {8 + row.depth * 14}px"
-            onclick={() => {
-              selectNode(row.node.id)
-              if (isCategoryLike(row.node)) toggleCollapse(row.node)
-            }}
-            title={row.node.description || row.node.name}
+          <div
+            class="te-row-wrap {dropTargetId === row.node.id ? 'te-row-drop' : ''}"
+            draggable={!isCategoryLike(row.node) || row.node.kind !== 'map'}
+            ondragstart={(ev) => onDragStart(ev, row.node.id)}
+            ondragover={(ev) => onDragOver(ev, row.node.id, isCategoryLike(row.node))}
+            ondragleave={onDragLeave}
+            ondrop={(ev) => onDrop(ev, row.node.id, isCategoryLike(row.node))}
+            ondragend={onDragEnd}
           >
-            <span class="te-icon">{iconFor(row.node)}</span>
-            <span class="te-name {row.node.is_enabled === false ? 'te-disabled' : ''}">{row.node.name}</span>
-          </button>
+            <button
+              class="te-row {selectedId === row.node.id ? 'te-row-sel' : ''}"
+              style="padding-left: {8 + row.depth * 14}px"
+              onclick={() => {
+                selectNode(row.node.id)
+                if (isCategoryLike(row.node)) toggleCollapse(row.node)
+              }}
+              oncontextmenu={(ev) => {
+                ev.preventDefault()
+                // Minimalist context menu: rename + delete. Future Phase 2a
+                // polish: a proper popup with the toolbar actions.
+                const action = window.prompt('Action: r=rename, d=delete (cancel to abort)', 'r')
+                if (action === 'r') void onClickRename(row.node.id, row.node.name)
+                else if (action === 'd') void onClickDelete(row.node.id)
+              }}
+              title={row.node.description || row.node.name}
+            >
+              <span class="te-icon">{iconFor(row.node)}</span>
+              <span class="te-name {row.node.is_enabled === false ? 'te-disabled' : ''}">{row.node.name}</span>
+            </button>
+            <span class="te-row-actions">
+              <button class="te-row-act" title="Rename" onclick={(e) => { e.stopPropagation(); void onClickRename(row.node.id, row.node.name) }}>✎</button>
+              <button class="te-row-act" title="Delete" onclick={(e) => { e.stopPropagation(); void onClickDelete(row.node.id) }}>×</button>
+            </span>
+          </div>
         {/each}
       </div>
 
@@ -456,22 +819,29 @@
           </div>
         {:else if detail.kind === 'variable'}
           {@const v = detail.variable!}
-          <div class="px-4 py-3 space-y-1 text-sm">
+          <div class="px-4 py-3 space-y-3 text-sm">
             <div class="text-zinc-300 text-lg">{v.name}</div>
-            <div class="grid grid-cols-[140px_1fr] gap-y-1 text-zinc-400 mt-2">
-              <div>type</div><div class="text-zinc-200">{v.type}</div>
-              <div>is_array</div><div class="text-zinc-200">{fmtBool(v.is_array)}</div>
-              <div>array_size</div><div class="text-zinc-200">{v.array_size ?? 0}</div>
-              <div>is_initialized</div><div class="text-zinc-200">{fmtBool(v.is_initialized)}</div>
-              <div>initial_value</div><div class="text-zinc-200 break-all">{v.initial_value || '(none)'}</div>
+            <div class="grid grid-cols-[140px_1fr] gap-y-2 items-center">
+              <label for="var-name" class="text-zinc-400">name</label>
+              <input id="var-name" class="te-input" bind:value={varFormName} />
+              <label for="var-type" class="text-zinc-400">type</label>
+              <input id="var-type" class="te-input" bind:value={varFormType} />
+              <label for="var-isarr" class="text-zinc-400">is_array</label>
+              <label class="text-zinc-200"><input id="var-isarr" type="checkbox" bind:checked={varFormIsArray} /> array</label>
+              <label for="var-size" class="text-zinc-400">array_size</label>
+              <input id="var-size" type="number" class="te-input" bind:value={varFormArraySize} disabled={!varFormIsArray} />
+              <label for="var-init" class="text-zinc-400">initial_value</label>
+              <input id="var-init" class="te-input" bind:value={varFormInitialValue} />
             </div>
+            <button class="te-toolbtn" onclick={() => void onVarSave()}>Save variable</button>
           </div>
         {:else if detail.kind === 'trigger_comment'}
           {@const t = detail.trigger!}
           <div class="px-4 py-3">
             <div class="text-zinc-300 text-lg">{t.name}</div>
             <div class="text-zinc-500 text-sm mb-2">Comment · id={t.id}</div>
-            <pre class="te-script">{t.description || '(empty)'}</pre>
+            <div bind:this={editorContainer} class="te-editor"></div>
+            <div class="text-zinc-500 text-xs mt-2">Edits auto-save 400 ms after typing stops.</div>
           </div>
         {:else if detail.kind === 'trigger_script'}
           {@const t = detail.trigger!}
@@ -480,11 +850,14 @@
             {#if t.description}
               <div class="text-zinc-500 text-sm mb-2">{t.description}</div>
             {/if}
-            <div class="text-zinc-500 text-xs mb-2">
-              Script trigger · id={t.id} ·
-              enabled={fmtBool(t.is_enabled)} · initially_on={fmtBool(t.initially_on)}
+            <div class="text-zinc-500 text-xs mb-2 flex gap-3 items-center">
+              <span>Script trigger · id={t.id}</span>
+              <label><input type="checkbox" checked={t.is_enabled} onchange={(e) => void onToggleEnabled(t.id, e.currentTarget.checked)} /> enabled</label>
+              <label><input type="checkbox" checked={t.initially_on} onchange={(e) => void onToggleInitiallyOn(t.id, e.currentTarget.checked)} /> initially_on</label>
+              <label><input type="checkbox" checked={t.run_on_initialization} onchange={(e) => void onToggleRunOnInit(t.id, e.currentTarget.checked)} /> run_on_init</label>
             </div>
-            <pre class="te-script">{@html highlightScript(t.custom_text || '')}</pre>
+            <div bind:this={editorContainer} class="te-editor"></div>
+            <div class="text-zinc-500 text-xs mt-2">Edits auto-save 400 ms after typing stops.</div>
           </div>
         {:else if detail.kind === 'trigger_gui'}
           {@const t = detail.trigger!}
@@ -495,10 +868,11 @@
               {#if t.description}
                 <div class="text-zinc-500 text-sm">{t.description}</div>
               {/if}
-              <div class="text-zinc-500 text-xs">
-                GUI trigger · id={t.id} · enabled={fmtBool(t.is_enabled)} ·
-                initially_on={fmtBool(t.initially_on)} ·
-                run_on_init={fmtBool(t.run_on_initialization)}
+              <div class="text-zinc-500 text-xs flex gap-3 items-center">
+                <span>GUI trigger · id={t.id}</span>
+                <label><input type="checkbox" checked={t.is_enabled} onchange={(e) => void onToggleEnabled(t.id, e.currentTarget.checked)} /> enabled</label>
+                <label><input type="checkbox" checked={t.initially_on} onchange={(e) => void onToggleInitiallyOn(t.id, e.currentTarget.checked)} /> initially_on</label>
+                <label><input type="checkbox" checked={t.run_on_initialization} onchange={(e) => void onToggleRunOnInit(t.id, e.currentTarget.checked)} /> run_on_init</label>
               </div>
             </div>
 
@@ -601,21 +975,79 @@
   .te-eca-magic { color: #a5b4fc; font-style: italic; }
   .te-eca-empty { padding: 4px 10px; color: #71717a; font-size: 12px; font-style: italic; }
 
-  .te-script {
-    font-family: "Consolas", "Courier New", monospace;
-    font-size: 12px;
-    line-height: 1.4;
-    background: #0e0e10;
-    color: #d4d4d8;
-    padding: 10px;
-    border-radius: 4px;
-    overflow: auto;
-    white-space: pre;
-    max-height: calc(85vh - 200px);
-  }
+  /* .te-script was the Phase 1a <pre>-based viewer; CodeMirror now owns
+     script + comment rendering, but the class is kept as a hook in case a
+     future phase reintroduces a read-only viewer fallback. */
   /* These are emitted by highlightScript via {@html}; not scoped — keep
      globals so the inline classes match. */
   :global(.te-kw) { color: #c084fc; }
   :global(.te-str) { color: #86efac; }
   :global(.te-cmt) { color: #71717a; font-style: italic; }
+
+  /* Phase 2a — toolbar + row actions + editor + form input styles. */
+  .te-toolbtn {
+    padding: 4px 10px;
+    background: #27272a;
+    color: #d4d4d8;
+    border: 1px solid #3f3f46;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .te-toolbtn:hover { background: #3f3f46; }
+  .te-row-wrap {
+    position: relative;
+  }
+  .te-row-wrap .te-row-actions {
+    position: absolute;
+    right: 4px;
+    top: 2px;
+    display: none;
+    gap: 2px;
+  }
+  .te-row-wrap:hover .te-row-actions {
+    display: inline-flex;
+  }
+  .te-row-act {
+    background: transparent;
+    border: 0;
+    color: #71717a;
+    padding: 1px 4px;
+    cursor: pointer;
+    font-size: 11px;
+    border-radius: 2px;
+  }
+  .te-row-act:hover {
+    background: rgba(255,255,255,0.08);
+    color: #fbbf24;
+  }
+  .te-row-drop {
+    outline: 1px dashed #60a5fa;
+    outline-offset: -1px;
+    background: rgba(96, 165, 250, 0.08);
+  }
+  .te-editor {
+    border: 1px solid #27272a;
+    border-radius: 4px;
+    overflow: hidden;
+    max-height: calc(85vh - 280px);
+    min-height: 200px;
+  }
+  :global(.te-editor .cm-editor) {
+    height: 100%;
+    max-height: calc(85vh - 280px);
+  }
+  :global(.te-editor .cm-scroller) {
+    overflow: auto;
+  }
+  .te-input {
+    background: #0e0e10;
+    color: #e4e4e7;
+    border: 1px solid #27272a;
+    padding: 4px 8px;
+    font-size: 13px;
+    border-radius: 4px;
+    width: 100%;
+  }
+  .te-input:disabled { opacity: 0.4; }
 </style>
