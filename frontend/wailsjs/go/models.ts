@@ -741,10 +741,50 @@ export namespace main {
 	        this.hint = source["hint"];
 	    }
 	}
+	export class TriggerTypeMetaDTO {
+	    name: string;
+	    base_type?: string;
+	    display_name?: string;
+	    can_be_global?: boolean;
+	    can_compare?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerTypeMetaDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.base_type = source["base_type"];
+	        this.display_name = source["display_name"];
+	        this.can_be_global = source["can_be_global"];
+	        this.can_compare = source["can_compare"];
+	    }
+	}
+	export class TriggerPresetMetaDTO {
+	    name: string;
+	    type: string;
+	    value: string;
+	    display_name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerPresetMetaDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.value = source["value"];
+	        this.display_name = source["display_name"];
+	    }
+	}
 	export class TriggerFunctionsMetaDTO {
 	    functions: TriggerFunctionMetaDTO[];
 	    categories?: Record<string, string>;
 	    types?: Record<string, string>;
+	    presets?: TriggerPresetMetaDTO[];
+	    type_meta?: TriggerTypeMetaDTO[];
 	
 	    static createFrom(source: any = {}) {
 	        return new TriggerFunctionsMetaDTO(source);
@@ -755,6 +795,8 @@ export namespace main {
 	        this.functions = this.convertValues(source["functions"], TriggerFunctionMetaDTO);
 	        this.categories = source["categories"];
 	        this.types = source["types"];
+	        this.presets = this.convertValues(source["presets"], TriggerPresetMetaDTO);
+	        this.type_meta = this.convertValues(source["type_meta"], TriggerTypeMetaDTO);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -875,6 +917,8 @@ export namespace main {
 		    return a;
 		}
 	}
+	
+	
 	
 	
 	export class UnitDTO {

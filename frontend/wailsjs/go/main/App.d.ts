@@ -14,6 +14,8 @@ export function AddScriptTrigger(arg1:string,arg2:number):Promise<main.TriggerMu
 
 export function AddTriggerCategory(arg1:string,arg2:number):Promise<main.TriggerMutationResultDTO>;
 
+export function AddTriggerECA(arg1:number,arg2:number,arg3:string,arg4:number):Promise<main.TriggerMutationResultDTO>;
+
 export function AddTriggerVariable(arg1:string,arg2:string,arg3:boolean,arg4:number,arg5:string):Promise<main.TriggerMutationResultDTO>;
 
 export function BeginUndoGroup(arg1:string):Promise<void>;
@@ -35,6 +37,8 @@ export function CreateCustomUnit(arg1:string,arg2:string):Promise<main.CreateCus
 export function DeleteCustomObject(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteCustomUnit(arg1:string):Promise<void>;
+
+export function DeleteTriggerECA(arg1:number,arg2:Array<number>):Promise<main.TriggerMutationResultDTO>;
 
 export function DeleteTriggerNode(arg1:number):Promise<main.TriggerMutationResultDTO>;
 
@@ -112,6 +116,8 @@ export function MapInfoGet():Promise<w3i.Info>;
 
 export function MoveDoodad(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
+export function MoveTriggerECA(arg1:number,arg2:Array<number>,arg3:number):Promise<main.TriggerMutationResultDTO>;
+
 export function MoveTriggerNode(arg1:number,arg2:number):Promise<main.TriggerMutationResultDTO>;
 
 export function MoveUnit(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
@@ -156,9 +162,13 @@ export function SetTriggerCustomText(arg1:number,arg2:string):Promise<main.Trigg
 
 export function SetTriggerDescription(arg1:number,arg2:string):Promise<main.TriggerMutationResultDTO>;
 
+export function SetTriggerECAEnabled(arg1:number,arg2:Array<number>,arg3:boolean):Promise<main.TriggerMutationResultDTO>;
+
 export function SetTriggerEnabled(arg1:number,arg2:boolean):Promise<main.TriggerMutationResultDTO>;
 
 export function SetTriggerInitiallyOn(arg1:number,arg2:boolean):Promise<main.TriggerMutationResultDTO>;
+
+export function SetTriggerParamValue(arg1:number,arg2:Array<number>,arg3:number,arg4:string,arg5:number):Promise<main.TriggerMutationResultDTO>;
 
 export function SetTriggerRunOnInit(arg1:number,arg2:boolean):Promise<main.TriggerMutationResultDTO>;
 

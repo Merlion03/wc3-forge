@@ -18,6 +18,10 @@ export function AddTriggerCategory(arg1, arg2) {
   return window['go']['main']['App']['AddTriggerCategory'](arg1, arg2);
 }
 
+export function AddTriggerECA(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['AddTriggerECA'](arg1, arg2, arg3, arg4);
+}
+
 export function AddTriggerVariable(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['AddTriggerVariable'](arg1, arg2, arg3, arg4, arg5);
 }
@@ -60,6 +64,10 @@ export function DeleteCustomObject(arg1, arg2) {
 
 export function DeleteCustomUnit(arg1) {
   return window['go']['main']['App']['DeleteCustomUnit'](arg1);
+}
+
+export function DeleteTriggerECA(arg1, arg2) {
+  return window['go']['main']['App']['DeleteTriggerECA'](arg1, arg2);
 }
 
 export function DeleteTriggerNode(arg1) {
@@ -214,6 +222,10 @@ export function MoveDoodad(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['MoveDoodad'](arg1, arg2, arg3, arg4);
 }
 
+export function MoveTriggerECA(arg1, arg2, arg3) {
+  return window['go']['main']['App']['MoveTriggerECA'](arg1, arg2, arg3);
+}
+
 export function MoveTriggerNode(arg1, arg2) {
   return window['go']['main']['App']['MoveTriggerNode'](arg1, arg2);
 }
@@ -302,12 +314,20 @@ export function SetTriggerDescription(arg1, arg2) {
   return window['go']['main']['App']['SetTriggerDescription'](arg1, arg2);
 }
 
+export function SetTriggerECAEnabled(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetTriggerECAEnabled'](arg1, arg2, arg3);
+}
+
 export function SetTriggerEnabled(arg1, arg2) {
   return window['go']['main']['App']['SetTriggerEnabled'](arg1, arg2);
 }
 
 export function SetTriggerInitiallyOn(arg1, arg2) {
   return window['go']['main']['App']['SetTriggerInitiallyOn'](arg1, arg2);
+}
+
+export function SetTriggerParamValue(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['SetTriggerParamValue'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function SetTriggerRunOnInit(arg1, arg2) {
