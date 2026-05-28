@@ -146,13 +146,16 @@ func TestCheckConvertToLua_PureJassScriptTriggerNotBlocked(t *testing.T) {
 }
 
 // TestCheckConvertToLua_VJassScriptTriggerBlocks asserts an is_script trigger
-// with a vJASS `library` keyword IS a blocker.
+// with a vJASS `struct` keyword IS a blocker.
+//
+// Phase 2 deliberately stopped blocking `library` (it's preprocessed away).
+// We pivoted this test to `struct`, which is unblocked by Phase 3 work.
 func TestCheckConvertToLua_VJassScriptTriggerBlocks(t *testing.T) {
 	tr := guiOnlyTriggers()
 	tr.Triggers = append(tr.Triggers, wtg.Trigger{
 		Classifier: wtg.ClassifierScript, ID: 11, ParentID: 1,
 		Name: "VJassThing", IsEnabled: true, InitiallyOn: true, IsScript: true,
-		CustomText: "library Foo\n    function bar takes nothing returns nothing\n    endfunction\nendlibrary\n",
+		CustomText: "struct Foo\n    integer x\nendstruct\n",
 	})
 	tr.Elements = append(tr.Elements, wtg.ElementRef{Kind: wtg.ElementKindTrigger, Index: 1})
 	dir := writeConvertFixture(t, tr)
@@ -177,6 +180,32 @@ func TestCheckConvertToLua_VJassScriptTriggerBlocks(t *testing.T) {
 	}
 	if convertRes == nil || len(convertRes.Blockers) != 1 {
 		t.Errorf("ConvertToLua refused but did not return blocker list: %+v", convertRes)
+	}
+}
+
+// TestCheckConvertToLua_LibraryScriptTriggerNoLongerBlocks asserts that
+// after Phase 2 a script trigger whose body is a vJASS `library` (no
+// struct/module/interface/define) is NOT a blocker — it's handled by
+// PreprocessLibScope.
+func TestCheckConvertToLua_LibraryScriptTriggerNoLongerBlocks(t *testing.T) {
+	tr := guiOnlyTriggers()
+	tr.Triggers = append(tr.Triggers, wtg.Trigger{
+		Classifier: wtg.ClassifierScript, ID: 11, ParentID: 1,
+		Name: "LibraryOnly", IsEnabled: true, InitiallyOn: true, IsScript: true,
+		CustomText: "library Foo\n    private function bar takes nothing returns nothing\n        call DoNothing()\n    endfunction\nendlibrary\n",
+	})
+	tr.Elements = append(tr.Elements, wtg.ElementRef{Kind: wtg.ElementKindTrigger, Index: 1})
+	dir := writeConvertFixture(t, tr)
+	s := &Session{}
+	if err := s.Open(dir); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	res, err := s.CheckConvertToLua()
+	if err != nil {
+		t.Fatalf("CheckConvertToLua: %v", err)
+	}
+	if len(res.Blockers) != 0 {
+		t.Fatalf("expected no blockers for library-only script after Phase 2, got %d: %+v", len(res.Blockers), res.Blockers)
 	}
 }
 
@@ -263,7 +292,9 @@ func TestCheckConvertToLua_HandRolledPureJassNotBlocked(t *testing.T) {
 }
 
 // TestCheckConvertToLua_HandRolledVJassBlocks asserts a hand-rolled war3map.j
-// containing vJASS IS a blocker.
+// containing struct (Phase 3+ vJASS surface) IS a blocker.
+//
+// Pre-Phase-2 this test used `library`; that's no longer a blocker.
 func TestCheckConvertToLua_HandRolledVJassBlocks(t *testing.T) {
 	dir := t.TempDir()
 	info := &w3i.Info{
@@ -273,7 +304,7 @@ func TestCheckConvertToLua_HandRolledVJassBlocks(t *testing.T) {
 	}
 	infoBytes, _ := w3i.Encode(info)
 	_ = os.WriteFile(filepath.Join(dir, "war3map.w3i"), infoBytes, 0o644)
-	_ = os.WriteFile(filepath.Join(dir, "war3map.j"), []byte("library Stuff\nendlibrary\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "war3map.j"), []byte("struct Stuff\n    integer x\nendstruct\n"), 0o644)
 
 	s := &Session{}
 	if err := s.Open(dir); err != nil {
@@ -288,6 +319,41 @@ func TestCheckConvertToLua_HandRolledVJassBlocks(t *testing.T) {
 	}
 	if res.Blockers[0].Kind != "map_header_vjass" {
 		t.Errorf("expected kind=map_header_vjass, got %+v", res.Blockers[0])
+	}
+}
+
+// TestCheckConvertToLua_HandRolledLibraryNoLongerBlocks asserts a hand-rolled
+// war3map.j whose only vJASS surface is library/scope is NOT a blocker after
+// Phase 2.
+func TestCheckConvertToLua_HandRolledLibraryNoLongerBlocks(t *testing.T) {
+	dir := t.TempDir()
+	info := &w3i.Info{
+		FileVersion: w3i.FileVersionTFT,
+		Name:        "LibraryOnlyFixture",
+		Tileset:     'L',
+	}
+	infoBytes, _ := w3i.Encode(info)
+	_ = os.WriteFile(filepath.Join(dir, "war3map.w3i"), infoBytes, 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "war3map.j"), []byte(
+		"library Stuff\n"+
+			"    private function helper takes nothing returns nothing\n"+
+			"    endfunction\n"+
+			"endlibrary\n"+
+			"function main takes nothing returns nothing\n"+
+			"    call DoNothing()\n"+
+			"endfunction\n",
+	), 0o644)
+
+	s := &Session{}
+	if err := s.Open(dir); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	res, err := s.CheckConvertToLua()
+	if err != nil {
+		t.Fatalf("CheckConvertToLua: %v", err)
+	}
+	if len(res.Blockers) != 0 {
+		t.Fatalf("expected no blockers for library-only hand-rolled map, got %d: %+v", len(res.Blockers), res.Blockers)
 	}
 }
 

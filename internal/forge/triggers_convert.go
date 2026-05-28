@@ -173,22 +173,26 @@ func (s *Session) CheckConvertToLua() (*ConvertToLuaCheckResult, error) {
 	return res, nil
 }
 
-// scanVJASSAfterPreprocess runs the Phase-1 textmacro preprocessor first,
-// then scans the EXPANDED source for vJASS keywords. This is what makes
-// textmacro-only sections stop blocking — the textmacros vanish during the
-// preprocess pass, leaving pure JASS behind.
+// scanVJASSAfterPreprocess runs both vJASS preprocessor passes in order
+// (textmacro expansion → library/scope wrapping) and then scans the final
+// expanded source for vJASS keywords the transpiler still can't handle.
+// This is what makes textmacro-only AND library/scope-only sections stop
+// blocking — they vanish during their respective preprocess passes, leaving
+// pure JASS behind.
 //
-// We deliberately ignore preprocess errors here: an unknown `//!` directive
-// or an unknown runtextmacro call shouldn't itself cause the blocker check
-// to fail (the user sees those as warnings in the diff UI). What matters
-// for the blocker gate is whether the expanded source still contains vJASS
-// keywords the existing transpiler can't handle.
+// We deliberately ignore preprocess errors here: an unknown `//!` directive,
+// an unknown runtextmacro call, an unresolved `requires`, or a name
+// collision shouldn't itself cause the blocker check to fail (the user sees
+// those as warnings in the diff UI). What matters for the blocker gate is
+// whether the doubly-expanded source still contains vJASS keywords from
+// Phases 3/4 (struct, module, interface, define).
 func scanVJASSAfterPreprocess(src string) (string, bool) {
 	if src == "" {
 		return "", false
 	}
 	pp := jass2lua.Preprocess(src)
-	return jass2lua.FindVJASSKeyword(pp.Expanded)
+	ls := jass2lua.PreprocessLibScope(pp.Expanded)
+	return jass2lua.FindVJASSKeyword(ls.Expanded)
 }
 
 // TranspilePreview is the read-only DTO returned by TranspilePreview() — every
@@ -213,14 +217,27 @@ type TranspilePreview struct {
 // directive, recursion limit). Empty when the section didn't use macros
 // (or used them cleanly). The UI surfaces these as a small warning bar
 // above the diff editor; they do NOT block conversion.
+//
+// LibScopeWarnings is the analogous bucket for the Phase-2 library/scope
+// preprocessor (unresolved requires, dep cycles, missing endlibrary,
+// stray closer at top level). Independent from PreprocessWarnings so the
+// UI can render them as separate amber bars and the user can tell which
+// pass produced which diagnostic.
+//
+// InitOrder lists the libraries detected in this section in dep-respecting
+// order. The aggregate across all sections drives the synthetic init
+// function the codegen emits — see emit.go's
+// emitLibScopeInitFunction call.
 type TranspileSection struct {
-	ID                 int32    `json:"id"`
-	Label              string   `json:"label"`
-	Kind               string   `json:"kind"` // "script", "custom_text", "global_jass", "map_header"
-	Original           string   `json:"original"`
-	Transpiled         string   `json:"transpiled"`
-	Errors             []string `json:"errors,omitempty"`
-	PreprocessWarnings []string `json:"preprocess_warnings,omitempty"`
+	ID                 int32                  `json:"id"`
+	Label              string                 `json:"label"`
+	Kind               string                 `json:"kind"` // "script", "custom_text", "global_jass", "map_header"
+	Original           string                 `json:"original"`
+	Transpiled         string                 `json:"transpiled"`
+	Errors             []string               `json:"errors,omitempty"`
+	PreprocessWarnings []string               `json:"preprocess_warnings,omitempty"`
+	LibScopeWarnings   []string               `json:"libscope_warnings,omitempty"`
+	InitOrder          []jass2lua.LibraryInit `json:"init_order,omitempty"`
 }
 
 // TranspilePreview returns a pure-read diff payload for the convert dialog.
@@ -239,19 +256,7 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 		if s.triggers != nil && len(s.triggers.Triggers) > 0 {
 			tr := &s.triggers.Triggers[0]
 			if strings.TrimSpace(tr.CustomText) != "" {
-				pp := jass2lua.Preprocess(tr.CustomText)
-				lua, err := jass2lua.TranspileScript(pp.Expanded)
-				sec := TranspileSection{
-					ID:                 tr.ID,
-					Label:              "Map Header (war3map.j)",
-					Kind:               "map_header",
-					Original:           tr.CustomText,
-					Transpiled:         lua,
-					PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
-				}
-				if err != nil {
-					sec.Errors = append(sec.Errors, err.Error())
-				}
+				sec := transpileSectionScript(tr.ID, "Map Header (war3map.j)", "map_header", tr.CustomText)
 				out.Sections = append(out.Sections, sec)
 			}
 		}
@@ -260,19 +265,7 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 
 	// Global JASS header (war3map.wct) — top of the diff so the user sees it first.
 	if s.triggersWct != nil && strings.TrimSpace(s.triggersWct.GlobalJASS) != "" {
-		pp := jass2lua.Preprocess(s.triggersWct.GlobalJASS)
-		lua, err := jass2lua.TranspileScript(pp.Expanded)
-		sec := TranspileSection{
-			ID:                 -1,
-			Label:              "war3map.wct GlobalJASS",
-			Kind:               "global_jass",
-			Original:           s.triggersWct.GlobalJASS,
-			Transpiled:         lua,
-			PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
-		}
-		if err != nil {
-			sec.Errors = append(sec.Errors, err.Error())
-		}
+		sec := transpileSectionScript(-1, "war3map.wct GlobalJASS", "global_jass", s.triggersWct.GlobalJASS)
 		out.Sections = append(out.Sections, sec)
 	}
 
@@ -287,47 +280,90 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 			continue
 		}
 		if (tr.IsScript || tr.Classifier == wtg.ClassifierScript) && strings.TrimSpace(tr.CustomText) != "" {
-			pp := jass2lua.Preprocess(tr.CustomText)
-			lua, err := jass2lua.TranspileScript(pp.Expanded)
-			sec := TranspileSection{
-				ID:                 tr.ID,
-				Label:              "Custom Script: " + tr.Name,
-				Kind:               "script",
-				Original:           tr.CustomText,
-				Transpiled:         lua,
-				PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
-			}
-			if err != nil {
-				sec.Errors = append(sec.Errors, err.Error())
-			}
+			sec := transpileSectionScript(tr.ID, "Custom Script: "+tr.Name, "script", tr.CustomText)
 			out.Sections = append(out.Sections, sec)
 			continue
 		}
 		if strings.TrimSpace(tr.CustomText) != "" {
 			// GUI trigger with custom_text overlay — auto-wrap as a function.
-			pp := jass2lua.Preprocess(tr.CustomText)
-			lua, err := jass2lua.TranspileFunction(tr.Name+"_CustomText", pp.Expanded)
-			sec := TranspileSection{
-				ID:                 tr.ID,
-				Label:              "Custom Text: " + tr.Name,
-				Kind:               "custom_text",
-				Original:           tr.CustomText,
-				Transpiled:         lua,
-				PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
-			}
-			if err != nil {
-				sec.Errors = append(sec.Errors, err.Error())
-			}
+			sec := transpileSectionCustomText(tr.ID, tr.Name, tr.CustomText)
 			out.Sections = append(out.Sections, sec)
 		}
 	}
 	return out, nil
 }
 
+// transpileSectionScript runs the full preprocessor pipeline for a section
+// whose body is a full JASS script (function decls + globals). The textmacro
+// + libscope passes run first, then TranspileScript on the doubly-expanded
+// output. Diagnostics from each pass surface separately on the section.
+func transpileSectionScript(id int32, label, kind, src string) TranspileSection {
+	pp := jass2lua.Preprocess(src)
+	ls := jass2lua.PreprocessLibScope(pp.Expanded)
+	lua, err := jass2lua.TranspileScript(ls.Expanded)
+	sec := TranspileSection{
+		ID:                 id,
+		Label:              label,
+		Kind:               kind,
+		Original:           src,
+		Transpiled:         lua,
+		PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
+		LibScopeWarnings:   libScopeWarningsToStrings(ls.Errors),
+		InitOrder:          ls.InitOrder,
+	}
+	if err != nil {
+		sec.Errors = append(sec.Errors, err.Error())
+	}
+	return sec
+}
+
+// transpileSectionCustomText is the equivalent for GUI-overlay custom_text
+// sections, which are bare statement lists rather than full scripts. The
+// library/scope preprocessor still runs (an overlay can contain a library,
+// though it's rare) before falling through to TranspileFunction.
+func transpileSectionCustomText(id int32, triggerName, src string) TranspileSection {
+	pp := jass2lua.Preprocess(src)
+	ls := jass2lua.PreprocessLibScope(pp.Expanded)
+	lua, err := jass2lua.TranspileFunction(triggerName+"_CustomText", ls.Expanded)
+	sec := TranspileSection{
+		ID:                 id,
+		Label:              "Custom Text: " + triggerName,
+		Kind:               "custom_text",
+		Original:           src,
+		Transpiled:         lua,
+		PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
+		LibScopeWarnings:   libScopeWarningsToStrings(ls.Errors),
+		InitOrder:          ls.InitOrder,
+	}
+	if err != nil {
+		sec.Errors = append(sec.Errors, err.Error())
+	}
+	return sec
+}
+
 // preprocessWarningsToStrings flattens PreprocessError diagnostics into the
 // "line N: message" strings the UI surfaces. Returns nil for the no-warning
 // case so the JSON omits the field entirely (json:"...,omitempty").
 func preprocessWarningsToStrings(errs []jass2lua.PreprocessError) []string {
+	if len(errs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(errs))
+	for _, e := range errs {
+		if e.Line > 0 {
+			out = append(out, fmt.Sprintf("line %d: %s", e.Line, e.Message))
+		} else {
+			out = append(out, e.Message)
+		}
+	}
+	return out
+}
+
+// libScopeWarningsToStrings flattens LibScopeError diagnostics into the
+// "line N: message" strings the UI surfaces. Same shape as
+// preprocessWarningsToStrings; kept as a separate function so changes to
+// either pass's diagnostic shape don't ripple across both.
+func libScopeWarningsToStrings(errs []jass2lua.LibScopeError) []string {
 	if len(errs) == 0 {
 		return nil
 	}
@@ -434,9 +470,16 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 	// Build the per-trigger transpiled overlay (custom_texts that need
 	// translation feed into CustomTexts as Lua, so the codegen treats them
 	// as already-Lua and concatenates them verbatim). Each section runs
-	// through the textmacro preprocessor BEFORE the transpiler so a
-	// macro-only section produces real Lua, not error placeholders.
+	// through the textmacro preprocessor AND the library/scope preprocessor
+	// BEFORE the transpiler so a macro-only or library-only section
+	// produces real Lua, not error placeholders.
+	//
+	// Each section's library/scope InitOrder is appended to a global slice
+	// (libInits). The codegen aggregates these into a synthetic
+	// _vjass_init_libs() function called from main(); see
+	// triggers_codegen.go's emitMain.
 	customTextsLua := map[int32]string{}
+	var libInits []jass2lua.LibraryInit
 	if s.triggers != nil {
 		for i := range s.triggers.Triggers {
 			tr := &s.triggers.Triggers[i]
@@ -446,12 +489,14 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 			if strings.TrimSpace(tr.CustomText) == "" {
 				continue
 			}
-			expanded := jass2lua.Preprocess(tr.CustomText).Expanded
+			pp := jass2lua.Preprocess(tr.CustomText)
+			ls := jass2lua.PreprocessLibScope(pp.Expanded)
+			libInits = append(libInits, ls.InitOrder...)
 			if tr.IsScript || tr.Classifier == wtg.ClassifierScript {
-				lua, _ := jass2lua.TranspileScript(expanded)
+				lua, _ := jass2lua.TranspileScript(ls.Expanded)
 				customTextsLua[tr.ID] = lua
 			} else {
-				lua, _ := jass2lua.TranspileFunction(tr.Name+"_CustomText", expanded)
+				lua, _ := jass2lua.TranspileFunction(tr.Name+"_CustomText", ls.Expanded)
 				customTextsLua[tr.ID] = lua
 			}
 		}
@@ -467,10 +512,13 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 		Cameras:     s.cameras,
 		TD:          TriggerDataSnapshot(),
 		CustomTexts: customTextsLua,
+		LibInits:    libInits,
 	}
 	if s.triggersWct != nil && strings.TrimSpace(s.triggersWct.GlobalJASS) != "" {
-		expanded := jass2lua.Preprocess(s.triggersWct.GlobalJASS).Expanded
-		lua, _ := jass2lua.TranspileScript(expanded)
+		pp := jass2lua.Preprocess(s.triggersWct.GlobalJASS)
+		ls := jass2lua.PreprocessLibScope(pp.Expanded)
+		in.LibInits = append(in.LibInits, ls.InitOrder...)
+		lua, _ := jass2lua.TranspileScript(ls.Expanded)
 		in.GlobalJASS = lua
 	}
 

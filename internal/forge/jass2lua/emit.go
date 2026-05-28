@@ -465,17 +465,21 @@ func luaStringLit(s string) string {
 // `//!` comment lines and are consumed by the Preprocess pass (preprocess.go)
 // BEFORE this scan runs. They're intentionally absent from this list so a
 // textmacro-only map (Phase 1 of vJASS support) flows through cleanly.
-// Library / scope / struct / module / etc. remain blockers; Phases 2-4 will
+//
+// Phase 2 adds the library/scope preprocessor (PreprocessLibScope) which
+// runs AFTER textmacro expansion. It consumes library / endlibrary / scope /
+// endscope plus the requires/needs/uses/initializer/optional keywords AND
+// strips private/public visibility prefixes from inner decls. Those are
+// therefore also absent from this list — a map whose only vJASS surface is
+// library + scope now flows through cleanly.
+//
+// Struct / module / interface / define remain blockers; Phases 3/4 will
 // remove them from this list as the corresponding passes land.
 var vJASSKeywords = []string{
-	"library", "endlibrary",
-	"scope", "endscope",
 	"struct", "endstruct",
 	"module", "endmodule",
 	"define",
-	"private", "public",
-	"interface",
-	"requires", "needs", "uses",
+	"interface", "endinterface",
 }
 
 // FindVJASSKeyword scans the source for the first vJASS-only keyword. Returns

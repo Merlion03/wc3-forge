@@ -39,6 +39,13 @@
     transpiled: string
     errors?: string[]
     preprocess_warnings?: string[]
+    libscope_warnings?: string[]
+    init_order?: Array<{
+      Name: string
+      InitFunc: string
+      Public: string[]
+      Private: string[]
+    }>
   }
 
   let {
@@ -62,6 +69,7 @@
   let loadingPreview: boolean = $state(false)
   let previewError: string = $state('')
   let warningsExpanded: boolean = $state(false)
+  let libscopeWarningsExpanded: boolean = $state(false)
 
   let hasBlockers: boolean = $derived(blockers.length > 0)
   let hasPreview: boolean = $derived(preview.length > 0)
@@ -254,11 +262,12 @@
                       onclick={() => {
                         selectedSectionIdx = i
                         warningsExpanded = false
+                        libscopeWarningsExpanded = false
                       }}
                     >
                       <span class="font-medium truncate">{section.label}</span>
                       <span class="text-[10px] uppercase tracking-wide opacity-60">
-                        {sectionBadge(section.kind)}{section.errors && section.errors.length > 0 ? ' • ⚠ errors' : ''}{section.preprocess_warnings && section.preprocess_warnings.length > 0 ? ' • ⚠ macros' : ''}
+                        {sectionBadge(section.kind)}{section.errors && section.errors.length > 0 ? ' • ⚠ errors' : ''}{section.preprocess_warnings && section.preprocess_warnings.length > 0 ? ' • ⚠ macros' : ''}{section.libscope_warnings && section.libscope_warnings.length > 0 ? ' • ⚠ libs' : ''}
                       </span>
                     </button>
                   </li>
@@ -279,17 +288,40 @@
                       type="button"
                       class="flex items-center gap-1.5 w-full text-left hover:opacity-80 transition-opacity"
                       onclick={() => (warningsExpanded = !warningsExpanded)}
-                      title="Toggle preprocessor warnings"
+                      title="Toggle textmacro preprocessor warnings"
                     >
                       <span class="opacity-70">{warningsExpanded ? '▼' : '▶'}</span>
                       <span class="font-medium">
-                        ⚠ {currentSection.preprocess_warnings.length} preprocessor warning{currentSection.preprocess_warnings.length === 1 ? '' : 's'}
+                        ⚠ {currentSection.preprocess_warnings.length} textmacro warning{currentSection.preprocess_warnings.length === 1 ? '' : 's'}
                       </span>
                       <span class="opacity-60 text-[10px]">(non-blocking)</span>
                     </button>
                     {#if warningsExpanded}
                       <ul class="mt-1.5 pl-5 list-disc space-y-0.5 max-h-24 overflow-y-auto">
                         {#each currentSection.preprocess_warnings as w (w)}
+                          <li class="font-mono break-all opacity-90">{w}</li>
+                        {/each}
+                      </ul>
+                    {/if}
+                  </div>
+                {/if}
+                {#if currentSection.libscope_warnings && currentSection.libscope_warnings.length > 0}
+                  <div class="px-4 py-1.5 border-b bg-amber-500/10 text-xs text-amber-300">
+                    <button
+                      type="button"
+                      class="flex items-center gap-1.5 w-full text-left hover:opacity-80 transition-opacity"
+                      onclick={() => (libscopeWarningsExpanded = !libscopeWarningsExpanded)}
+                      title="Toggle library/scope preprocessor warnings"
+                    >
+                      <span class="opacity-70">{libscopeWarningsExpanded ? '▼' : '▶'}</span>
+                      <span class="font-medium">
+                        ⚠ {currentSection.libscope_warnings.length} library/scope warning{currentSection.libscope_warnings.length === 1 ? '' : 's'}
+                      </span>
+                      <span class="opacity-60 text-[10px]">(non-blocking; common: unresolved requires, dep cycles)</span>
+                    </button>
+                    {#if libscopeWarningsExpanded}
+                      <ul class="mt-1.5 pl-5 list-disc space-y-0.5 max-h-24 overflow-y-auto">
+                        {#each currentSection.libscope_warnings as w (w)}
                           <li class="font-mono break-all opacity-90">{w}</li>
                         {/each}
                       </ul>

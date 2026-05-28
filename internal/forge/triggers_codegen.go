@@ -46,6 +46,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/StephenSHorton/wc3-forge/internal/forge/jass2lua"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3c"
@@ -72,17 +73,25 @@ var ErrPreserveScript = errors.New("war3map.lua starts with " + PreserveScriptMa
 
 // CodegenInputs bundles the pieces GenerateLuaScript needs. Callers
 // typically populate from Session getters; tests build it ad-hoc.
+//
+// LibInits is the aggregated list of vJASS libraries detected across every
+// section (per-trigger custom_text + GlobalJASS + Map Header), already in
+// dependency-respecting order. The codegen emits a synthetic
+// _vjass_init_libs() function that calls each LibraryInit.InitFunc in
+// order, then calls _vjass_init_libs() from main() after globals init but
+// before user trigger registration.
 type CodegenInputs struct {
-	Triggers    *wtg.Triggers              // war3map.wtg parsed tree
-	CustomTexts map[int32]string           // trigger id → custom_text (overrides Trigger.CustomText if both set)
-	Units       *unitsdoo.File             // war3mapUnits.doo (placed units / items)
-	Doodads     *doodadsdoo.File           // war3map.doo (placed doodads/destructables)
-	Terrain     *w3e.File                  // war3map.w3e (for CenterOffset → world coords)
-	Info        *w3i.Info                  // war3map.w3i (player slots, forces, camera bounds, …)
-	Regions     *w3r.File                  // war3map.w3r (optional)
-	Cameras     *w3c.File                  // war3map.w3c (optional)
-	TD          *wtg.TriggerData           // UI/TriggerData.txt
-	GlobalJASS  string                     // war3map.wct GlobalJASS block (concatenated verbatim into the script body, after globals)
+	Triggers    *wtg.Triggers          // war3map.wtg parsed tree
+	CustomTexts map[int32]string       // trigger id → custom_text (overrides Trigger.CustomText if both set)
+	Units       *unitsdoo.File         // war3mapUnits.doo (placed units / items)
+	Doodads     *doodadsdoo.File       // war3map.doo (placed doodads/destructables)
+	Terrain     *w3e.File              // war3map.w3e (for CenterOffset → world coords)
+	Info        *w3i.Info              // war3map.w3i (player slots, forces, camera bounds, …)
+	Regions     *w3r.File              // war3map.w3r (optional)
+	Cameras     *w3c.File              // war3map.w3c (optional)
+	TD          *wtg.TriggerData       // UI/TriggerData.txt
+	GlobalJASS  string                 // war3map.wct GlobalJASS block (concatenated verbatim into the script body, after globals)
+	LibInits    []jass2lua.LibraryInit // aggregated vJASS library init order (Phase 2)
 }
 
 // GenerateLuaScript is the Phase-3 entry point. Returns the war3map.lua
@@ -203,10 +212,38 @@ func GenerateLuaScript(in CodegenInputs) (string, error) {
 	cg.emitInitCustomPlayerSlots()
 	cg.emitInitCustomTeams()
 	cg.emitInitAllyPriorities()
+	cg.emitVJASSInitLibs()
 	cg.emitMain()
 	cg.emitConfig()
 
 	return cg.script.String(), nil
+}
+
+// emitVJASSInitLibs writes a synthetic function that calls each vJASS
+// library's initializer in dependency-respecting order. Called from main()
+// (after InitGlobals, before InitCustomTriggers) by emitMain.
+//
+// When no libraries have initializers, the function still emits (empty body)
+// so the main() call site doesn't need a conditional. The cost is one extra
+// nop call per map load — well below noise floor.
+func (c *luaCodegen) emitVJASSInitLibs() {
+	c.script.WriteString("function _vjass_init_libs()\n")
+	// Deduplicate by library name in case the same library appears across
+	// multiple sections (rare, but textmacros can paste a library declaration
+	// into every trigger that runtextmacro's it). The first occurrence in
+	// dep order wins; subsequent duplicates are silently dropped.
+	seen := map[string]bool{}
+	for _, lib := range c.in.LibInits {
+		if seen[lib.Name] {
+			continue
+		}
+		seen[lib.Name] = true
+		if lib.InitFunc == "" {
+			continue
+		}
+		c.script.WriteString(fmt.Sprintf("\t%s()\n", lib.InitFunc))
+	}
+	c.script.WriteString("end\n\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -979,6 +1016,10 @@ func (c *luaCodegen) emitMain() {
 	c.script.WriteString("\tCreateAllUnits()\n")
 	c.script.WriteString("\tInitBlizzard()\n")
 	c.script.WriteString("\tInitGlobals()\n")
+	// vJASS library initializers run after InitGlobals (so they can see
+	// udg_* / gg_* globals) but BEFORE InitCustomTriggers (so triggers can
+	// reference library-provided functions).
+	c.script.WriteString("\t_vjass_init_libs()\n")
 	c.script.WriteString("\tInitCustomTriggers()\n")
 	c.script.WriteString("\tRunInitializationTriggers()\n")
 	c.script.WriteString("end\n\n")

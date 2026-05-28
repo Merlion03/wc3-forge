@@ -348,7 +348,9 @@ endfunction
 	}
 }
 
-// TestFindVJASSKeyword exercises the vJASS detector against representative inputs.
+// TestFindVJASSKeyword exercises the vJASS detector against representative
+// inputs. After Phase 2 the library/scope/requires/private/public keywords
+// no longer block — they're handled by PreprocessLibScope.
 func TestFindVJASSKeyword(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -358,24 +360,31 @@ func TestFindVJASSKeyword(t *testing.T) {
 	}{
 		{"pure_jass", `function Foo takes nothing returns nothing
 endfunction`, "", false},
-		{"library", `library Foo
+		// library / scope / private / requires NO LONGER block after Phase 2.
+		// They're consumed by PreprocessLibScope before the keyword scan runs.
+		{"library_no_longer_blocks", `library Foo
     function bar takes nothing returns nothing
     endfunction
-endlibrary`, "library", true},
+endlibrary`, "", false},
+		{"scope_no_longer_blocks", `scope MyScope
+endscope`, "", false},
+		{"private_keyword_no_longer_blocks", `private function helper takes nothing returns nothing
+endfunction`, "", false},
+		{"requires_no_longer_blocks", `library Foo requires Bar
+endlibrary`, "", false},
+		// struct / module / interface still block (Phases 3/4).
 		{"struct", `struct S
     integer x
 endstruct`, "struct", true},
-		{"scope", `scope MyScope
-endscope`, "scope", true},
+		{"module", `module M
+endmodule`, "module", true},
+		{"interface", `interface I
+endinterface`, "interface", true},
 		{"textmacro", `//! textmacro FOO takes BAR
-//! endtextmacro`, "", false}, // // textmacro lives in a comment; the body doesn't reach an ident; correct false
-		{"private_keyword", `private function helper takes nothing returns nothing
-endfunction`, "private", true},
-		{"requires", `library Foo requires Bar
-endlibrary`, "library", true},
-		// Quoted "library" should NOT trip.
-		{"quoted_library", `function Q takes nothing returns nothing
-    call BJDebugMsg("library Foo")
+//! endtextmacro`, "", false}, // textmacro lives in a comment; correct false
+		// Quoted "struct" should NOT trip.
+		{"quoted_struct", `function Q takes nothing returns nothing
+    call BJDebugMsg("struct Foo")
 endfunction`, "", false},
 	}
 	for _, c := range cases {
