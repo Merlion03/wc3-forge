@@ -42,6 +42,10 @@
     MoveTriggerECA,
     SetTriggerECAEnabled,
     SetTriggerParamValue,
+    SetTriggerParamSubFunction,
+    ClearTriggerParamSubFunction,
+    SetTriggerParamArray,
+    AddTriggerNestedECA,
     paramLabel,
     renderECALabel,
     MAGIC_ECAS,
@@ -61,6 +65,7 @@
   import FunctionPicker from './FunctionPicker.svelte'
   import ParamEditor from './ParamEditor.svelte'
   import TriggerEntityPicker from './TriggerEntityPicker.svelte'
+  import TriggerInstancePicker, { type InstanceKind } from './TriggerInstancePicker.svelte'
   import type { ObjectKind } from './object-editor-bindings'
   import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view'
   import { EditorState } from '@codemirror/state'
@@ -762,7 +767,16 @@
     if (funcPickerForTriggerId == null || !funcPickerSection) return
     const ecaType = sectionToECAType(funcPickerSection)
     try {
-      const res = await AddTriggerECA(funcPickerForTriggerId, ecaType, name, -1)
+      let res
+      if (magicAddTarget) {
+        // Magic-ECA child add — use the path-aware AddNestedECA. The slot's
+        // ecaType comes from the magicChildSlots mapping table.
+        const tgt = magicAddTarget
+        res = await AddTriggerNestedECA(funcPickerForTriggerId, tgt.parentPath, tgt.slot.ecaType, name, tgt.slot.groupID)
+        magicAddTarget = null
+      } else {
+        res = await AddTriggerECA(funcPickerForTriggerId, ecaType, name, -1)
+      }
       tree = res.tree
       if (res.detail) detail = res.detail
     } catch (e) {
@@ -782,31 +796,172 @@
     }
   }
 
-  // ParamEditor state. The user clicks an ECA's `~ArgN` token; we open the
-  // ParamEditor with the slot's declared type + the current Parameter value.
+  // ParamEditor state — 2b2 modal opens a *recursive* editor pane. The user
+  // clicks an ECA's `~ArgN` token; we open the modal anchored at that param.
+  // The modal then renders the outer param + (if it has sub_parameters) each
+  // inner param recursively as nested ParamEditor instances. paramPath drills
+  // into the sub-parameter chain.
   let paramEditorOpen = $state(false)
   let paramEditorTriggerId: number | null = $state(null)
-  let paramEditorPath: number[] = $state([])
-  let paramEditorIndex = $state(0)
-  let paramEditorType = $state('')
-  let paramEditorParam: TriggerParameter | null = $state(null)
+  let paramEditorECAPath: number[] = $state([])
+  // paramEditorRootPath addresses the LEAF ECA's parameter slot (paramPath
+  // sense; length-1 at modal-open time). The recursive render walks deeper
+  // by extending paramPath one int per level.
+  let paramEditorRootPath: number[] = $state([])
+  let paramEditorRootType: string = $state('')
 
-  function openParamEditor(triggerId: number, ecaPath: number[], paramIndex: number, declaredType: string, param: TriggerParameter | null) {
+  function openParamEditor(triggerId: number, ecaPath: number[], paramIndex: number, declaredType: string, _param: TriggerParameter | null) {
     paramEditorTriggerId = triggerId
-    paramEditorPath = ecaPath
-    paramEditorIndex = paramIndex
-    paramEditorType = declaredType
-    paramEditorParam = param
+    paramEditorECAPath = ecaPath
+    paramEditorRootPath = [paramIndex]
+    paramEditorRootType = declaredType
     paramEditorOpen = true
   }
-  async function commitParamValue({ value, paramType }: { value: string; paramType: number }) {
+
+  // Resolve a paramPath inside the currently-loaded `detail` to get the live
+  // Parameter the editor renders. Walks ecaPath via `detail.trigger.ecas`,
+  // then paramPath via .parameters and .sub_parameter chains.
+  function resolveLiveParam(ecaPath: number[], paramPath: number[]): TriggerParameter | null {
+    const ecas = detail?.trigger?.ecas
+    if (!ecas) return null
+    let cur: TriggerECA | undefined = undefined
+    let curArr: TriggerECA[] | undefined = ecas
+    for (let i = 0; i < ecaPath.length; i++) {
+      if (!curArr || ecaPath[i] < 0 || ecaPath[i] >= curArr.length) return null
+      cur = curArr[ecaPath[i]]
+      if (i < ecaPath.length - 1) {
+        curArr = cur.children
+      }
+    }
+    if (!cur) return null
+    if (paramPath.length === 0) return null
+    if (!cur.parameters || paramPath[0] >= cur.parameters.length) return null
+    let p: TriggerParameter | null | undefined = cur.parameters[paramPath[0]]
+    for (let i = 1; i < paramPath.length; i++) {
+      if (!p?.has_sub_parameter || !p.sub_parameter) return null
+      const inner = p.sub_parameter.parameters
+      if (!inner || paramPath[i] >= inner.length) return null
+      p = inner[paramPath[i]]
+    }
+    return p ?? null
+  }
+
+  // Resolve the declared type of a param at the given paramPath, by walking
+  // the same chain through TriggerData's arg_types. The root type is the
+  // ECA's argTypes[paramPath[0]]; inner types come from the sub-function's
+  // argTypes[paramPath[i]].
+  function resolveDeclaredType(eca: TriggerECA | null, paramPath: number[]): string {
+    if (!eca) return ''
+    const rootMeta = metaByName.get(eca.name)
+    if (!rootMeta) return ''
+    let curType = rootMeta.arg_types?.[paramPath[0]] || ''
+    let curMeta: TriggerFunctionMeta | undefined = rootMeta
+    let p: TriggerParameter | undefined = eca.parameters?.[paramPath[0]]
+    for (let i = 1; i < paramPath.length; i++) {
+      if (!p?.has_sub_parameter || !p.sub_parameter) return curType
+      const subName = p.sub_parameter.name
+      curMeta = metaByName.get(subName)
+      if (!curMeta) return curType
+      curType = curMeta.arg_types?.[paramPath[i]] || ''
+      p = p.sub_parameter.parameters?.[paramPath[i]]
+    }
+    return curType
+  }
+
+  // Build the "chain" of editor links the modal renders. Each link describes
+  // one Parameter slot at a specific paramPath. The chain starts at the root
+  // (the slot the user clicked) and extends through every nested sub-function
+  // call's first-level parameters. The user can edit each slot independently.
+  //
+  // For 2b2 the chain renders ALL sub-parameters at each level (not just the
+  // first), so editing a 3-arg sub-function shows three nested editors.
+  type EditorLink = { path: number[]; declaredType: string; param: TriggerParameter | null }
+  function buildParamEditorChain(leafECA: TriggerECA | null, rootPath: number[]): EditorLink[] {
+    if (!leafECA) return []
+    const out: EditorLink[] = []
+    // Root link
+    const rootParam = resolveLiveParam(paramEditorECAPath, rootPath)
+    const rootType = resolveDeclaredType(leafECA, rootPath)
+    out.push({ path: rootPath, declaredType: rootType, param: rootParam })
+    // Walk sub-parameter chain. For each sub-function present, recurse into
+    // its inner parameters. We render every inner param as an editor link.
+    expandSubLinks(leafECA, rootPath, rootParam, out, 1)
+    return out
+  }
+
+  // expandSubLinks recurses into Parameter.SubParameter.Parameters[]. depth
+  // is the current nesting level (used for indent). Stops at depth 16 as a
+  // hard safety bound (the user-facing warning kicks in at depth>6).
+  function expandSubLinks(leafECA: TriggerECA, parentPath: number[], parentParam: TriggerParameter | null, out: EditorLink[], depth: number): void {
+    if (depth > 16) return
+    if (!parentParam?.has_sub_parameter || !parentParam.sub_parameter) return
+    const sub = parentParam.sub_parameter
+    const subMeta = metaByName.get(sub.name)
+    const innerParams = sub.parameters ?? []
+    for (let i = 0; i < innerParams.length; i++) {
+      const ip = parentPath.concat(i)
+      const decl = subMeta?.arg_types?.[i] || ''
+      const inner = innerParams[i] ?? null
+      out.push({ path: ip, declaredType: decl, param: inner })
+      // Recurse if this inner param ALSO has a sub-function.
+      if (inner?.has_sub_parameter && inner.sub_parameter) {
+        expandSubLinks(leafECA, ip, inner, out, depth + 1)
+      }
+    }
+  }
+
+  // Resolve the leaf ECA (the one ecaPath addresses) inside detail.
+  function resolveLeafECA(ecaPath: number[]): TriggerECA | null {
+    const ecas = detail?.trigger?.ecas
+    if (!ecas) return null
+    let curArr: TriggerECA[] | undefined = ecas
+    let cur: TriggerECA | undefined
+    for (let i = 0; i < ecaPath.length; i++) {
+      if (!curArr || ecaPath[i] < 0 || ecaPath[i] >= curArr.length) return null
+      cur = curArr[ecaPath[i]]
+      if (i < ecaPath.length - 1) curArr = cur.children
+    }
+    return cur ?? null
+  }
+
+  async function commitParamValue(paramPath: number[], { value, paramType }: { value: string; paramType: number }) {
     if (paramEditorTriggerId == null) return
     try {
-      const res = await SetTriggerParamValue(paramEditorTriggerId, paramEditorPath, paramEditorIndex, value, paramType)
+      const res = await SetTriggerParamValue(paramEditorTriggerId, paramEditorECAPath, paramPath, value, paramType)
       tree = res.tree
       if (res.detail) detail = res.detail
     } catch (e) {
       errorMsg = `Set param failed: ${e}`
+    }
+  }
+  async function commitPickSub(paramPath: number[], subName: string) {
+    if (paramEditorTriggerId == null) return
+    try {
+      const res = await SetTriggerParamSubFunction(paramEditorTriggerId, paramEditorECAPath, paramPath, subName)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Set sub-function failed: ${e}`
+    }
+  }
+  async function commitClearSub(paramPath: number[]) {
+    if (paramEditorTriggerId == null) return
+    try {
+      const res = await ClearTriggerParamSubFunction(paramEditorTriggerId, paramEditorECAPath, paramPath)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Clear sub-function failed: ${e}`
+    }
+  }
+  async function commitToggleArray(paramPath: number[], isArray: boolean) {
+    if (paramEditorTriggerId == null) return
+    try {
+      const res = await SetTriggerParamArray(paramEditorTriggerId, paramEditorECAPath, paramPath, isArray)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Toggle array failed: ${e}`
     }
   }
 
@@ -825,6 +980,21 @@
     entityPickerCommit?.(id)
     entityPickerCommit = null
     entityPickerOpen = false
+  }
+
+  // Instance picker state (unit / destructable / region / camera).
+  let instancePickerOpen = $state(false)
+  let instancePickerKind: InstanceKind = $state('unit')
+  let instancePickerCommit: ((ggRef: string) => void) | null = null
+  function onPickInstanceFromParamEditor(kind: InstanceKind, commit: (ggRef: string) => void) {
+    instancePickerKind = kind
+    instancePickerCommit = commit
+    instancePickerOpen = true
+  }
+  function onInstancePicked(ggRef: string, _label: string) {
+    instancePickerCommit?.(ggRef)
+    instancePickerCommit = null
+    instancePickerOpen = false
   }
 
   // Delete-ECA / Move-ECA / Toggle-Enabled handlers.
@@ -864,14 +1034,88 @@
 
   // topLevelPathOf returns the index path for a top-level ECA inside its
   // trigger. Used by the template to derive the eca_path arg for mutations.
-  // For 2b1 every clickable row is top-level; nested children sit inside
-  // magic ECAs we still render read-only (2b2 will add inline editors for
-  // those children).
+  // For 2b1 every clickable row was top-level; 2b2 adds inline editors for
+  // magic-ECA children via the ecaPath extension below.
   function topLevelPathOf(all: TriggerECA[], eca: TriggerECA): number[] {
     for (let i = 0; i < all.length; i++) {
       if (all[i] === eca) return [i]
     }
     return [0]
+  }
+
+  // Magic-ECA child renderer state. For each magic ECA we group children by
+  // ECA.group + render each group as its own editable list with a "+ Add"
+  // button. The Add button needs to know which group + ecaType to seed the
+  // child's parent assignment. We pre-compute the per-magic-name mapping
+  // table once.
+  type MagicChildSlot = { groupID: number; label: string; ecaType: number; section: 'TriggerEvents' | 'TriggerConditions' | 'TriggerActions' | 'TriggerCalls' }
+  function magicChildSlots(parentName: string): MagicChildSlot[] {
+    // HiveWE convention (trigger_editor.cpp L351-365):
+    //   IfThenElse(Multiple):  group 0=Conditions(condition), 1=Then(action), 2=Else(action)
+    //   ForLoopA/B/Var(Multiple): group 0=Loop body (action)
+    //   AndMultiple/OrMultiple: group 0=Conditions (condition)
+    switch (parentName) {
+      case 'IfThenElse':
+      case 'IfThenElseMultiple':
+        return [
+          { groupID: 0, label: 'If — Conditions', ecaType: 1, section: 'TriggerConditions' },
+          { groupID: 1, label: 'Then — Actions', ecaType: 2, section: 'TriggerActions' },
+          { groupID: 2, label: 'Else — Actions', ecaType: 2, section: 'TriggerActions' },
+        ]
+      case 'ForLoopA':
+      case 'ForLoopAMultiple':
+      case 'ForLoopB':
+      case 'ForLoopBMultiple':
+      case 'ForLoopVar':
+      case 'ForLoopVarMultiple':
+        return [
+          { groupID: 0, label: 'Loop — Actions', ecaType: 2, section: 'TriggerActions' },
+        ]
+      case 'AndMultiple':
+      case 'OrMultiple':
+        return [
+          { groupID: 0, label: 'Conditions', ecaType: 1, section: 'TriggerConditions' },
+        ]
+      default:
+        return []
+    }
+  }
+
+  // Filter the children of a parent magic ECA to one bucket. Children whose
+  // group field doesn't match are skipped (their slot displays nothing).
+  function childrenForGroup(parent: TriggerECA, groupID: number): TriggerECA[] {
+    return (parent.children ?? []).filter((c) => (c.group ?? 0) === groupID)
+  }
+
+  // Add an ECA to a magic-ECA child slot. The child gets the right ecaType
+  // for its bucket; HiveWE sets ECA.group to the bucket index post-creation.
+  // Our wire shape adds via the same AddECA mutator with position appended;
+  // for nested children we need a different mutator (path-extended Add). For
+  // 2b2 we use the same AddTriggerECA but pass a path that addresses the
+  // magic parent + the child slot via a magic-bucket convention.
+  //
+  // The simple approach: use the recursive mutator path. addMagicChild
+  // appends to parent.Children[] then sets group via SetParamValue-style
+  // path. Since we don't currently have an AddNestedECA mutator, we delegate
+  // to a per-call MCP path: add the child via AddTriggerECA's normal path,
+  // then we MOVE it into the right group via a follow-up step. For now,
+  // since the wtg encoder accepts any nested ECA, we'll punt on grouping
+  // metadata and just append — the engine renders unmarked groups in the
+  // same way (Phase 2b3 polish).
+  //
+  // Implementation: open the FunctionPicker with the right section, then on
+  // pick, call a NEW handler we'll add (AddTriggerNestedECA) — for 2b2,
+  // synthesize this as a SetParamValue-like nested path via the Go-side
+  // already-extended AddECA's ecaPath path arg. (The 2b1 AddECA signature
+  // takes ecaType+name; we extend it client-side to address the magic
+  // parent.)
+  let magicAddTarget: { parentPath: number[]; slot: MagicChildSlot } | null = $state(null)
+  function openMagicAdd(parentPath: number[], slot: MagicChildSlot) {
+    magicAddTarget = { parentPath, slot }
+    funcPickerSection = slot.section
+    if (detail?.kind === 'trigger_gui' && detail.trigger) {
+      funcPickerForTriggerId = detail.trigger.id
+    }
   }
 
   // Variables visible to the currently-selected trigger's ParamEditor. Today
@@ -936,6 +1180,42 @@
     return tokens
   }
 </script>
+
+<!-- Editable ECA row snippet — used for both top-level ECAs and (recursively)
+     magic-ECA children. Rendering magic children inline lets the user edit
+     If/Then/Else / Loop bodies in place without entering a sub-dialog. -->
+{#snippet ecaRowEditable(trigID: number, e: TriggerECA, path: number[])}
+  <div class="te-eca-row te-eca-edit" title={metaByName.get(e.name)?.hint || ''}>
+    <button class="te-eca-act" title="Toggle enabled" onclick={() => void toggleECAEnabled(trigID, path, !e.enabled)}>{e.enabled ? '☑' : '☐'}</button>
+    <button class="te-eca-act" title="Move up" onclick={() => void moveECAByDelta(trigID, path, -1)}>↑</button>
+    <button class="te-eca-act" title="Move down" onclick={() => void moveECAByDelta(trigID, path, +1)}>↓</button>
+    <span class="te-eca-tokens {e.enabled ? '' : 'te-disabled'}">
+      {#each buildLabelTokens(e) as tok}
+        {#if tok.kind === 'text'}{@html renderColoredLabel(tok.text)}{:else}<button class="te-tok" onclick={() => openParamEditor(trigID, path, tok.paramIndex, tok.type, e.parameters?.[tok.paramIndex] ?? null)}>{@html renderColoredLabel(tok.label || '(unset)')}</button>{/if}
+      {/each}
+    </span>
+    <button class="te-eca-act te-eca-del" title="Delete ECA" onclick={() => void deleteECA(trigID, path)}>×</button>
+  </div>
+  <!-- Magic-ECA children: render each group with its own header + add button. -->
+  {#if MAGIC_ECAS.has(e.name)}
+    {@const slots = magicChildSlots(e.name)}
+    {#each slots as slot (slot.groupID)}
+      {@const childrenInSlot = childrenForGroup(e, slot.groupID)}
+      <div class="te-magic-slot">
+        <div class="te-magic-header">{slot.label}</div>
+        {#each childrenInSlot as child, ci (ci + '|' + child.name)}
+          {@const childIdx = (e.children ?? []).indexOf(child)}
+          {@const childPath = [...path, childIdx]}
+          {@render ecaRowEditable(trigID, child, childPath)}
+        {/each}
+        {#if childrenInSlot.length === 0}
+          <div class="te-eca-empty" style="padding-left: 16px">(none)</div>
+        {/if}
+        <button class="te-eca-add te-magic-add" onclick={() => openMagicAdd(path, slot)}>+ Add to {slot.label}</button>
+      </div>
+    {/each}
+  {/if}
+{/snippet}
 
 <Dialog.Root bind:open onOpenChange={(v) => { if (!v) onClose?.() }}>
   <Dialog.Content class="w-[95vw] max-w-[95vw] h-[85vh] p-0 flex flex-col">
@@ -1092,17 +1372,7 @@
               <div class="te-eca-list">
                 {#each t.ecas?.filter((e) => e.type === 0) ?? [] as e, i (i + '|' + e.name)}
                   {@const path = topLevelPathOf(t.ecas ?? [], e)}
-                  <div class="te-eca-row te-eca-edit" title={metaByName.get(e.name)?.hint || ''}>
-                    <button class="te-eca-act" title="Toggle enabled" onclick={() => void toggleECAEnabled(t.id, path, !e.enabled)}>{e.enabled ? '☑' : '☐'}</button>
-                    <button class="te-eca-act" title="Move up" onclick={() => void moveECAByDelta(t.id, path, -1)}>↑</button>
-                    <button class="te-eca-act" title="Move down" onclick={() => void moveECAByDelta(t.id, path, +1)}>↓</button>
-                    <span class="te-eca-tokens {e.enabled ? '' : 'te-disabled'}">
-                      {#each buildLabelTokens(e) as tok}
-                        {#if tok.kind === 'text'}{@html renderColoredLabel(tok.text)}{:else}<button class="te-tok" onclick={() => openParamEditor(t.id, path, tok.paramIndex, tok.type, e.parameters?.[tok.paramIndex] ?? null)}>{@html renderColoredLabel(tok.label || '(unset)')}</button>{/if}
-                      {/each}
-                    </span>
-                    <button class="te-eca-act te-eca-del" title="Delete ECA" onclick={() => void deleteECA(t.id, path)}>×</button>
-                  </div>
+                  {@render ecaRowEditable(t.id, e, path)}
                 {/each}
                 {#if parts.events.length === 0}
                   <div class="te-eca-empty">(none)</div>
@@ -1117,17 +1387,7 @@
               <div class="te-eca-list">
                 {#each t.ecas?.filter((e) => e.type === 1) ?? [] as e, i (i + '|' + e.name)}
                   {@const path = topLevelPathOf(t.ecas ?? [], e)}
-                  <div class="te-eca-row te-eca-edit" title={metaByName.get(e.name)?.hint || ''}>
-                    <button class="te-eca-act" title="Toggle enabled" onclick={() => void toggleECAEnabled(t.id, path, !e.enabled)}>{e.enabled ? '☑' : '☐'}</button>
-                    <button class="te-eca-act" title="Move up" onclick={() => void moveECAByDelta(t.id, path, -1)}>↑</button>
-                    <button class="te-eca-act" title="Move down" onclick={() => void moveECAByDelta(t.id, path, +1)}>↓</button>
-                    <span class="te-eca-tokens {e.enabled ? '' : 'te-disabled'}">
-                      {#each buildLabelTokens(e) as tok}
-                        {#if tok.kind === 'text'}{@html renderColoredLabel(tok.text)}{:else}<button class="te-tok" onclick={() => openParamEditor(t.id, path, tok.paramIndex, tok.type, e.parameters?.[tok.paramIndex] ?? null)}>{@html renderColoredLabel(tok.label || '(unset)')}</button>{/if}
-                      {/each}
-                    </span>
-                    <button class="te-eca-act te-eca-del" title="Delete ECA" onclick={() => void deleteECA(t.id, path)}>×</button>
-                  </div>
+                  {@render ecaRowEditable(t.id, e, path)}
                 {/each}
                 {#if parts.conditions.length === 0}
                   <div class="te-eca-empty">(none)</div>
@@ -1142,17 +1402,7 @@
               <div class="te-eca-list">
                 {#each t.ecas?.filter((e) => e.type !== 0 && e.type !== 1) ?? [] as e, i (i + '|' + e.name)}
                   {@const path = topLevelPathOf(t.ecas ?? [], e)}
-                  <div class="te-eca-row te-eca-edit" title={metaByName.get(e.name)?.hint || ''}>
-                    <button class="te-eca-act" title="Toggle enabled" onclick={() => void toggleECAEnabled(t.id, path, !e.enabled)}>{e.enabled ? '☑' : '☐'}</button>
-                    <button class="te-eca-act" title="Move up" onclick={() => void moveECAByDelta(t.id, path, -1)}>↑</button>
-                    <button class="te-eca-act" title="Move down" onclick={() => void moveECAByDelta(t.id, path, +1)}>↓</button>
-                    <span class="te-eca-tokens {e.enabled ? '' : 'te-disabled'}">
-                      {#each buildLabelTokens(e) as tok}
-                        {#if tok.kind === 'text'}{@html renderColoredLabel(tok.text)}{:else}<button class="te-tok" onclick={() => openParamEditor(t.id, path, tok.paramIndex, tok.type, e.parameters?.[tok.paramIndex] ?? null)}>{@html renderColoredLabel(tok.label || '(unset)')}</button>{/if}
-                      {/each}
-                    </span>
-                    <button class="te-eca-act te-eca-del" title="Delete ECA" onclick={() => void deleteECA(t.id, path)}>×</button>
-                  </div>
+                  {@render ecaRowEditable(t.id, e, path)}
                 {/each}
                 {#if parts.actions.length === 0}
                   <div class="te-eca-empty">(none)</div>
@@ -1179,17 +1429,42 @@
   />
 {/if}
 
-<ParamEditor
-  bind:open={paramEditorOpen}
-  paramType={paramEditorType}
-  param={paramEditorParam}
-  presets={functionsMeta?.presets ?? []}
-  typeMeta={functionsMeta?.type_meta ?? []}
-  variables={visibleVariables}
-  onChange={commitParamValue}
-  onPickEntity={onPickEntityFromParamEditor}
-  onClose={() => (paramEditorOpen = false)}
-/>
+{#if paramEditorOpen}
+  {@const leafECA = resolveLeafECA(paramEditorECAPath)}
+  {@const chain = buildParamEditorChain(leafECA, paramEditorRootPath)}
+  <Dialog.Root bind:open={paramEditorOpen} onOpenChange={(v) => { if (!v) paramEditorOpen = false }}>
+    <Dialog.Content class="!max-w-[640px] !w-[85vw] !max-h-[80vh] overflow-hidden flex flex-col p-0 gap-0">
+      <Dialog.Header class="px-4 py-3 border-b">
+        <Dialog.Title>Edit Parameter</Dialog.Title>
+        <Dialog.Description class="text-xs text-muted-foreground">
+          Nesting depth: {chain.length - 1}. Edits commit immediately.
+        </Dialog.Description>
+      </Dialog.Header>
+      <div class="overflow-y-auto px-3 py-3">
+        {#each chain as link, di (link.path.join('-'))}
+          <ParamEditor
+            paramType={link.declaredType}
+            param={link.param}
+            presets={functionsMeta?.presets ?? []}
+            typeMeta={functionsMeta?.type_meta ?? []}
+            variables={visibleVariables}
+            functionsMeta={functionsMeta?.functions ?? []}
+            depth={di}
+            onCommitValue={(c) => void commitParamValue(link.path, c)}
+            onPickSubFunction={(s) => void commitPickSub(link.path, s)}
+            onClearSubFunction={() => void commitClearSub(link.path)}
+            onToggleArray={(a) => void commitToggleArray(link.path, a)}
+            onPickEntity={onPickEntityFromParamEditor}
+            onPickInstance={onPickInstanceFromParamEditor}
+          />
+        {/each}
+      </div>
+      <div class="px-4 py-2 border-t flex justify-end">
+        <button class="te-toolbtn" onclick={() => (paramEditorOpen = false)}>Done</button>
+      </div>
+    </Dialog.Content>
+  </Dialog.Root>
+{/if}
 
 <TriggerEntityPicker
   bind:open={entityPickerOpen}
@@ -1197,6 +1472,13 @@
   currentValue={entityPickerCurrent}
   onPick={onEntityPicked}
   onClose={() => (entityPickerOpen = false)}
+/>
+
+<TriggerInstancePicker
+  bind:open={instancePickerOpen}
+  kind={instancePickerKind}
+  onPick={onInstancePicked}
+  onClose={() => (instancePickerOpen = false)}
 />
 
 <style>
@@ -1376,4 +1658,26 @@
     width: 100%;
   }
   .te-input:disabled { opacity: 0.4; }
+
+  /* Phase 2b2 — magic-ECA child slots (If-Conditions / Then-Actions / etc.) */
+  .te-magic-slot {
+    margin-left: 24px;
+    border-left: 2px solid #3f3f46;
+    padding: 4px 0 4px 8px;
+    margin-top: 2px;
+    margin-bottom: 4px;
+  }
+  .te-magic-header {
+    font-size: 11px;
+    color: #a5b4fc;
+    font-style: italic;
+    padding: 2px 4px;
+    margin-bottom: 2px;
+  }
+  .te-magic-add {
+    margin: 4px 0 2px 0 !important;
+    width: auto !important;
+    padding: 2px 8px !important;
+    font-size: 11px !important;
+  }
 </style>
