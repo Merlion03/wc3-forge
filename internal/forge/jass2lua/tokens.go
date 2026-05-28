@@ -357,7 +357,13 @@ func isIdentCont(c byte) bool {
 }
 func isOpChar(c byte) bool {
 	switch c {
-	case '+', '-', '*', '/', '%', '=', '<', '>', '(', ')', '[', ']', ',', '.':
+	case '+', '-', '*', '/', '%', '=', '<', '>', '(', ')', '[', ']', ',', '.', ':':
+		// `:` is NOT a JASS operator, but the vJASS struct preprocessor
+		// rewrites instance-method calls to Lua-style colon syntax
+		// (`recv:method(args)`) before the transpiler runs. Accepting `:` as
+		// an op token lets that pre-rewritten source flow through; the
+		// parser handles it identically to `.` and the emitter preserves
+		// the colon.
 		return true
 	}
 	return false

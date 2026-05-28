@@ -117,6 +117,14 @@ type CallStmt struct {
 	Args []Expr
 }
 
+// MemberCallStmt is `call recv.method(args)` or `call recv:method(args)` —
+// the statement variant of MemberCallExpr. Added for vJASS struct support
+// (Phase 3). Emitter writes as `recv.method(args)` or `recv:method(args)`
+// respectively.
+type MemberCallStmt struct {
+	Call *MemberCallExpr
+}
+
 // ReturnStmt is `return [expr]`.
 type ReturnStmt struct {
 	Value Expr // nil for bare return
@@ -174,6 +182,30 @@ type IndexExpr struct {
 	Index Expr
 }
 
+// MemberExpr is `base.field` — added for vJASS struct support (Phase 3).
+// JASS proper has no member-access syntax, but the struct preprocessor
+// rewrites `this.x` to `self.x` and leaves `instance.field` references
+// in place; both shapes are valid Lua syntax we map directly.
+//
+// Colon=true means call-via-colon: `recv:method(...)`. Used only when the
+// MemberExpr is the head of a MemberCallExpr. For bare field access,
+// Colon must be false.
+type MemberExpr struct {
+	Base   Expr
+	Member string
+	Colon  bool
+}
+
+// MemberCallExpr is `base.method(args)` (Colon=false) or `base:method(args)`
+// (Colon=true). Used both for static-call-on-struct-name (dot) and
+// instance-call-on-receiver (colon, self auto-injected by Lua).
+type MemberCallExpr struct {
+	Recv   Expr
+	Method string
+	Colon  bool
+	Args   []Expr
+}
+
 // Method markers.
 func (*FuncDecl) node()     {}
 func (*GlobalsBlock) node() {}
@@ -186,6 +218,7 @@ func (*LoopStmt) node()     {}
 func (*ExitWhenStmt) node() {}
 func (*SetStmt) node()      {}
 func (*CallStmt) node()     {}
+func (*MemberCallStmt) node() {}
 func (*ReturnStmt) node()   {}
 func (*LocalStmt) node()    {}
 func (*RawStmt) node()      {}
@@ -200,6 +233,8 @@ func (*BoolLit) node()      {}
 func (*NullLit) node()      {}
 func (*RawLit) node()       {}
 func (*IndexExpr) node()    {}
+func (*MemberExpr) node()   {}
+func (*MemberCallExpr) node() {}
 
 func (*CommentStmt) stmt()  {}
 func (*IfStmt) stmt()       {}
@@ -207,6 +242,7 @@ func (*LoopStmt) stmt()     {}
 func (*ExitWhenStmt) stmt() {}
 func (*SetStmt) stmt()      {}
 func (*CallStmt) stmt()     {}
+func (*MemberCallStmt) stmt() {}
 func (*ReturnStmt) stmt()   {}
 func (*LocalStmt) stmt()    {}
 func (*RawStmt) stmt()      {}
@@ -222,9 +258,12 @@ func (*BoolLit) expr()    {}
 func (*NullLit) expr()    {}
 func (*RawLit) expr()     {}
 func (*IndexExpr) expr()  {}
+func (*MemberExpr) expr() {}
+func (*MemberCallExpr) expr() {}
 
-func (*Ident) lhs()     {}
-func (*IndexExpr) lhs() {}
+func (*Ident) lhs()      {}
+func (*IndexExpr) lhs()  {}
+func (*MemberExpr) lhs() {}
 
 // ---------------------------------------------------------------------------
 // Parser. Hand-rolled recursive descent + Pratt for expressions.
@@ -623,6 +662,31 @@ func (p *parser) parseSet() (*SetStmt, error) {
 		}
 		lhs = &IndexExpr{Base: &Ident{Name: name}, Index: idx}
 	}
+	// Optional member chain: name.member.member (and the indexed variant
+	// name[idx].member). vJASS struct-preprocessor leaves these in the
+	// source for field assignments like `set self.x = ...`.
+	for p.peek().Kind == TokOp && p.peek().Value == "." {
+		p.advance() // .
+		if p.peek().Kind != TokIdent {
+			return nil, fmt.Errorf("expected member name after `.` at line %d:%d", p.peek().Line, p.peek().Col)
+		}
+		member := p.advance().Value
+		// If the member is followed by `[idx]`, fold into an IndexExpr on
+		// top of the member access.
+		var baseExpr Expr = lhsToExpr(lhs)
+		lhs = &MemberExpr{Base: baseExpr, Member: member}
+		if p.peek().Kind == TokOp && p.peek().Value == "[" {
+			p.advance()
+			idx, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(TokOp, "]"); err != nil {
+				return nil, err
+			}
+			lhs = &IndexExpr{Base: lhsToExpr(lhs), Index: idx}
+		}
+	}
 	if _, err := p.expect(TokOp, "="); err != nil {
 		return nil, err
 	}
@@ -634,7 +698,28 @@ func (p *parser) parseSet() (*SetStmt, error) {
 	return &SetStmt{Target: lhs, Value: val}, nil
 }
 
-func (p *parser) parseCall() (*CallStmt, error) {
+// lhsToExpr converts a Lhs node into the equivalent Expr (every Lhs is
+// expr-shaped in JASS+; this is a runtime-typed view). Used when we need to
+// chain member access on top of an existing LHS.
+func lhsToExpr(l Lhs) Expr {
+	switch n := l.(type) {
+	case *Ident:
+		return n
+	case *IndexExpr:
+		return n
+	case *MemberExpr:
+		return n
+	}
+	return &Ident{Name: "--[[lhs?]]"}
+}
+
+// parseCall parses `call foo(args)` and the vJASS member variants
+// `call recv.method(args)` / `call recv:method(args)`. Returns either a
+// CallStmt or a MemberCallStmt via the caller's typed sink. To keep the
+// existing call-sites working, we keep CallStmt as the return type when
+// the call is plain; the parseStmt dispatcher checks for member shape
+// before invoking this helper.
+func (p *parser) parseCall() (Stmt, error) {
 	if _, err := p.expect(TokKeyword, "call"); err != nil {
 		return nil, err
 	}
@@ -642,6 +727,26 @@ func (p *parser) parseCall() (*CallStmt, error) {
 		return nil, fmt.Errorf("expected function name at line %d:%d", p.peek().Line, p.peek().Col)
 	}
 	name := p.advance().Value
+	// Member-call shape: `call recv.method(args)` or `call recv:method(args)`.
+	// May also be `call recv[idx].method(args)` — we let parseMemberChain
+	// handle the indexed and chained cases. The recv ident is the first
+	// token after `call`; everything else is fed through parseMemberChain.
+	if p.peek().Kind == TokOp && (p.peek().Value == "." || p.peek().Value == ":") {
+		// Build the receiver and chain.
+		var head Expr = &Ident{Name: name}
+		// Look for an optional `[idx]` before the dot/colon (e.g.
+		// `call arr[i].method()`).
+		expr, err := p.parseMemberChain(head)
+		if err != nil {
+			return nil, err
+		}
+		mc, ok := expr.(*MemberCallExpr)
+		if !ok {
+			return nil, fmt.Errorf("expected method call after `.`/`:` at line %d:%d", p.peek().Line, p.peek().Col)
+		}
+		p.skipToEOL()
+		return &MemberCallStmt{Call: mc}, nil
+	}
 	if _, err := p.expect(TokOp, "("); err != nil {
 		return nil, err
 	}
@@ -928,9 +1033,12 @@ func (p *parser) parsePrimary() (Expr, error) {
 			return e, nil
 		}
 	case TokIdent:
-		// Identifier, optionally followed by ( for call, or [ for index.
+		// Identifier, optionally followed by ( for call, [ for index, or
+		// .member / :method for member access / member call (vJASS Phase 3).
 		p.advance()
-		if p.peek().Kind == TokOp && p.peek().Value == "(" {
+		var head Expr
+		switch {
+		case p.peek().Kind == TokOp && p.peek().Value == "(":
 			p.advance()
 			args, err := p.parseArgList()
 			if err != nil {
@@ -939,9 +1047,8 @@ func (p *parser) parsePrimary() (Expr, error) {
 			if _, err := p.expect(TokOp, ")"); err != nil {
 				return nil, err
 			}
-			return &CallExpr{Func: t.Value, Args: args}, nil
-		}
-		if p.peek().Kind == TokOp && p.peek().Value == "[" {
+			head = &CallExpr{Func: t.Value, Args: args}
+		case p.peek().Kind == TokOp && p.peek().Value == "[":
 			p.advance()
 			idx, err := p.parseExpr()
 			if err != nil {
@@ -950,11 +1057,65 @@ func (p *parser) parsePrimary() (Expr, error) {
 			if _, err := p.expect(TokOp, "]"); err != nil {
 				return nil, err
 			}
-			return &IndexExpr{Base: &Ident{Name: t.Value}, Index: idx}, nil
+			head = &IndexExpr{Base: &Ident{Name: t.Value}, Index: idx}
+		default:
+			head = &Ident{Name: t.Value}
 		}
-		return &Ident{Name: t.Value}, nil
+		return p.parseMemberChain(head)
 	}
 	return nil, fmt.Errorf("unexpected token in expression: %q at line %d:%d", t.Value, t.Line, t.Col)
+}
+
+// parseMemberChain consumes any trailing `.member`, `:method(args)`,
+// `.method(args)`, or `[idx]` chains on top of `head`. Returns the final
+// expression. Used by parsePrimary after the leading ident is recognized.
+//
+// vJASS struct preprocessor rewrites instance-method calls to use `:`,
+// keeping static calls as `.`. The parser preserves the distinction via
+// MemberCallExpr.Colon so the emitter can pick the right Lua syntax.
+func (p *parser) parseMemberChain(head Expr) (Expr, error) {
+	for {
+		t := p.peek()
+		if t.Kind != TokOp {
+			return head, nil
+		}
+		switch t.Value {
+		case ".", ":":
+			colon := t.Value == ":"
+			p.advance()
+			if p.peek().Kind != TokIdent {
+				return nil, fmt.Errorf("expected member name after %q at line %d:%d", t.Value, p.peek().Line, p.peek().Col)
+			}
+			member := p.advance().Value
+			// Method call?
+			if p.peek().Kind == TokOp && p.peek().Value == "(" {
+				p.advance()
+				args, err := p.parseArgList()
+				if err != nil {
+					return nil, err
+				}
+				if _, err := p.expect(TokOp, ")"); err != nil {
+					return nil, err
+				}
+				head = &MemberCallExpr{Recv: head, Method: member, Colon: colon, Args: args}
+				continue
+			}
+			// Plain field access.
+			head = &MemberExpr{Base: head, Member: member, Colon: colon}
+		case "[":
+			p.advance()
+			idx, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(TokOp, "]"); err != nil {
+				return nil, err
+			}
+			head = &IndexExpr{Base: head, Index: idx}
+		default:
+			return head, nil
+		}
+	}
 }
 
 func (p *parser) parseArgList() ([]Expr, error) {

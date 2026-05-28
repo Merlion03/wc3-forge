@@ -40,11 +40,16 @@
     errors?: string[]
     preprocess_warnings?: string[]
     libscope_warnings?: string[]
+    struct_warnings?: string[]
     init_order?: Array<{
       Name: string
       InitFunc: string
       Public: string[]
       Private: string[]
+    }>
+    struct_inits?: Array<{
+      StructName: string
+      InitMethod: string
     }>
   }
 
@@ -70,6 +75,7 @@
   let previewError: string = $state('')
   let warningsExpanded: boolean = $state(false)
   let libscopeWarningsExpanded: boolean = $state(false)
+  let structWarningsExpanded: boolean = $state(false)
 
   let hasBlockers: boolean = $derived(blockers.length > 0)
   let hasPreview: boolean = $derived(preview.length > 0)
@@ -263,11 +269,12 @@
                         selectedSectionIdx = i
                         warningsExpanded = false
                         libscopeWarningsExpanded = false
+                        structWarningsExpanded = false
                       }}
                     >
                       <span class="font-medium truncate">{section.label}</span>
                       <span class="text-[10px] uppercase tracking-wide opacity-60">
-                        {sectionBadge(section.kind)}{section.errors && section.errors.length > 0 ? ' • ⚠ errors' : ''}{section.preprocess_warnings && section.preprocess_warnings.length > 0 ? ' • ⚠ macros' : ''}{section.libscope_warnings && section.libscope_warnings.length > 0 ? ' • ⚠ libs' : ''}
+                        {sectionBadge(section.kind)}{section.errors && section.errors.length > 0 ? ' • ⚠ errors' : ''}{section.preprocess_warnings && section.preprocess_warnings.length > 0 ? ' • ⚠ macros' : ''}{section.libscope_warnings && section.libscope_warnings.length > 0 ? ' • ⚠ libs' : ''}{section.struct_warnings && section.struct_warnings.length > 0 ? ' • ⚠ structs' : ''}
                       </span>
                     </button>
                   </li>
@@ -322,6 +329,29 @@
                     {#if libscopeWarningsExpanded}
                       <ul class="mt-1.5 pl-5 list-disc space-y-0.5 max-h-24 overflow-y-auto">
                         {#each currentSection.libscope_warnings as w (w)}
+                          <li class="font-mono break-all opacity-90">{w}</li>
+                        {/each}
+                      </ul>
+                    {/if}
+                  </div>
+                {/if}
+                {#if currentSection.struct_warnings && currentSection.struct_warnings.length > 0}
+                  <div class="px-4 py-1.5 border-b bg-amber-500/10 text-xs text-amber-300">
+                    <button
+                      type="button"
+                      class="flex items-center gap-1.5 w-full text-left hover:opacity-80 transition-opacity"
+                      onclick={() => (structWarningsExpanded = !structWarningsExpanded)}
+                      title="Toggle struct preprocessor warnings"
+                    >
+                      <span class="opacity-70">{structWarningsExpanded ? '▼' : '▶'}</span>
+                      <span class="font-medium">
+                        ⚠ {currentSection.struct_warnings.length} struct warning{currentSection.struct_warnings.length === 1 ? '' : 's'}
+                      </span>
+                      <span class="opacity-60 text-[10px]">(non-blocking; common: `extends array`, `delegate`)</span>
+                    </button>
+                    {#if structWarningsExpanded}
+                      <ul class="mt-1.5 pl-5 list-disc space-y-0.5 max-h-24 overflow-y-auto">
+                        {#each currentSection.struct_warnings as w (w)}
                           <li class="font-mono break-all opacity-90">{w}</li>
                         {/each}
                       </ul>

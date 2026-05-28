@@ -372,19 +372,17 @@ endscope`, "", false},
 endfunction`, "", false},
 		{"requires_no_longer_blocks", `library Foo requires Bar
 endlibrary`, "", false},
-		// struct / module / interface still block (Phases 3/4).
-		{"struct", `struct S
-    integer x
-endstruct`, "struct", true},
+		// module / interface still block (Phase 4). `struct` is handled by
+		// PreprocessStructs (Phase 3) and no longer trips the keyword gate.
 		{"module", `module M
 endmodule`, "module", true},
 		{"interface", `interface I
 endinterface`, "interface", true},
 		{"textmacro", `//! textmacro FOO takes BAR
 //! endtextmacro`, "", false}, // textmacro lives in a comment; correct false
-		// Quoted "struct" should NOT trip.
-		{"quoted_struct", `function Q takes nothing returns nothing
-    call BJDebugMsg("struct Foo")
+		// Quoted "struct" / "module" should NOT trip.
+		{"quoted_module", `function Q takes nothing returns nothing
+    call BJDebugMsg("module Foo")
 endfunction`, "", false},
 	}
 	for _, c := range cases {

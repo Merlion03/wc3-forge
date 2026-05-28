@@ -252,6 +252,13 @@ func (e *emitter) emitStmt(s Stmt) {
 		e.writeLine(fmt.Sprintf("%s = %s", e.emitLhs(n.Target), e.emitExpr(n.Value)))
 	case *CallStmt:
 		e.writeLine(fmt.Sprintf("%s(%s)", n.Func, e.emitArgList(n.Args)))
+	case *MemberCallStmt:
+		// recv.method(args) or recv:method(args) depending on Colon flag.
+		sep := "."
+		if n.Call.Colon {
+			sep = ":"
+		}
+		e.writeLine(fmt.Sprintf("%s%s%s(%s)", e.emitExpr(n.Call.Recv), sep, n.Call.Method, e.emitArgList(n.Call.Args)))
 	case *IfStmt:
 		e.emitIf(n)
 	case *LoopStmt:
@@ -335,6 +342,9 @@ func (e *emitter) emitLhs(l Lhs) string {
 		return n.Name
 	case *IndexExpr:
 		return e.emitExpr(n.Base) + "[" + e.emitExpr(n.Index) + "]"
+	case *MemberExpr:
+		// LHS member access — always dot in Lua (colon is call-only).
+		return e.emitExpr(n.Base) + "." + n.Member
 	}
 	return "--[[lhs?]]"
 }
@@ -372,6 +382,16 @@ func (e *emitter) emitExpr(x Expr) string {
 		return e.emitExpr(n.Base) + "[" + e.emitExpr(n.Index) + "]"
 	case *CallExpr:
 		return fmt.Sprintf("%s(%s)", n.Func, e.emitArgList(n.Args))
+	case *MemberExpr:
+		// Field access — Lua dot syntax (Colon is call-only and ignored
+		// here; the parser sets Colon=false for bare field access).
+		return e.emitExpr(n.Base) + "." + n.Member
+	case *MemberCallExpr:
+		sep := "."
+		if n.Colon {
+			sep = ":"
+		}
+		return fmt.Sprintf("%s%s%s(%s)", e.emitExpr(n.Recv), sep, n.Method, e.emitArgList(n.Args))
 	case *UnaryExpr:
 		op := n.Op
 		if op == "not" {
@@ -473,10 +493,14 @@ func luaStringLit(s string) string {
 // therefore also absent from this list — a map whose only vJASS surface is
 // library + scope now flows through cleanly.
 //
-// Struct / module / interface / define remain blockers; Phases 3/4 will
-// remove them from this list as the corresponding passes land.
+// Phase 3 adds the struct preprocessor (PreprocessStructs) which strips
+// struct/endstruct blocks (with method/endmethod, static, delegate, readonly,
+// thistype, onInit inside them) and replaces each with a marker comment that
+// the codegen splices the emitted Lua at. Those keywords are therefore also
+// absent from this list.
+//
+// Module / interface / define remain blockers; Phase 4 will remove them.
 var vJASSKeywords = []string{
-	"struct", "endstruct",
 	"module", "endmodule",
 	"define",
 	"interface", "endinterface",

@@ -148,14 +148,14 @@ func TestCheckConvertToLua_PureJassScriptTriggerNotBlocked(t *testing.T) {
 // TestCheckConvertToLua_VJassScriptTriggerBlocks asserts an is_script trigger
 // with a vJASS `struct` keyword IS a blocker.
 //
-// Phase 2 deliberately stopped blocking `library` (it's preprocessed away).
-// We pivoted this test to `struct`, which is unblocked by Phase 3 work.
+// Phase 2 stopped blocking `library`; Phase 3 stopped blocking `struct`.
+// We pivoted this test to `module`, the remaining Phase-4-only blocker.
 func TestCheckConvertToLua_VJassScriptTriggerBlocks(t *testing.T) {
 	tr := guiOnlyTriggers()
 	tr.Triggers = append(tr.Triggers, wtg.Trigger{
 		Classifier: wtg.ClassifierScript, ID: 11, ParentID: 1,
 		Name: "VJassThing", IsEnabled: true, InitiallyOn: true, IsScript: true,
-		CustomText: "struct Foo\n    integer x\nendstruct\n",
+		CustomText: "module Foo\nendmodule\n",
 	})
 	tr.Elements = append(tr.Elements, wtg.ElementRef{Kind: wtg.ElementKindTrigger, Index: 1})
 	dir := writeConvertFixture(t, tr)
@@ -222,7 +222,7 @@ func TestCheckConvertToLua_MixedTriggers(t *testing.T) {
 		wtg.Trigger{
 			Classifier: wtg.ClassifierScript, ID: 12, ParentID: 1,
 			Name: "WithStruct", IsEnabled: true, InitiallyOn: true, IsScript: true,
-			CustomText: "struct S\n    integer x\nendstruct\n",
+			CustomText: "module S\nendmodule\n",
 		},
 	)
 	tr.Elements = append(tr.Elements,
@@ -292,9 +292,10 @@ func TestCheckConvertToLua_HandRolledPureJassNotBlocked(t *testing.T) {
 }
 
 // TestCheckConvertToLua_HandRolledVJassBlocks asserts a hand-rolled war3map.j
-// containing struct (Phase 3+ vJASS surface) IS a blocker.
+// containing `module` (Phase 4 vJASS surface) IS a blocker.
 //
-// Pre-Phase-2 this test used `library`; that's no longer a blocker.
+// Pre-Phase-2 this test used `library`; pre-Phase-3 it used `struct`. Both
+// are now handled. Module remains the canonical Phase-4 blocker.
 func TestCheckConvertToLua_HandRolledVJassBlocks(t *testing.T) {
 	dir := t.TempDir()
 	info := &w3i.Info{
@@ -304,7 +305,7 @@ func TestCheckConvertToLua_HandRolledVJassBlocks(t *testing.T) {
 	}
 	infoBytes, _ := w3i.Encode(info)
 	_ = os.WriteFile(filepath.Join(dir, "war3map.w3i"), infoBytes, 0o644)
-	_ = os.WriteFile(filepath.Join(dir, "war3map.j"), []byte("struct Stuff\n    integer x\nendstruct\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "war3map.j"), []byte("module Stuff\nendmodule\n"), 0o644)
 
 	s := &Session{}
 	if err := s.Open(dir); err != nil {

@@ -281,8 +281,8 @@ endfunction
 }
 
 // FindVJASSKeyword should NOT trip on textmacro-family keywords after Phase 1
-// (the preprocessor consumes them). Library/scope no longer block after
-// Phase 2 either. Struct/module/interface/define still block until Phases 3/4.
+// (the preprocessor consumes them). Library/scope/struct no longer block
+// after Phases 2/3 either. Module/interface/define still block until Phase 4.
 func TestFindVJASSKeyword_TextmacroFamilyIgnored(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -292,9 +292,8 @@ func TestFindVJASSKeyword_TextmacroFamilyIgnored(t *testing.T) {
 		{"runtextmacro_in_source", `function F takes nothing returns nothing
 //! runtextmacro Foo()
 endfunction`, false},
-		{"struct_still_blocks", `struct X
-    integer y
-endstruct`, true},
+		{"module_still_blocks", `module X
+endmodule`, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

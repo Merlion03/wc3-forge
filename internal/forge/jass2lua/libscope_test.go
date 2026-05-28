@@ -445,11 +445,17 @@ endlibrary`,
 			false,
 		},
 		{
-			"struct_still_blocks",
+			// struct no longer blocks after Phase 3 — but the keyword scan
+			// runs on the post-libscope source, NOT post-struct. So a bare
+			// `struct ... endstruct` in the input here would still trip the
+			// scan since this test exercises ONLY the libscope-to-keyword
+			// gate. The real convert flow runs PreprocessStructs in between
+			// (see scanVJASSAfterPreprocess in triggers_convert.go).
+			"struct_still_trips_keyword_scan_in_this_test",
 			`struct S
     integer x
 endstruct`,
-			true,
+			false, // struct is removed from vJASSKeywords gate (Phase 3)
 		},
 		{
 			"module_still_blocks",

@@ -80,6 +80,11 @@ var ErrPreserveScript = errors.New("war3map.lua starts with " + PreserveScriptMa
 // _vjass_init_libs() function that calls each LibraryInit.InitFunc in
 // order, then calls _vjass_init_libs() from main() after globals init but
 // before user trigger registration.
+//
+// StructInits is the aggregated list of vJASS structs that defined a
+// `static method onInit` (Phase 3). The codegen appends each
+// `Foo.onInit()` call AFTER the library inits inside _vjass_init_libs()
+// so structs can use library-provided globals during their own init.
 type CodegenInputs struct {
 	Triggers    *wtg.Triggers          // war3map.wtg parsed tree
 	CustomTexts map[int32]string       // trigger id → custom_text (overrides Trigger.CustomText if both set)
@@ -92,6 +97,7 @@ type CodegenInputs struct {
 	TD          *wtg.TriggerData       // UI/TriggerData.txt
 	GlobalJASS  string                 // war3map.wct GlobalJASS block (concatenated verbatim into the script body, after globals)
 	LibInits    []jass2lua.LibraryInit // aggregated vJASS library init order (Phase 2)
+	StructInits []jass2lua.StructInit  // aggregated vJASS struct onInit hooks (Phase 3)
 }
 
 // GenerateLuaScript is the Phase-3 entry point. Returns the war3map.lua
@@ -220,28 +226,49 @@ func GenerateLuaScript(in CodegenInputs) (string, error) {
 }
 
 // emitVJASSInitLibs writes a synthetic function that calls each vJASS
-// library's initializer in dependency-respecting order. Called from main()
+// library's initializer in dependency-respecting order, then each vJASS
+// struct's `static method onInit` (Phase 3). Called from main()
 // (after InitGlobals, before InitCustomTriggers) by emitMain.
 //
-// When no libraries have initializers, the function still emits (empty body)
-// so the main() call site doesn't need a conditional. The cost is one extra
-// nop call per map load — well below noise floor.
+// Order: libraries first, then structs. Libraries can register globals or
+// helpers structs depend on, but structs typically don't define library-
+// scope state, so library-before-struct is the safe order. Within each
+// group, source order is preserved (libraries' dep-sort already runs in
+// the preprocessor; structs aren't dep-sorted — they're appended in
+// section-iteration order).
+//
+// When neither libraries nor structs have init hooks, the function still
+// emits (empty body) so the main() call site doesn't need a conditional.
+// The cost is one extra nop call per map load — well below noise floor.
 func (c *luaCodegen) emitVJASSInitLibs() {
 	c.script.WriteString("function _vjass_init_libs()\n")
-	// Deduplicate by library name in case the same library appears across
+	// Deduplicate libraries by name in case the same library appears across
 	// multiple sections (rare, but textmacros can paste a library declaration
 	// into every trigger that runtextmacro's it). The first occurrence in
 	// dep order wins; subsequent duplicates are silently dropped.
-	seen := map[string]bool{}
+	seenLib := map[string]bool{}
 	for _, lib := range c.in.LibInits {
-		if seen[lib.Name] {
+		if seenLib[lib.Name] {
 			continue
 		}
-		seen[lib.Name] = true
+		seenLib[lib.Name] = true
 		if lib.InitFunc == "" {
 			continue
 		}
 		c.script.WriteString(fmt.Sprintf("\t%s()\n", lib.InitFunc))
+	}
+	// Struct onInit hooks. Same dedupe story — a struct could appear in
+	// multiple sections via textmacro paste.
+	seenStruct := map[string]bool{}
+	for _, st := range c.in.StructInits {
+		if seenStruct[st.StructName] {
+			continue
+		}
+		seenStruct[st.StructName] = true
+		if st.InitMethod == "" {
+			continue
+		}
+		c.script.WriteString(fmt.Sprintf("\t%s.%s()\n", st.StructName, st.InitMethod))
 	}
 	c.script.WriteString("end\n\n")
 }
