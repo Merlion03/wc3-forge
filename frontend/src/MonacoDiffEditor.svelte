@@ -69,6 +69,7 @@
         originalEditable: false,
         automaticLayout: false,
         renderSideBySide: true,
+        useInlineViewWhenSpaceIsLimited: false,
         scrollBeyondLastLine: false,
         fontFamily: 'Consolas, "Courier New", monospace',
         fontSize: 13,

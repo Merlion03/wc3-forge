@@ -171,7 +171,7 @@
 
 <Dialog.Root bind:open>
   <Dialog.Content
-    class="w-[min(1100px,calc(100%-2rem))] max-w-[min(1100px,calc(100%-2rem))] sm:max-w-[min(1100px,calc(100%-2rem))] gap-0 p-0 overflow-hidden"
+    class="!w-[95vw] !max-w-[1600px] h-[85vh] gap-0 p-0 overflow-hidden flex flex-col"
   >
     <Dialog.Header class="px-4 py-3 border-b">
       <Dialog.Title>
