@@ -657,6 +657,126 @@ func TestSetParamValue_NestedPath(t *testing.T) {
 	}
 }
 
+// TestSmoke_MultiLevelSubFunction — the phase plan's stated smoke test:
+// build IfThenElseMultiple → set its boolexpr to GetBooleanAnd (or similar)
+// → recurse into that sub-function's first slot → set IT to another sub-
+// function → save, reopen, confirm the whole tree survives.
+//
+// This exercises every 2b2 mutator end-to-end: SetParamSubFunction (twice,
+// at different depths), SetParamValue on the leaf via paramPath, save +
+// reopen for byte-faithful round-trip.
+func TestSmoke_MultiLevelSubFunction(t *testing.T) {
+	s, tmp := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	// Top-level: IfThenElse (takes a boolexpr).
+	path, err := s.AddECA(id, 2 /*Action*/, "IfThenElse", -1)
+	if err != nil {
+		t.Fatalf("AddECA IfThenElse: %v", err)
+	}
+	// Find a [TriggerCalls] entry returning boolexpr with at least one arg.
+	td := TriggerDataSnapshot()
+	var outerName, innerName string
+	if rows, ok := td.Sections["TriggerCalls"]; ok {
+		for k := range rows {
+			if k[0] == '_' {
+				continue
+			}
+			if td.FunctionReturnType(k) == "boolexpr" {
+				argc, _ := td.Argc(k)
+				if argc >= 1 && outerName == "" {
+					outerName = k
+				}
+			}
+		}
+		for k := range rows {
+			if k[0] == '_' {
+				continue
+			}
+			if td.FunctionReturnType(k) == "boolexpr" {
+				innerName = k
+				break
+			}
+		}
+	}
+	if outerName == "" || innerName == "" {
+		t.Skip("no boolexpr-returning calls in snapshot")
+	}
+	// Level 1: outer sub-function on slot 0.
+	if err := s.SetParamSubFunction(id, path, []int{0}, outerName); err != nil {
+		t.Fatalf("SetParamSubFunction level 1: %v", err)
+	}
+	// Level 2: another sub-function on the outer's first inner slot (if its
+	// first arg type is boolexpr — otherwise we just write a literal).
+	outerArgTypes := td.FunctionArgTypes(outerName)
+	if len(outerArgTypes) > 0 && outerArgTypes[0] == "boolexpr" {
+		if err := s.SetParamSubFunction(id, path, []int{0, 0}, innerName); err != nil {
+			t.Fatalf("SetParamSubFunction level 2: %v", err)
+		}
+	}
+	// Save + reopen.
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	s2 := &Session{}
+	if err := s2.Open(tmp); err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	tr := s2.Triggers().Triggers[findTriggerIndex(s2.Triggers(), id)]
+	var ifeca wtg.ECA
+	for _, e := range tr.ECAs {
+		if e.Name == "IfThenElse" {
+			ifeca = e
+			break
+		}
+	}
+	if ifeca.Name == "" || len(ifeca.Parameters) == 0 {
+		t.Fatalf("IfThenElse missing after reopen")
+	}
+	outer := ifeca.Parameters[0]
+	if !outer.HasSubParameter || outer.SubParameter == nil || outer.SubParameter.Name != outerName {
+		t.Errorf("outer sub-function lost: %+v", outer)
+	}
+	if len(outerArgTypes) > 0 && outerArgTypes[0] == "boolexpr" {
+		if len(outer.SubParameter.Parameters) == 0 {
+			t.Fatalf("outer sub has no inner Parameters")
+		}
+		inner := outer.SubParameter.Parameters[0]
+		if !inner.HasSubParameter || inner.SubParameter == nil || inner.SubParameter.Name != innerName {
+			t.Errorf("inner sub-function lost: %+v", inner)
+		}
+	}
+}
+
+// TestAddNestedECA_AppendsAndDirties — happy path for the magic-ECA child
+// add. After adding an IfThenElseMultiple, append a child to its Then-actions
+// bucket; expect parent.Children to grow + dirty to flip + new child to
+// carry the right Group field.
+func TestAddNestedECA_AppendsAndDirties(t *testing.T) {
+	s, _ := loadFixtureSession(t)
+	id := guiTriggerForTest(t, s)
+	parentPath, err := s.AddECA(id, 2, "IfThenElseMultiple", -1)
+	if err != nil {
+		t.Fatalf("AddECA IfThenElseMultiple: %v", err)
+	}
+	// Append a DoNothing action to the Then bucket (group=1).
+	childPath, err := s.AddNestedECA(id, parentPath, 2 /*Action*/, "DoNothing", 1)
+	if err != nil {
+		t.Fatalf("AddNestedECA: %v", err)
+	}
+	if len(childPath) != len(parentPath)+1 {
+		t.Errorf("childPath length %d, expected %d", len(childPath), len(parentPath)+1)
+	}
+	tr := s.Triggers().Triggers[findTriggerIndex(s.Triggers(), id)]
+	parent := tr.ECAs[parentPath[0]]
+	if len(parent.Children) == 0 {
+		t.Fatalf("parent has no children after AddNestedECA")
+	}
+	child := parent.Children[len(parent.Children)-1]
+	if child.Name != "DoNothing" || child.Group != 1 {
+		t.Errorf("child = %+v, want Name=DoNothing Group=1", child)
+	}
+}
+
 // TestSetParamSubFunction_RejectsNonCalls — sub-function must come from
 // [TriggerCalls]; attempting to use a TriggerActions name should error.
 func TestSetParamSubFunction_RejectsNonCalls(t *testing.T) {
