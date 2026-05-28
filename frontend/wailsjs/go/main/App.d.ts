@@ -58,6 +58,8 @@ export function GameplayConstantsApply(arg1:Array<main.GameplayConstantRow>):Pro
 
 export function GameplayConstantsGet():Promise<Array<main.GameplayConstantRow>>;
 
+export function GenerateTriggerScript():Promise<main.TriggerScriptResultDTO>;
+
 export function GetBridgeInfo():Promise<main.BridgeInfo>;
 
 export function GetDoodad(arg1:number):Promise<doodadsdoo.Doodad>;
@@ -154,9 +156,13 @@ export function RotateUnit(arg1:number,arg2:number):Promise<void>;
 
 export function SaveMap():Promise<void>;
 
+export function SaveTriggerScript():Promise<main.TriggerScriptResultDTO>;
+
 export function ScaleDoodad(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
 export function ScaleUnit(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
+
+export function SearchTriggers(arg1:string,arg2:number):Promise<Array<main.TriggerSearchHitDTO>>;
 
 export function SelectUnit(arg1:number):Promise<main.SelectionDTO>;
 
@@ -197,6 +203,8 @@ export function SetUnitObjectField(arg1:string,arg2:string,arg3:string):Promise<
 export function Status():Promise<main.MapStatus>;
 
 export function SwapTileset(arg1:main.SwapTilesetRequest):Promise<main.TerrainDTO>;
+
+export function TestMap():Promise<void>;
 
 export function Undo():Promise<void>;
 

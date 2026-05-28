@@ -46,6 +46,7 @@
     ClearTriggerParamSubFunction,
     SetTriggerParamArray,
     AddTriggerNestedECA,
+    TestMap,
     paramLabel,
     renderECALabel,
     MAGIC_ECAS,
@@ -60,6 +61,8 @@
     type TriggerFunctionMeta,
     type TriggerFunctionsMeta,
   } from './trigger-editor-bindings'
+  import TriggerScriptPreview from './TriggerScriptPreview.svelte'
+  import TriggerSearchPalette from './TriggerSearchPalette.svelte'
   import { parseWC3Color } from './wc3color'
   import * as Dialog from '$lib/components/ui/dialog'
   import FunctionPicker from './FunctionPicker.svelte'
@@ -96,6 +99,77 @@
   // render ECA labels via the _Foo_Parameters templates.
   let functionsMeta: TriggerFunctionsMeta | null = $state(null)
   let metaByName: Map<string, TriggerFunctionMeta> = $state(new Map())
+
+  // Phase 3 — script preview modal + search palette + Test Map state.
+  let showScriptPreview = $state(false)
+  let showSearchPalette = $state(false)
+  let testMapBusy = $state(false)
+  // Toast text + auto-clear timer; surfaces TestMap / generate-script success
+  // and error feedback to the user.
+  let toastText: string = $state('')
+  let toastKind: 'ok' | 'err' = $state('ok')
+  let toastTimer: ReturnType<typeof setTimeout> | null = null
+  function showToast(msg: string, kind: 'ok' | 'err' = 'ok') {
+    toastText = msg
+    toastKind = kind
+    if (toastTimer) clearTimeout(toastTimer)
+    toastTimer = setTimeout(() => (toastText = ''), 4000)
+  }
+
+  // After search-palette navigation we briefly highlight the matched ECA so
+  // the user can find it. Cleared after 2s by the highlight watcher.
+  let highlightedECAPath: number[] | null = $state(null)
+  let highlightTimer: ReturnType<typeof setTimeout> | null = null
+  function flashECAHighlight(path: number[] | undefined) {
+    if (!path) return
+    highlightedECAPath = path
+    if (highlightTimer) clearTimeout(highlightTimer)
+    highlightTimer = setTimeout(() => (highlightedECAPath = null), 2000)
+  }
+
+  // Double-Shift detector for the search palette. Press Shift twice within
+  // 300 ms to toggle. Ctrl/Cmd+P is a second binding.
+  let lastShiftTime = 0
+  function onKeydownGlobal(e: KeyboardEvent) {
+    if (!open) return
+    // Ctrl+P / Cmd+P → open palette
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p' && !e.shiftKey && !e.altKey) {
+      // Don't intercept browser print on text fields — but inside the dialog
+      // we own this binding.
+      e.preventDefault()
+      showSearchPalette = true
+      return
+    }
+    // Double-Shift
+    if (e.key === 'Shift') {
+      const now = performance.now()
+      if (now - lastShiftTime < 300) {
+        showSearchPalette = true
+        lastShiftTime = 0
+      } else {
+        lastShiftTime = now
+      }
+    }
+  }
+
+  async function onTestMap() {
+    if (testMapBusy) return
+    testMapBusy = true
+    try {
+      await TestMap()
+      showToast('Test Map launched — opening Warcraft III…', 'ok')
+    } catch (e) {
+      showToast(`Test Map failed: ${e}`, 'err')
+    } finally {
+      testMapBusy = false
+    }
+  }
+
+  async function onPickSearchHit(triggerID: number, ecaPath: number[] | undefined) {
+    showSearchPalette = false
+    await selectNode(triggerID)
+    flashECAHighlight(ecaPath)
+  }
 
   // Track open transitions to (re)load the tree. Initial-id selection runs
   // once the tree is populated.
@@ -1236,15 +1310,28 @@
       <div class="px-4 py-2 bg-red-900/30 text-red-200 text-sm">{errorMsg}</div>
     {/if}
 
-    <!-- Toolbar: structural-add buttons. New items land under selectedParent(). -->
-    <div class="px-3 py-2 border-b flex gap-2 items-center bg-zinc-900/40">
+    <!-- Toolbar: structural-add buttons + Phase 3 actions (preview, test map,
+         search). New items land under selectedParent(). -->
+    <div class="px-3 py-2 border-b flex gap-2 items-center bg-zinc-900/40" onkeydown={onKeydownGlobal} tabindex="-1" role="toolbar">
       <button class="te-toolbtn" title="Add category under selection" onclick={() => promptAndAdd('category')}>+ Category</button>
       <button class="te-toolbtn" title="Add GUI trigger under selection" onclick={() => promptAndAdd('gui')}>+ GUI</button>
       <button class="te-toolbtn" title="Add custom-script trigger under selection" onclick={() => promptAndAdd('script')}>+ Script</button>
       <button class="te-toolbtn" title="Add comment trigger under selection" onclick={() => promptAndAdd('comment')}>+ Comment</button>
       <button class="te-toolbtn" title="Add global variable" onclick={() => promptAndAdd('variable')}>+ Variable</button>
-      <span class="text-zinc-500 text-xs ml-auto">Drag nodes to reorganize · right-click for actions</span>
+      <div class="border-l h-6 mx-1 border-zinc-700"></div>
+      <button class="te-toolbtn" title="Preview generated war3map.lua" onclick={() => (showScriptPreview = true)}>Preview Script</button>
+      <button class="te-toolbtn" title="Search all triggers (Ctrl+P or double-Shift)" onclick={() => (showSearchPalette = true)}>Search…</button>
+      <button class="te-toolbtn" title="Save map + regenerate war3map.lua + launch Warcraft III"
+        onclick={() => void onTestMap()} disabled={testMapBusy}>
+        {testMapBusy ? 'Launching…' : 'Test Map'}
+      </button>
+      <span class="text-zinc-500 text-xs ml-auto">Drag nodes to reorganize · right-click for actions · Ctrl+P / double-Shift to search</span>
     </div>
+    {#if toastText}
+      <div class="px-3 py-1 text-sm {toastKind === 'err' ? 'bg-red-900/40 text-red-200' : 'bg-emerald-900/30 text-emerald-200'}">
+        {toastText}
+      </div>
+    {/if}
 
     <div class="flex-1 flex min-h-0">
       <!-- Left pane: tree -->
@@ -1480,6 +1567,21 @@
   onPick={onInstancePicked}
   onClose={() => (instancePickerOpen = false)}
 />
+
+<!-- Phase 3 — script preview + search palette. Mounted outside the main
+     Dialog.Root so they can layer above without z-index gymnastics. -->
+<TriggerScriptPreview
+  bind:open={showScriptPreview}
+  onClose={() => (showScriptPreview = false)}
+/>
+
+<TriggerSearchPalette
+  bind:open={showSearchPalette}
+  onPick={onPickSearchHit}
+  onClose={() => (showSearchPalette = false)}
+/>
+
+<svelte:window onkeydown={onKeydownGlobal} />
 
 <style>
   .te-tree {

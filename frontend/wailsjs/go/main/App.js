@@ -106,6 +106,10 @@ export function GameplayConstantsGet() {
   return window['go']['main']['App']['GameplayConstantsGet']();
 }
 
+export function GenerateTriggerScript() {
+  return window['go']['main']['App']['GenerateTriggerScript']();
+}
+
 export function GetBridgeInfo() {
   return window['go']['main']['App']['GetBridgeInfo']();
 }
@@ -298,12 +302,20 @@ export function SaveMap() {
   return window['go']['main']['App']['SaveMap']();
 }
 
+export function SaveTriggerScript() {
+  return window['go']['main']['App']['SaveTriggerScript']();
+}
+
 export function ScaleDoodad(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['ScaleDoodad'](arg1, arg2, arg3, arg4);
 }
 
 export function ScaleUnit(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['ScaleUnit'](arg1, arg2, arg3, arg4);
+}
+
+export function SearchTriggers(arg1, arg2) {
+  return window['go']['main']['App']['SearchTriggers'](arg1, arg2);
 }
 
 export function SelectUnit(arg1) {
@@ -384,6 +396,10 @@ export function Status() {
 
 export function SwapTileset(arg1) {
   return window['go']['main']['App']['SwapTileset'](arg1);
+}
+
+export function TestMap() {
+  return window['go']['main']['App']['TestMap']();
 }
 
 export function Undo() {

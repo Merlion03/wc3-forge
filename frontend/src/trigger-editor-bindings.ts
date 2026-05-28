@@ -201,6 +201,27 @@ interface WailsApp {
   ListTriggerDestructableInstances: () => Promise<TriggerDestructableInstance[]>
   ListTriggerRegions: () => Promise<TriggerRegionInfo[]>
   ListTriggerCameras: () => Promise<TriggerCameraInfo[]>
+  // Phase 3 — codegen + search.
+  GenerateTriggerScript: () => Promise<TriggerScriptResult>
+  SaveTriggerScript: () => Promise<TriggerScriptResult>
+  TestMap: () => Promise<void>
+  SearchTriggers: (query: string, limit: number) => Promise<TriggerSearchHit[]>
+}
+
+// Phase 3 — codegen result + search hit.
+export interface TriggerScriptResult {
+  text?: string
+  bytes?: number
+}
+
+export interface TriggerSearchHit {
+  trigger_id: number
+  trigger_name: string
+  kind: 'trigger' | 'category' | 'variable' | 'eca' | 'param'
+  path?: number[]
+  eca_name?: string
+  snippet: string
+  category?: string
 }
 
 // Phase 2b2 — entity-picker rows. Each carries gg_ref the Trigger Editor
@@ -362,6 +383,20 @@ export function ListTriggerRegions(): Promise<TriggerRegionInfo[]> {
 }
 export function ListTriggerCameras(): Promise<TriggerCameraInfo[]> {
   return app().ListTriggerCameras()
+}
+
+// Phase 3 — codegen + search.
+export function GenerateTriggerScript(): Promise<TriggerScriptResult> {
+  return app().GenerateTriggerScript()
+}
+export function SaveTriggerScript(): Promise<TriggerScriptResult> {
+  return app().SaveTriggerScript()
+}
+export function TestMap(): Promise<void> {
+  return app().TestMap()
+}
+export function SearchTriggers(query: string, limit: number = 50): Promise<TriggerSearchHit[]> {
+  return app().SearchTriggers(query, limit)
 }
 
 // Stringify a parameter into a human-readable inline label. Mirrors

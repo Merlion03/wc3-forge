@@ -984,6 +984,44 @@ export namespace main {
 	        this.gg_ref = source["gg_ref"];
 	    }
 	}
+	export class TriggerScriptResultDTO {
+	    text?: string;
+	    bytes?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerScriptResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.text = source["text"];
+	        this.bytes = source["bytes"];
+	    }
+	}
+	export class TriggerSearchHitDTO {
+	    trigger_id: number;
+	    trigger_name: string;
+	    kind: string;
+	    path?: number[];
+	    eca_name?: string;
+	    snippet: string;
+	    category?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerSearchHitDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.trigger_id = source["trigger_id"];
+	        this.trigger_name = source["trigger_name"];
+	        this.kind = source["kind"];
+	        this.path = source["path"];
+	        this.eca_name = source["eca_name"];
+	        this.snippet = source["snippet"];
+	        this.category = source["category"];
+	    }
+	}
 	
 	
 	
