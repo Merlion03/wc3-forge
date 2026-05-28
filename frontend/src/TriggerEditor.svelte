@@ -2,21 +2,23 @@
   // Trigger Editor (Phase 2a — structural editing). Modal dialog with a
   // two-pane layout: left pane shows the category/trigger/variable tree
   // (drag-drop + context menu); right pane shows the selected node's
-  // details (CodeMirror for script triggers + Map Header, editable forms
-  // for variables/comments, read-only ECA tree for GUI triggers).
+  // details (Monaco editor for script triggers + Map Header, editable
+  // forms for variables/comments, read-only ECA tree for GUI triggers).
   //
   // Phase 2a additions over 1a:
   // - Toolbar: Add Category / Add GUI / Add Script / Add Comment / Add Var
   // - Tree row hover: delete button + rename inline
   // - HTML5 drag-drop to re-parent (refuses self + non-category targets)
-  // - Right-pane editors: CodeMirror 6 for script/Map Header, form for
+  // - Right-pane editors: Monaco for script/Map Header, form for
   //   variables, textarea for comment descriptions, toggle checkboxes for
   //   GUI trigger flags (is_enabled, initially_on, run_on_initialization)
   // - subscribes to wc3-forge:entity-changed to refresh on bridge mutations
   //
-  // Phase 2b1 will add ECA add/remove + parameter pickers on top of this.
+  // The Monaco editor lazy-loads on first mount (see MonacoEditor.svelte);
+  // cold-start of dialogs that don't use it (Object Editor, etc.) is
+  // unchanged.
 
-  import { onMount, onDestroy, tick } from 'svelte'
+  import { onMount, onDestroy } from 'svelte'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import {
     ListTriggerTree,
@@ -70,11 +72,7 @@
   import TriggerEntityPicker from './TriggerEntityPicker.svelte'
   import TriggerInstancePicker, { type InstanceKind } from './TriggerInstancePicker.svelte'
   import type { ObjectKind } from './object-editor-bindings'
-  import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view'
-  import { EditorState } from '@codemirror/state'
-  import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
-  import { javascript } from '@codemirror/lang-javascript'
-  import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
+  import MonacoEditor from './MonacoEditor.svelte'
 
   let {
     open = $bindable(false),
@@ -207,7 +205,6 @@
   onDestroy(() => {
     unsubMapChanged?.()
     unsubEntityChanged?.()
-    destroyEditor()
   })
   function onMapChanged() {
     if (open) {
@@ -436,50 +433,6 @@
     return out
   }
 
-  // Light-weight syntax tint for the script <pre> block. Lua keywords
-  // get highlighted; comments + strings get neutral colors. Pulls from a
-  // small Lua-flavored token list — JASS uses similar enough keywords
-  // (set/call/function/if/then/else/endif/loop/exitwhen/endloop/local/return)
-  // that we cover both with a combined set.
-  const SCRIPT_KEYWORDS = new Set([
-    // Lua
-    'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function',
-    'goto', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat', 'return',
-    'then', 'true', 'until', 'while',
-    // JASS additions
-    'set', 'call', 'globals', 'endglobals', 'takes', 'returns', 'nothing',
-    'endfunction', 'loop', 'endloop', 'exitwhen', 'endif',
-  ])
-  function highlightScript(text: string): string {
-    // Escape HTML first.
-    const escaped = text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-    // Comments — Lua // and -- and JASS //. Apply line-wise.
-    const lines = escaped.split('\n')
-    const out: string[] = []
-    for (const line of lines) {
-      const trimmed = line.trimStart()
-      if (trimmed.startsWith('//') || trimmed.startsWith('--')) {
-        out.push(`<span class="te-cmt">${line}</span>`)
-        continue
-      }
-      // Highlight strings (single + double quoted) and keywords inline.
-      let s = line
-      s = s.replace(/("[^"\\]*(?:\\.[^"\\]*)*")/g, '<span class="te-str">$1</span>')
-      s = s.replace(/('[^'\\]*(?:\\.[^'\\]*)*')/g, '<span class="te-str">$1</span>')
-      s = s.replace(/\b([A-Za-z_][A-Za-z_0-9]*)\b/g, (_, w: string) => {
-        if (SCRIPT_KEYWORDS.has(w)) {
-          return `<span class="te-kw">${w}</span>`
-        }
-        return w
-      })
-      out.push(s)
-    }
-    return out.join('\n')
-  }
-
   // renderColoredLabel converts an ECA label string with embedded WC3 color
   // codes (|cAARRGGBB…|r) into HTML with one <span> per color run. Pure-text
   // labels (no |c tokens) round-trip as a single HTML-escaped span — the
@@ -669,112 +622,88 @@
   }
 
   // ---------------------------------------------------------------------------
-  // CodeMirror lifecycle. Mounted lazily when a script trigger / Map Header /
-  // comment / variable is selected. We rebuild the editor on selection change
-  // to keep state simple (no need for transaction-driven content swap).
+  // Monaco editor binding.
+  //
+  // The CodeMirror lifecycle that lived here got replaced with a single
+  // <MonacoEditor /> component. The component is reactive on `value` +
+  // `language`, and debounces its onChange callback by 400 ms — same shape
+  // as the old CodeMirror updateListener. We just stash the script text in
+  // a $state and dispatch the right commit path (custom_text vs Map Header
+  // vs comment description) on change.
+  //
+  // editorBoundId / editorText / editorLanguage are re-derived from
+  // `detail` via $effect; the dependent <MonacoEditor> swaps its model in
+  // place without remounting (cheap; no GC churn).
   // ---------------------------------------------------------------------------
 
-  let editorContainer: HTMLDivElement | null = $state(null)
-  let editor: EditorView | null = null
-  let editorBoundId: number | null = null
-  let pendingEditTimer: number | null = null
+  let editorText: string = $state('')
+  let editorLanguage: 'lua' | 'jass' | 'plaintext' = $state('lua')
+  let editorBoundId: number | null = $state(null)
+  let editorCommitKind: 'script' | 'mapheader' | 'description' | null = $state(null)
 
-  function destroyEditor() {
-    if (pendingEditTimer != null) {
-      clearTimeout(pendingEditTimer)
-      pendingEditTimer = null
-    }
-    editor?.destroy()
-    editor = null
-    editorBoundId = null
+  // Detect the script language for a given script trigger. We don't have
+  // info.Lua piped to the frontend, so fall back to filename matching for
+  // synthesized Map Header triggers and default to Lua otherwise (Reforged
+  // bias — most new maps are Lua, and Lua's highlighter degrades better on
+  // JASS source than vice versa).
+  function detectLanguage(name: string | undefined): 'lua' | 'jass' {
+    if (name && /\.j$/i.test(name)) return 'jass'
+    return 'lua'
   }
 
-  // mountEditor builds a CodeMirror view bound to the given trigger id +
-  // initial text. onCommit is called debounced after edits land.
-  function mountEditor(initialText: string, id: number, onCommit: (text: string) => Promise<void>) {
-    destroyEditor()
-    if (!editorContainer) return
-    editorBoundId = id
-    const state = EditorState.create({
-      doc: initialText,
-      extensions: [
-        lineNumbers(),
-        history(),
-        highlightActiveLine(),
-        syntaxHighlighting(defaultHighlightStyle),
-        keymap.of([...defaultKeymap, ...historyKeymap]),
-        // JS as a stand-in for JASS+Lua highlighting (similar enough for
-        // keywords). Proper Lua/JASS modes can land in Phase 2b1 if anyone
-        // wants the dedicated colors.
-        javascript(),
-        EditorView.updateListener.of((v) => {
-          if (!v.docChanged) return
-          if (pendingEditTimer != null) clearTimeout(pendingEditTimer)
-          const text = v.state.doc.toString()
-          pendingEditTimer = window.setTimeout(() => {
-            pendingEditTimer = null
-            void onCommit(text).catch((e) => {
-              errorMsg = `Save failed: ${e}`
-            })
-          }, 400)
-        }),
-        EditorView.theme({
-          '&': { backgroundColor: '#0e0e10', color: '#d4d4d8', fontSize: '12px' },
-          '.cm-content': { fontFamily: 'Consolas, "Courier New", monospace', padding: '8px 0' },
-          '.cm-gutters': { backgroundColor: '#18181b', color: '#71717a', border: 'none' },
-          '.cm-activeLine': { backgroundColor: 'rgba(255,255,255,0.04)' },
-        }),
-      ],
-    })
-    editor = new EditorView({ state, parent: editorContainer })
-  }
-
-  // commitEditorText pushes the editor's current contents through the right
-  // mutator for the current detail kind. Called by the editor's update
-  // listener (debounced) so the user gets a single round-trip per pause.
-  async function commitScriptText(id: number, text: string) {
-    // Map Header for hand-rolled-script maps reuses the dedicated mutator
-    // (which also flips the script-source dirty flag). We detect by the
-    // detail's classifier — the synthetic Map Header is a script trigger
-    // with parent_id == map id (we treat any script trigger whose name
-    // matches the script filename pattern as Map Header).
-    const isMapHeader = detail?.kind === 'trigger_script' && detail.trigger?.name?.match(/^war3map\.(lua|j)$/)
-    if (isMapHeader) {
-      await SetMapHeaderScript(text)
-    } else {
-      await SetTriggerCustomText(id, text)
-    }
-  }
-
-  // Re-mount the editor whenever the selected node changes to a kind that
-  // needs CodeMirror.
+  // Sync editor state from the loaded detail. We only swap when the bound
+  // trigger id actually changes — otherwise we'd echo every onChange back
+  // into our own editor.
   $effect(() => {
     const _detail = detail
-    void tick().then(() => {
-      if (!editorContainer) return
-      if (!detail) {
-        destroyEditor()
-        return
-      }
-      if (detail.kind === 'trigger_script') {
-        const id = detail.trigger?.id ?? 0
-        if (editorBoundId === id) return
-        mountEditor(detail.trigger?.custom_text || '', id, (text) => commitScriptText(id, text))
-        return
-      }
-      if (detail.kind === 'trigger_comment') {
-        const id = detail.trigger?.id ?? 0
-        if (editorBoundId === id) return
-        // Comment description is plain text — we still use CodeMirror but
-        // disable language extensions. The same commit path lands.
-        mountEditor(detail.trigger?.description || '', id, async (text) => {
-          await SetTriggerDescription(id, text)
-        })
-        return
-      }
-      destroyEditor()
-    })
+    if (!detail) {
+      editorBoundId = null
+      editorText = ''
+      editorCommitKind = null
+      return
+    }
+    if (detail.kind === 'trigger_script') {
+      const t = detail.trigger
+      const id = t?.id ?? 0
+      if (editorBoundId === id) return
+      editorBoundId = id
+      editorText = t?.custom_text || ''
+      editorLanguage = detectLanguage(t?.name)
+      const isMapHeader = !!t?.name?.match(/^war3map\.(lua|j)$/)
+      editorCommitKind = isMapHeader ? 'mapheader' : 'script'
+      return
+    }
+    if (detail.kind === 'trigger_comment') {
+      const t = detail.trigger
+      const id = t?.id ?? 0
+      if (editorBoundId === id) return
+      editorBoundId = id
+      editorText = t?.description || ''
+      editorLanguage = 'plaintext'
+      editorCommitKind = 'description'
+      return
+    }
+    editorBoundId = null
+    editorText = ''
+    editorCommitKind = null
   })
+
+  async function onEditorChange(text: string) {
+    if (editorBoundId == null || editorCommitKind == null) return
+    const id = editorBoundId
+    const kind = editorCommitKind
+    try {
+      if (kind === 'mapheader') {
+        await SetMapHeaderScript(text)
+      } else if (kind === 'script') {
+        await SetTriggerCustomText(id, text)
+      } else if (kind === 'description') {
+        await SetTriggerDescription(id, text)
+      }
+    } catch (e) {
+      errorMsg = `Save failed: ${e}`
+    }
+  }
 
   // Variable form state. Mirrors the wtg.Variable struct.
   let varFormName = $state('')
@@ -1292,7 +1221,7 @@
 {/snippet}
 
 <Dialog.Root bind:open onOpenChange={(v) => { if (!v) onClose?.() }}>
-  <Dialog.Content class="w-[95vw] max-w-[95vw] h-[85vh] p-0 flex flex-col">
+  <Dialog.Content class="!max-w-[1280px] !w-[95vw] h-[85vh] p-0 flex flex-col">
     <Dialog.Header class="px-4 py-3 border-b">
       <Dialog.Title>Trigger Editor</Dialog.Title>
       <Dialog.Description>
@@ -1417,7 +1346,9 @@
           <div class="px-4 py-3">
             <div class="text-zinc-300 text-lg">{t.name}</div>
             <div class="text-zinc-500 text-sm mb-2">Comment · id={t.id}</div>
-            <div bind:this={editorContainer} class="te-editor"></div>
+            <div class="te-editor">
+              <MonacoEditor bind:value={editorText} language={editorLanguage} onChange={onEditorChange} />
+            </div>
             <div class="text-zinc-500 text-xs mt-2">Edits auto-save 400 ms after typing stops.</div>
           </div>
         {:else if detail.kind === 'trigger_script'}
@@ -1433,7 +1364,9 @@
               <label><input type="checkbox" checked={t.initially_on} onchange={(e) => void onToggleInitiallyOn(t.id, e.currentTarget.checked)} /> initially_on</label>
               <label><input type="checkbox" checked={t.run_on_initialization} onchange={(e) => void onToggleRunOnInit(t.id, e.currentTarget.checked)} /> run_on_init</label>
             </div>
-            <div bind:this={editorContainer} class="te-editor"></div>
+            <div class="te-editor">
+              <MonacoEditor bind:value={editorText} language={editorLanguage} onChange={onEditorChange} />
+            </div>
             <div class="text-zinc-500 text-xs mt-2">Edits auto-save 400 ms after typing stops.</div>
           </div>
         {:else if detail.kind === 'trigger_gui'}
@@ -1685,15 +1618,6 @@
   }
   .te-eca-add:hover { background: rgba(96, 165, 250, 0.22); color: #fff; border-color: #60a5fa; }
 
-  /* .te-script was the Phase 1a <pre>-based viewer; CodeMirror now owns
-     script + comment rendering, but the class is kept as a hook in case a
-     future phase reintroduces a read-only viewer fallback. */
-  /* These are emitted by highlightScript via {@html}; not scoped — keep
-     globals so the inline classes match. */
-  :global(.te-kw) { color: #c084fc; }
-  :global(.te-str) { color: #86efac; }
-  :global(.te-cmt) { color: #71717a; font-style: italic; }
-
   /* Phase 2a — toolbar + row actions + editor + form input styles. */
   .te-toolbtn {
     padding: 4px 10px;
@@ -1740,15 +1664,10 @@
     border: 1px solid #27272a;
     border-radius: 4px;
     overflow: hidden;
-    max-height: calc(85vh - 280px);
+    /* Fixed height so Monaco's internal layout has a stable parent box.
+       calc keeps the editor inside the dialog viewport on small screens. */
+    height: calc(85vh - 280px);
     min-height: 200px;
-  }
-  :global(.te-editor .cm-editor) {
-    height: 100%;
-    max-height: calc(85vh - 280px);
-  }
-  :global(.te-editor .cm-scroller) {
-    overflow: auto;
   }
   .te-input {
     background: #0e0e10;

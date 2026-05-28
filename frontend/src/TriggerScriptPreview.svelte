@@ -5,20 +5,15 @@
   // Dialog don't play nice in shadcn-svelte's focus-trap model; mounting
   // this as a sibling dialog with a Z above TriggerEditor keeps both
   // interactive). On open, calls GenerateTriggerScript() to fetch the Lua
-  // source, then renders it in a CodeMirror 6 read-only buffer with JS
-  // syntax-highlighting (no Lua mode in @codemirror/lang-* so we use JS —
-  // close enough for visual scan of structure / parens / quotes).
+  // source, then renders it in a Monaco read-only buffer with Lua syntax
+  // highlighting (Monaco ships a built-in Lua mode).
   //
   // A "Refresh" button re-runs codegen on demand. The Lua text is also
   // auto-regenerated whenever the dialog opens.
 
-  import { onDestroy, tick } from 'svelte'
   import * as Dialog from '$lib/components/ui/dialog'
-  import { EditorView, lineNumbers, highlightActiveLine } from '@codemirror/view'
-  import { EditorState } from '@codemirror/state'
-  import { javascript } from '@codemirror/lang-javascript'
-  import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
   import { GenerateTriggerScript } from './trigger-editor-bindings'
+  import MonacoEditor from './MonacoEditor.svelte'
 
   let {
     open = $bindable(false),
@@ -31,8 +26,6 @@
   let scriptText: string = $state('')
   let loading: boolean = $state(false)
   let errorMsg: string = $state('')
-  let editorContainer: HTMLDivElement | null = $state(null)
-  let view: EditorView | null = null
 
   // Regenerate on open. Wrap in $effect so opening + closing the dialog
   // re-loads each time (no caching — the user may have edited triggers
@@ -41,7 +34,6 @@
     if (open) {
       void regenerate()
     } else {
-      destroyEditor()
       scriptText = ''
       errorMsg = ''
     }
@@ -53,8 +45,6 @@
     try {
       const res = await GenerateTriggerScript()
       scriptText = res.text ?? ''
-      await tick()
-      mountEditor()
     } catch (e) {
       errorMsg = String(e)
       scriptText = ''
@@ -62,35 +52,6 @@
       loading = false
     }
   }
-
-  function mountEditor() {
-    if (!editorContainer) return
-    destroyEditor()
-    view = new EditorView({
-      parent: editorContainer,
-      state: EditorState.create({
-        doc: scriptText,
-        extensions: [
-          lineNumbers(),
-          highlightActiveLine(),
-          javascript(), // close-enough Lua syntax for visual scan
-          syntaxHighlighting(defaultHighlightStyle),
-          EditorState.readOnly.of(true),
-          EditorView.theme({
-            '&': { height: '100%', fontSize: '13px' },
-            '.cm-scroller': { overflow: 'auto' },
-          }),
-        ],
-      }),
-    })
-  }
-
-  function destroyEditor() {
-    view?.destroy()
-    view = null
-  }
-
-  onDestroy(destroyEditor)
 
   function copyToClipboard() {
     if (!scriptText) return
@@ -123,7 +84,9 @@
       <div class="px-4 py-2 bg-red-900/30 text-red-200 text-sm">{errorMsg}</div>
     {/if}
 
-    <div bind:this={editorContainer} class="flex-1 overflow-hidden bg-zinc-950"></div>
+    <div class="flex-1 overflow-hidden bg-zinc-950">
+      <MonacoEditor value={scriptText} language="lua" readOnly={true} minimap={true} />
+    </div>
   </Dialog.Content>
 </Dialog.Root>
 
