@@ -473,11 +473,162 @@ func (a *App) SetTriggerECAEnabled(triggerID int32, ecaPath []int, enabled bool)
 }
 
 // SetTriggerParamValue writes one Parameter slot of an existing ECA. paramType
-// is an int (0=preset, 1=variable, 3=string) — the frontend's ParamEditor
-// branches on the slot's declared type before deciding which paramType to pass.
-func (a *App) SetTriggerParamValue(triggerID int32, ecaPath []int, paramIndex int, value string, paramType int) (TriggerMutationResultDTO, error) {
-	if err := forge.Current.SetParamValue(triggerID, ecaPath, paramIndex, value, wtg.ParamType(paramType)); err != nil {
+// is an int (0=preset, 1=variable, 2=function, 3=string).
+//
+// Phase 2b2: signature takes paramPath []int (replaces 2b1's paramIndex int).
+// paramPath addresses sub-parameter chains via the recursive .SubParameter
+// .Parameters walk — paramPath[0] indexes the leaf ECA's Parameters, each
+// subsequent element drills into one level of SubParameter.
+func (a *App) SetTriggerParamValue(triggerID int32, ecaPath []int, paramPath []int, value string, paramType int) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetParamValue(triggerID, ecaPath, paramPath, value, wtg.ParamType(paramType)); err != nil {
 		return TriggerMutationResultDTO{}, err
 	}
 	return a.buildTriggerMutationResult(triggerID), nil
+}
+
+// SetTriggerParamSubFunction replaces the parameter at (triggerID, ecaPath,
+// paramPath) with a sub-function call to subName. The sub-function's parameters
+// are seeded from TriggerData defaults.
+func (a *App) SetTriggerParamSubFunction(triggerID int32, ecaPath []int, paramPath []int, subName string) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetParamSubFunction(triggerID, ecaPath, paramPath, subName); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(triggerID), nil
+}
+
+// ClearTriggerParamSubFunction collapses a sub-function back to an empty
+// literal preset value. Inverse of SetTriggerParamSubFunction.
+func (a *App) ClearTriggerParamSubFunction(triggerID int32, ecaPath []int, paramPath []int) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.ClearParamSubFunction(triggerID, ecaPath, paramPath); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(triggerID), nil
+}
+
+// SetTriggerParamArray toggles array-mode on the parameter. When enabling,
+// initializes ArrayIndex to a default preset Parameter.
+func (a *App) SetTriggerParamArray(triggerID int32, ecaPath []int, paramPath []int, isArray bool) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetParamArray(triggerID, ecaPath, paramPath, isArray); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(triggerID), nil
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2b2 — entity instance picker Wails wrappers. Surface live-map data
+// (unit/destructable instances by creation_number, named regions, named
+// cameras) to the recursive ParamEditor's entity-typed branches.
+// ---------------------------------------------------------------------------
+
+// TriggerUnitInstanceDTO mirrors forge.TriggerUnitInstance — one placed unit
+// row exposed to the unit-instance picker.
+type TriggerUnitInstanceDTO struct {
+	CreationNumber uint32  `json:"creation_number"`
+	TypeID         string  `json:"type_id"`
+	Player         uint32  `json:"player"`
+	X              float32 `json:"x"`
+	Y              float32 `json:"y"`
+	Name           string  `json:"name"`
+	GGRef          string  `json:"gg_ref"`
+}
+
+// ListTriggerUnitInstances returns every placed unit in the loaded map with
+// its creation_number-keyed gg_unit_*_NNNN ref. Empty (not error) when no map
+// is loaded or the map has no units.
+func (a *App) ListTriggerUnitInstances() []TriggerUnitInstanceDTO {
+	src := forge.BuildTriggerUnitInstances()
+	out := make([]TriggerUnitInstanceDTO, 0, len(src))
+	for _, r := range src {
+		out = append(out, TriggerUnitInstanceDTO{
+			CreationNumber: r.CreationNumber,
+			TypeID:         r.TypeID,
+			Player:         r.Player,
+			X:              r.X,
+			Y:              r.Y,
+			Name:           r.Name,
+			GGRef:          r.GGRef,
+		})
+	}
+	return out
+}
+
+// TriggerDestructableInstanceDTO mirrors forge.TriggerDestructableInstance.
+type TriggerDestructableInstanceDTO struct {
+	CreationNumber uint32  `json:"creation_number"`
+	TypeID         string  `json:"type_id"`
+	X              float32 `json:"x"`
+	Y              float32 `json:"y"`
+	Name           string  `json:"name"`
+	GGRef          string  `json:"gg_ref"`
+}
+
+// ListTriggerDestructableInstances returns every placed destructable.
+func (a *App) ListTriggerDestructableInstances() []TriggerDestructableInstanceDTO {
+	src := forge.BuildTriggerDestructableInstances()
+	out := make([]TriggerDestructableInstanceDTO, 0, len(src))
+	for _, r := range src {
+		out = append(out, TriggerDestructableInstanceDTO{
+			CreationNumber: r.CreationNumber,
+			TypeID:         r.TypeID,
+			X:              r.X,
+			Y:              r.Y,
+			Name:           r.Name,
+			GGRef:          r.GGRef,
+		})
+	}
+	return out
+}
+
+// TriggerRegionInfoDTO mirrors forge.TriggerRegionInfo.
+type TriggerRegionInfoDTO struct {
+	Name           string  `json:"name"`
+	CreationNumber int32   `json:"creation_number"`
+	Left           float32 `json:"left"`
+	Right          float32 `json:"right"`
+	Top            float32 `json:"top"`
+	Bottom         float32 `json:"bottom"`
+	GGRef          string  `json:"gg_ref"`
+}
+
+// ListTriggerRegions returns the war3map.w3r contents (or empty when absent).
+func (a *App) ListTriggerRegions() []TriggerRegionInfoDTO {
+	src := forge.BuildTriggerRegions()
+	out := make([]TriggerRegionInfoDTO, 0, len(src))
+	for _, r := range src {
+		out = append(out, TriggerRegionInfoDTO{
+			Name:           r.Name,
+			CreationNumber: r.CreationNumber,
+			Left:           r.Left,
+			Right:          r.Right,
+			Top:            r.Top,
+			Bottom:         r.Bottom,
+			GGRef:          r.GGRef,
+		})
+	}
+	return out
+}
+
+// TriggerCameraInfoDTO mirrors forge.TriggerCameraInfo.
+type TriggerCameraInfoDTO struct {
+	Name     string  `json:"name"`
+	TargetX  float32 `json:"target_x"`
+	TargetY  float32 `json:"target_y"`
+	Distance float32 `json:"distance"`
+	GGRef    string  `json:"gg_ref"`
+}
+
+// ListTriggerCameras returns the war3map.w3c contents (or empty when absent).
+func (a *App) ListTriggerCameras() []TriggerCameraInfoDTO {
+	src := forge.BuildTriggerCameras()
+	out := make([]TriggerCameraInfoDTO, 0, len(src))
+	for _, r := range src {
+		out = append(out, TriggerCameraInfoDTO{
+			Name:     r.Name,
+			TargetX:  r.TargetX,
+			TargetY:  r.TargetY,
+			Distance: r.Distance,
+			GGRef:    r.GGRef,
+		})
+	}
+	return out
 }

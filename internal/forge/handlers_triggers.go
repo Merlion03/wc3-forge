@@ -62,6 +62,19 @@ func registerTriggerHandlers(reg func(method string, h bridge.Handler)) {
 	reg("triggers.move_eca", handleTriggersMoveECA)
 	reg("triggers.set_eca_enabled", handleTriggersSetECAEnabled)
 	reg("triggers.set_param_value", handleTriggersSetParamValue)
+	// Phase 2b2 — sub-function builder + array toggle. The MCP wire shape uses
+	// param_path []int (which addresses sub-parameter chains via the recursive
+	// .SubParameter.Parameters[] walk). The legacy param_index field on
+	// set_param_value remains supported for 2b1 callers via resolveParamPath.
+	reg("triggers.set_param_sub_function", handleTriggersSetParamSubFunction)
+	reg("triggers.clear_param_sub_function", handleTriggersClearParamSubFunction)
+	reg("triggers.set_param_array", handleTriggersSetParamArray)
+	// Phase 2b2 — entity instance pickers. Live-map data for unit/destructible/
+	// region/camera entity-typed parameter slots.
+	reg("triggers.list_unit_instances", handleTriggersListUnitInstances)
+	reg("triggers.list_destructable_instances", handleTriggersListDestructableInstances)
+	reg("triggers.list_regions", handleTriggersListRegions)
+	reg("triggers.list_cameras", handleTriggersListCameras)
 }
 
 // TriggerTreeNode is the one-shot tree-shape DTO. The frontend stitches
@@ -850,12 +863,27 @@ func handleTriggersSetECAEnabled(params json.RawMessage) (any, error) {
 	return buildMutationResponse(p.TriggerID), nil
 }
 
+// triggersSetParamValueParams accepts BOTH the legacy 2b1 shape (param_index)
+// and the 2b2 shape (param_path). resolveParamPath collapses them: if
+// param_path is non-empty it wins, otherwise we synthesize [param_index].
+// This keeps every 2b1 MCP caller working without re-coding the wire shape.
 type triggersSetParamValueParams struct {
 	TriggerID  int32  `json:"trigger_id"`
 	ECAPath    []int  `json:"eca_path"`
-	ParamIndex int    `json:"param_index"`
+	ParamIndex int    `json:"param_index"` // legacy 2b1 shape, single int
+	ParamPath  []int  `json:"param_path"`  // 2b2 shape, addresses sub-parameter chains
 	Value      string `json:"value"`
-	ParamType  int    `json:"param_type"` // wtg.ParamType (0=preset, 1=variable, 3=string)
+	ParamType  int    `json:"param_type"` // wtg.ParamType (0=preset, 1=variable, 2=function, 3=string)
+}
+
+// resolveParamPath picks the effective paramPath the mutator should use. 2b2
+// shape wins when present; otherwise wrap the legacy paramIndex into a single-
+// element slice. Returns nil only when both fields are missing.
+func resolveParamPath(path []int, idx int) []int {
+	if len(path) > 0 {
+		return path
+	}
+	return []int{idx}
 }
 
 func handleTriggersSetParamValue(params json.RawMessage) (any, error) {
@@ -863,8 +891,256 @@ func handleTriggersSetParamValue(params json.RawMessage) (any, error) {
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	if err := Current.SetParamValue(p.TriggerID, p.ECAPath, p.ParamIndex, p.Value, wtg.ParamType(p.ParamType)); err != nil {
+	pp := resolveParamPath(p.ParamPath, p.ParamIndex)
+	if err := Current.SetParamValue(p.TriggerID, p.ECAPath, pp, p.Value, wtg.ParamType(p.ParamType)); err != nil {
 		return nil, err
 	}
 	return buildMutationResponse(p.TriggerID), nil
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2b2 — sub-function builder + array toggle MCP handlers. Each wraps
+// the matching Session mutator.
+// ---------------------------------------------------------------------------
+
+type triggersSetParamSubFunctionParams struct {
+	TriggerID int32  `json:"trigger_id"`
+	ECAPath   []int  `json:"eca_path"`
+	ParamPath []int  `json:"param_path"`
+	SubName   string `json:"sub_name"`
+}
+
+func handleTriggersSetParamSubFunction(params json.RawMessage) (any, error) {
+	var p triggersSetParamSubFunctionParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SetParamSubFunction(p.TriggerID, p.ECAPath, p.ParamPath, p.SubName); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.TriggerID), nil
+}
+
+type triggersClearParamSubFunctionParams struct {
+	TriggerID int32 `json:"trigger_id"`
+	ECAPath   []int `json:"eca_path"`
+	ParamPath []int `json:"param_path"`
+}
+
+func handleTriggersClearParamSubFunction(params json.RawMessage) (any, error) {
+	var p triggersClearParamSubFunctionParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.ClearParamSubFunction(p.TriggerID, p.ECAPath, p.ParamPath); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.TriggerID), nil
+}
+
+type triggersSetParamArrayParams struct {
+	TriggerID int32 `json:"trigger_id"`
+	ECAPath   []int `json:"eca_path"`
+	ParamPath []int `json:"param_path"`
+	IsArray   bool  `json:"is_array"`
+}
+
+func handleTriggersSetParamArray(params json.RawMessage) (any, error) {
+	var p triggersSetParamArrayParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SetParamArray(p.TriggerID, p.ECAPath, p.ParamPath, p.IsArray); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.TriggerID), nil
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2b2 — entity instance pickers. Used by the Trigger Editor's
+// unit/destructable/region/camera ParamEditor branches. Returns the rows the
+// frontend renders in a modal picker; the user's selected creation_number
+// (units/destructables) or name (regions/cameras) becomes the gg_*_* string
+// passed to SetParamValue.
+// ---------------------------------------------------------------------------
+
+// TriggerUnitInstance is one placed unit row exposed to the unit-instance
+// picker. Position is in game coords (passed through verbatim from the .doo).
+// Player is 0-indexed (player 0 = red, etc.). Name is the per-instance custom
+// name when set, otherwise the type's display name from the merged SLK.
+type TriggerUnitInstance struct {
+	CreationNumber uint32  `json:"creation_number"`
+	TypeID         string  `json:"type_id"`
+	Player         uint32  `json:"player"`
+	X              float32 `json:"x"`
+	Y              float32 `json:"y"`
+	Name           string  `json:"name"`
+	GGRef          string  `json:"gg_ref"` // gg_unit_<TypeID>_<NNNN>
+}
+
+func handleTriggersListUnitInstances(_ json.RawMessage) (any, error) {
+	out := buildUnitInstances()
+	return map[string]any{"instances": out}, nil
+}
+
+// BuildTriggerUnitInstances is the exported accessor for package main's
+// Wails wrapper. Pure-read; safe to call any time.
+func BuildTriggerUnitInstances() []TriggerUnitInstance { return buildUnitInstances() }
+
+// buildUnitInstances enumerates the placed units, applying the same display-
+// name resolution the gg_*_ resolver uses. Pure-read, no mutation.
+func buildUnitInstances() []TriggerUnitInstance {
+	u := Current.Units()
+	if u == nil {
+		return nil
+	}
+	merged, _, _ := MergedObjects(UnitsConfig())
+	out := make([]TriggerUnitInstance, 0, len(u.Entities))
+	for _, e := range u.Entities {
+		row := TriggerUnitInstance{
+			CreationNumber: e.CreationNumber,
+			TypeID:         e.TypeID,
+			Player:         e.Player,
+			X:              e.Position[0],
+			Y:              e.Position[1],
+			GGRef:          fmt.Sprintf("gg_unit_%s_%04d", e.TypeID, e.CreationNumber),
+		}
+		if merged != nil {
+			if rec, ok := merged[e.TypeID]; ok {
+				row.Name = strings.TrimSpace(resolveDisplay(rec.Fields["name"], Current.Strings()))
+			}
+		}
+		if row.Name == "" {
+			row.Name = e.TypeID
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// TriggerDestructableInstance is one placed destructible row. Same shape as
+// TriggerUnitInstance minus Player (destructibles don't have an owner).
+type TriggerDestructableInstance struct {
+	CreationNumber uint32  `json:"creation_number"`
+	TypeID         string  `json:"type_id"`
+	X              float32 `json:"x"`
+	Y              float32 `json:"y"`
+	Name           string  `json:"name"`
+	GGRef          string  `json:"gg_ref"` // gg_dest_<TypeID>_<NNNN>
+}
+
+func handleTriggersListDestructableInstances(_ json.RawMessage) (any, error) {
+	out := buildDestructableInstances()
+	return map[string]any{"instances": out}, nil
+}
+
+// BuildTriggerDestructableInstances is the exported accessor for Wails.
+func BuildTriggerDestructableInstances() []TriggerDestructableInstance {
+	return buildDestructableInstances()
+}
+
+func buildDestructableInstances() []TriggerDestructableInstance {
+	d := Current.Doodads()
+	if d == nil {
+		return nil
+	}
+	merged, _, _ := MergedObjects(DestructablesConfig())
+	out := make([]TriggerDestructableInstance, 0, len(d.Doodads))
+	for _, dd := range d.Doodads {
+		row := TriggerDestructableInstance{
+			CreationNumber: dd.CreationNumber,
+			TypeID:         dd.TypeID,
+			X:              dd.Position[0],
+			Y:              dd.Position[1],
+			GGRef:          fmt.Sprintf("gg_dest_%s_%04d", dd.TypeID, dd.CreationNumber),
+		}
+		if merged != nil {
+			if rec, ok := merged[dd.TypeID]; ok {
+				row.Name = strings.TrimSpace(resolveDisplay(rec.Fields["name"], Current.Strings()))
+			}
+		}
+		if row.Name == "" {
+			row.Name = dd.TypeID
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// TriggerRegionInfo is one row from war3map.w3r exposed to the region picker.
+// GGRef is the codegen-generated global name (gg_rct_<name with spaces →
+// underscores>) the trigger uses.
+type TriggerRegionInfo struct {
+	Name           string  `json:"name"`
+	CreationNumber int32   `json:"creation_number"`
+	Left           float32 `json:"left"`
+	Right          float32 `json:"right"`
+	Top            float32 `json:"top"`
+	Bottom         float32 `json:"bottom"`
+	GGRef          string  `json:"gg_ref"`
+}
+
+func handleTriggersListRegions(_ json.RawMessage) (any, error) {
+	out := buildRegionsList()
+	return map[string]any{"regions": out}, nil
+}
+
+// BuildTriggerRegions is the exported accessor for Wails.
+func BuildTriggerRegions() []TriggerRegionInfo { return buildRegionsList() }
+
+func buildRegionsList() []TriggerRegionInfo {
+	r := Current.Regions()
+	if r == nil {
+		return nil
+	}
+	out := make([]TriggerRegionInfo, 0, len(r.Regions))
+	for _, rg := range r.Regions {
+		out = append(out, TriggerRegionInfo{
+			Name:           rg.Name,
+			CreationNumber: rg.CreationNumber,
+			Left:           rg.Left,
+			Right:          rg.Right,
+			Top:            rg.Top,
+			Bottom:         rg.Bottom,
+			GGRef:          "gg_rct_" + strings.ReplaceAll(rg.Name, " ", "_"),
+		})
+	}
+	return out
+}
+
+// TriggerCameraInfo is one row from war3map.w3c. Subset of the Camera struct
+// the picker actually needs (name, target, distance — enough for the user to
+// disambiguate between presets).
+type TriggerCameraInfo struct {
+	Name     string  `json:"name"`
+	TargetX  float32 `json:"target_x"`
+	TargetY  float32 `json:"target_y"`
+	Distance float32 `json:"distance"`
+	GGRef    string  `json:"gg_ref"`
+}
+
+func handleTriggersListCameras(_ json.RawMessage) (any, error) {
+	out := buildCamerasList()
+	return map[string]any{"cameras": out}, nil
+}
+
+// BuildTriggerCameras is the exported accessor for Wails.
+func BuildTriggerCameras() []TriggerCameraInfo { return buildCamerasList() }
+
+func buildCamerasList() []TriggerCameraInfo {
+	c := Current.Cameras()
+	if c == nil {
+		return nil
+	}
+	out := make([]TriggerCameraInfo, 0, len(c.Cameras))
+	for _, cm := range c.Cameras {
+		out = append(out, TriggerCameraInfo{
+			Name:     cm.Name,
+			TargetX:  cm.TargetX,
+			TargetY:  cm.TargetY,
+			Distance: cm.Distance,
+			GGRef:    "gg_cam_" + strings.ReplaceAll(cm.Name, " ", "_"),
+		})
+	}
+	return out
 }
