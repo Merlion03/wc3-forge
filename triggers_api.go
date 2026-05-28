@@ -719,14 +719,17 @@ func (a *App) ConvertMapToLuaWithOptions(backup bool) (*ConvertToLuaResultDTO, e
 }
 
 // TranspileSectionDTO mirrors forge.TranspileSection — one diff entry the
-// review dialog renders.
+// review dialog renders. PreprocessWarnings carries non-fatal textmacro
+// preprocessor diagnostics; the UI surfaces them as a small warning bar
+// above the diff editor.
 type TranspileSectionDTO struct {
-	ID         int32    `json:"id"`
-	Label      string   `json:"label"`
-	Kind       string   `json:"kind"`
-	Original   string   `json:"original"`
-	Transpiled string   `json:"transpiled"`
-	Errors     []string `json:"errors,omitempty"`
+	ID                 int32    `json:"id"`
+	Label              string   `json:"label"`
+	Kind               string   `json:"kind"`
+	Original           string   `json:"original"`
+	Transpiled         string   `json:"transpiled"`
+	Errors             []string `json:"errors,omitempty"`
+	PreprocessWarnings []string `json:"preprocess_warnings,omitempty"`
 }
 
 // TranspilePreviewDTO mirrors forge.TranspilePreview.
@@ -745,12 +748,13 @@ func (a *App) GetTranspilePreview() (*TranspilePreviewDTO, error) {
 	out := &TranspilePreviewDTO{Sections: make([]TranspileSectionDTO, 0, len(preview.Sections))}
 	for _, s := range preview.Sections {
 		out.Sections = append(out.Sections, TranspileSectionDTO{
-			ID:         s.ID,
-			Label:      s.Label,
-			Kind:       s.Kind,
-			Original:   s.Original,
-			Transpiled: s.Transpiled,
-			Errors:     s.Errors,
+			ID:                 s.ID,
+			Label:              s.Label,
+			Kind:               s.Kind,
+			Original:           s.Original,
+			Transpiled:         s.Transpiled,
+			Errors:             s.Errors,
+			PreprocessWarnings: s.PreprocessWarnings,
 		})
 	}
 	return out, nil

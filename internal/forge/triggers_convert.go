@@ -102,11 +102,12 @@ func (s *Session) CheckConvertToLua() (*ConvertToLuaCheckResult, error) {
 
 	// Hand-rolled war3map.j case: scan the synthesized Map Header trigger's
 	// custom_text for vJASS. Pure-JASS hand-rolled maps are now convertible
-	// (the transpiler handles them).
+	// (the transpiler handles them). The textmacro preprocessor runs FIRST
+	// so a textmacro-only header expands to pure JASS and stops blocking.
 	if s.triggerIsHandRolled {
 		if s.triggers != nil && len(s.triggers.Triggers) > 0 {
 			tr := &s.triggers.Triggers[0]
-			if kw, found := jass2lua.FindVJASSKeyword(tr.CustomText); found {
+			if kw, found := scanVJASSAfterPreprocess(tr.CustomText); found {
 				name := s.mapHeaderScriptName
 				if name == "" {
 					name = "war3map.j"
@@ -127,14 +128,15 @@ func (s *Session) CheckConvertToLua() (*ConvertToLuaCheckResult, error) {
 		return res, nil
 	}
 
-	// Per-trigger vJASS scan.
+	// Per-trigger vJASS scan. We preprocess each section before scanning so
+	// textmacro-only triggers no longer block the convert flow.
 	for i := range s.triggers.Triggers {
 		tr := &s.triggers.Triggers[i]
 		if tr.IsComment {
 			continue
 		}
 		if (tr.IsScript || tr.Classifier == wtg.ClassifierScript) && tr.CustomText != "" {
-			if kw, found := jass2lua.FindVJASSKeyword(tr.CustomText); found {
+			if kw, found := scanVJASSAfterPreprocess(tr.CustomText); found {
 				res.Blockers = append(res.Blockers, ConvertBlocker{
 					TriggerID:   tr.ID,
 					TriggerName: tr.Name,
@@ -145,7 +147,7 @@ func (s *Session) CheckConvertToLua() (*ConvertToLuaCheckResult, error) {
 			continue
 		}
 		if tr.CustomText != "" {
-			if kw, found := jass2lua.FindVJASSKeyword(tr.CustomText); found {
+			if kw, found := scanVJASSAfterPreprocess(tr.CustomText); found {
 				res.Blockers = append(res.Blockers, ConvertBlocker{
 					TriggerID:   tr.ID,
 					TriggerName: tr.Name,
@@ -158,7 +160,7 @@ func (s *Session) CheckConvertToLua() (*ConvertToLuaCheckResult, error) {
 
 	// GlobalJASS in war3map.wct — also subject to the vJASS gate.
 	if s.triggersWct != nil && strings.TrimSpace(s.triggersWct.GlobalJASS) != "" {
-		if kw, found := jass2lua.FindVJASSKeyword(s.triggersWct.GlobalJASS); found {
+		if kw, found := scanVJASSAfterPreprocess(s.triggersWct.GlobalJASS); found {
 			res.Blockers = append(res.Blockers, ConvertBlocker{
 				TriggerID:   -1,
 				TriggerName: "war3map.wct GlobalJASS",
@@ -169,6 +171,24 @@ func (s *Session) CheckConvertToLua() (*ConvertToLuaCheckResult, error) {
 	}
 
 	return res, nil
+}
+
+// scanVJASSAfterPreprocess runs the Phase-1 textmacro preprocessor first,
+// then scans the EXPANDED source for vJASS keywords. This is what makes
+// textmacro-only sections stop blocking — the textmacros vanish during the
+// preprocess pass, leaving pure JASS behind.
+//
+// We deliberately ignore preprocess errors here: an unknown `//!` directive
+// or an unknown runtextmacro call shouldn't itself cause the blocker check
+// to fail (the user sees those as warnings in the diff UI). What matters
+// for the blocker gate is whether the expanded source still contains vJASS
+// keywords the existing transpiler can't handle.
+func scanVJASSAfterPreprocess(src string) (string, bool) {
+	if src == "" {
+		return "", false
+	}
+	pp := jass2lua.Preprocess(src)
+	return jass2lua.FindVJASSKeyword(pp.Expanded)
 }
 
 // TranspilePreview is the read-only DTO returned by TranspilePreview() — every
@@ -187,13 +207,20 @@ type TranspilePreview struct {
 //
 // Errors is non-nil only when the transpiler flagged trouble; UI uses it to
 // warn the user before they hit Convert.
+//
+// PreprocessWarnings carries non-fatal diagnostics from the textmacro
+// preprocessor (unknown macro, arg-count mismatch, unrecognized `//!`
+// directive, recursion limit). Empty when the section didn't use macros
+// (or used them cleanly). The UI surfaces these as a small warning bar
+// above the diff editor; they do NOT block conversion.
 type TranspileSection struct {
-	ID         int32    `json:"id"`
-	Label      string   `json:"label"`
-	Kind       string   `json:"kind"` // "script", "custom_text", "global_jass", "map_header"
-	Original   string   `json:"original"`
-	Transpiled string   `json:"transpiled"`
-	Errors     []string `json:"errors,omitempty"`
+	ID                 int32    `json:"id"`
+	Label              string   `json:"label"`
+	Kind               string   `json:"kind"` // "script", "custom_text", "global_jass", "map_header"
+	Original           string   `json:"original"`
+	Transpiled         string   `json:"transpiled"`
+	Errors             []string `json:"errors,omitempty"`
+	PreprocessWarnings []string `json:"preprocess_warnings,omitempty"`
 }
 
 // TranspilePreview returns a pure-read diff payload for the convert dialog.
@@ -212,13 +239,15 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 		if s.triggers != nil && len(s.triggers.Triggers) > 0 {
 			tr := &s.triggers.Triggers[0]
 			if strings.TrimSpace(tr.CustomText) != "" {
-				lua, err := jass2lua.TranspileScript(tr.CustomText)
+				pp := jass2lua.Preprocess(tr.CustomText)
+				lua, err := jass2lua.TranspileScript(pp.Expanded)
 				sec := TranspileSection{
-					ID:         tr.ID,
-					Label:      "Map Header (war3map.j)",
-					Kind:       "map_header",
-					Original:   tr.CustomText,
-					Transpiled: lua,
+					ID:                 tr.ID,
+					Label:              "Map Header (war3map.j)",
+					Kind:               "map_header",
+					Original:           tr.CustomText,
+					Transpiled:         lua,
+					PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
 				}
 				if err != nil {
 					sec.Errors = append(sec.Errors, err.Error())
@@ -231,13 +260,15 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 
 	// Global JASS header (war3map.wct) — top of the diff so the user sees it first.
 	if s.triggersWct != nil && strings.TrimSpace(s.triggersWct.GlobalJASS) != "" {
-		lua, err := jass2lua.TranspileScript(s.triggersWct.GlobalJASS)
+		pp := jass2lua.Preprocess(s.triggersWct.GlobalJASS)
+		lua, err := jass2lua.TranspileScript(pp.Expanded)
 		sec := TranspileSection{
-			ID:         -1,
-			Label:      "war3map.wct GlobalJASS",
-			Kind:       "global_jass",
-			Original:   s.triggersWct.GlobalJASS,
-			Transpiled: lua,
+			ID:                 -1,
+			Label:              "war3map.wct GlobalJASS",
+			Kind:               "global_jass",
+			Original:           s.triggersWct.GlobalJASS,
+			Transpiled:         lua,
+			PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
 		}
 		if err != nil {
 			sec.Errors = append(sec.Errors, err.Error())
@@ -256,13 +287,15 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 			continue
 		}
 		if (tr.IsScript || tr.Classifier == wtg.ClassifierScript) && strings.TrimSpace(tr.CustomText) != "" {
-			lua, err := jass2lua.TranspileScript(tr.CustomText)
+			pp := jass2lua.Preprocess(tr.CustomText)
+			lua, err := jass2lua.TranspileScript(pp.Expanded)
 			sec := TranspileSection{
-				ID:         tr.ID,
-				Label:      "Custom Script: " + tr.Name,
-				Kind:       "script",
-				Original:   tr.CustomText,
-				Transpiled: lua,
+				ID:                 tr.ID,
+				Label:              "Custom Script: " + tr.Name,
+				Kind:               "script",
+				Original:           tr.CustomText,
+				Transpiled:         lua,
+				PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
 			}
 			if err != nil {
 				sec.Errors = append(sec.Errors, err.Error())
@@ -272,13 +305,15 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 		}
 		if strings.TrimSpace(tr.CustomText) != "" {
 			// GUI trigger with custom_text overlay — auto-wrap as a function.
-			lua, err := jass2lua.TranspileFunction(tr.Name+"_CustomText", tr.CustomText)
+			pp := jass2lua.Preprocess(tr.CustomText)
+			lua, err := jass2lua.TranspileFunction(tr.Name+"_CustomText", pp.Expanded)
 			sec := TranspileSection{
-				ID:         tr.ID,
-				Label:      "Custom Text: " + tr.Name,
-				Kind:       "custom_text",
-				Original:   tr.CustomText,
-				Transpiled: lua,
+				ID:                 tr.ID,
+				Label:              "Custom Text: " + tr.Name,
+				Kind:               "custom_text",
+				Original:           tr.CustomText,
+				Transpiled:         lua,
+				PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
 			}
 			if err != nil {
 				sec.Errors = append(sec.Errors, err.Error())
@@ -287,6 +322,24 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 		}
 	}
 	return out, nil
+}
+
+// preprocessWarningsToStrings flattens PreprocessError diagnostics into the
+// "line N: message" strings the UI surfaces. Returns nil for the no-warning
+// case so the JSON omits the field entirely (json:"...,omitempty").
+func preprocessWarningsToStrings(errs []jass2lua.PreprocessError) []string {
+	if len(errs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(errs))
+	for _, e := range errs {
+		if e.Line > 0 {
+			out = append(out, fmt.Sprintf("line %d: %s", e.Line, e.Message))
+		} else {
+			out = append(out, e.Message)
+		}
+	}
+	return out
 }
 
 // ConvertToLuaOptions is the new params shape for ConvertToLua. Backup=true
@@ -380,7 +433,9 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 
 	// Build the per-trigger transpiled overlay (custom_texts that need
 	// translation feed into CustomTexts as Lua, so the codegen treats them
-	// as already-Lua and concatenates them verbatim).
+	// as already-Lua and concatenates them verbatim). Each section runs
+	// through the textmacro preprocessor BEFORE the transpiler so a
+	// macro-only section produces real Lua, not error placeholders.
 	customTextsLua := map[int32]string{}
 	if s.triggers != nil {
 		for i := range s.triggers.Triggers {
@@ -391,11 +446,12 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 			if strings.TrimSpace(tr.CustomText) == "" {
 				continue
 			}
+			expanded := jass2lua.Preprocess(tr.CustomText).Expanded
 			if tr.IsScript || tr.Classifier == wtg.ClassifierScript {
-				lua, _ := jass2lua.TranspileScript(tr.CustomText)
+				lua, _ := jass2lua.TranspileScript(expanded)
 				customTextsLua[tr.ID] = lua
 			} else {
-				lua, _ := jass2lua.TranspileFunction(tr.Name+"_CustomText", tr.CustomText)
+				lua, _ := jass2lua.TranspileFunction(tr.Name+"_CustomText", expanded)
 				customTextsLua[tr.ID] = lua
 			}
 		}
@@ -413,7 +469,8 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 		CustomTexts: customTextsLua,
 	}
 	if s.triggersWct != nil && strings.TrimSpace(s.triggersWct.GlobalJASS) != "" {
-		lua, _ := jass2lua.TranspileScript(s.triggersWct.GlobalJASS)
+		expanded := jass2lua.Preprocess(s.triggersWct.GlobalJASS).Expanded
+		lua, _ := jass2lua.TranspileScript(expanded)
 		in.GlobalJASS = lua
 	}
 

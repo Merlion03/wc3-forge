@@ -756,6 +756,7 @@ export namespace main {
 	    original: string;
 	    transpiled: string;
 	    errors?: string[];
+	    preprocess_warnings?: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new TranspileSectionDTO(source);
@@ -769,6 +770,7 @@ export namespace main {
 	        this.original = source["original"];
 	        this.transpiled = source["transpiled"];
 	        this.errors = source["errors"];
+	        this.preprocess_warnings = source["preprocess_warnings"];
 	    }
 	}
 	export class TranspilePreviewDTO {

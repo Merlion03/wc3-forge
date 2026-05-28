@@ -460,12 +460,18 @@ func luaStringLit(s string) string {
 // indicates the source needs the JassHelper preprocessor before it can be
 // transpiled. Maps detected keyword → human-readable label for the blocker
 // reason.
+//
+// NOTE: textmacro / endtextmacro / runtextmacro / runtextmacroonce live in
+// `//!` comment lines and are consumed by the Preprocess pass (preprocess.go)
+// BEFORE this scan runs. They're intentionally absent from this list so a
+// textmacro-only map (Phase 1 of vJASS support) flows through cleanly.
+// Library / scope / struct / module / etc. remain blockers; Phases 2-4 will
+// remove them from this list as the corresponding passes land.
 var vJASSKeywords = []string{
 	"library", "endlibrary",
 	"scope", "endscope",
 	"struct", "endstruct",
 	"module", "endmodule",
-	"textmacro", "endtextmacro",
 	"define",
 	"private", "public",
 	"interface",
