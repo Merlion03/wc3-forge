@@ -132,10 +132,34 @@ export interface TriggerFunctionsMeta {
   types?: Record<string, string>
 }
 
+export interface TriggerMutationResult {
+  tree: TriggerTree
+  new_id?: number
+  detail?: TriggerDetail | null
+}
+
 interface WailsApp {
   ListTriggerTree: () => Promise<TriggerTree>
   GetTrigger: (id: number) => Promise<TriggerDetail>
   GetTriggerFunctionsMeta: () => Promise<TriggerFunctionsMeta | null>
+  // Phase 2a — mutation surface. Each method dispatches to the matching
+  // Session mutator; returns the post-mutation tree + (when applicable) the
+  // affected node's detail.
+  AddTriggerCategory: (name: string, parentID: number) => Promise<TriggerMutationResult>
+  AddGUITrigger: (name: string, parentID: number) => Promise<TriggerMutationResult>
+  AddScriptTrigger: (name: string, parentID: number) => Promise<TriggerMutationResult>
+  AddCommentTrigger: (name: string, parentID: number) => Promise<TriggerMutationResult>
+  AddTriggerVariable: (name: string, varType: string, isArray: boolean, arraySize: number, initValue: string) => Promise<TriggerMutationResult>
+  DeleteTriggerNode: (id: number) => Promise<TriggerMutationResult>
+  RenameTriggerNode: (id: number, name: string) => Promise<TriggerMutationResult>
+  SetTriggerEnabled: (id: number, enabled: boolean) => Promise<TriggerMutationResult>
+  SetTriggerInitiallyOn: (id: number, initiallyOn: boolean) => Promise<TriggerMutationResult>
+  SetTriggerRunOnInit: (id: number, runOnInit: boolean) => Promise<TriggerMutationResult>
+  MoveTriggerNode: (id: number, newParentID: number) => Promise<TriggerMutationResult>
+  SetTriggerCustomText: (id: number, text: string) => Promise<TriggerMutationResult>
+  SetTriggerDescription: (id: number, text: string) => Promise<TriggerMutationResult>
+  SetTriggerVariable: (id: number, name: string, varType: string, isArray: boolean, arraySize: number, initValue: string) => Promise<TriggerMutationResult>
+  SetMapHeaderScript: (content: string) => Promise<TriggerMutationResult>
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -154,6 +178,54 @@ export function GetTrigger(id: number): Promise<TriggerDetail> {
 
 export function GetTriggerFunctionsMeta(): Promise<TriggerFunctionsMeta | null> {
   return app().GetTriggerFunctionsMeta()
+}
+
+// Phase 2a mutation re-exports. Frontend imports these by name; runtime
+// dispatches through the Wails-generated bindings object.
+export function AddTriggerCategory(name: string, parentID: number): Promise<TriggerMutationResult> {
+  return app().AddTriggerCategory(name, parentID)
+}
+export function AddGUITrigger(name: string, parentID: number): Promise<TriggerMutationResult> {
+  return app().AddGUITrigger(name, parentID)
+}
+export function AddScriptTrigger(name: string, parentID: number): Promise<TriggerMutationResult> {
+  return app().AddScriptTrigger(name, parentID)
+}
+export function AddCommentTrigger(name: string, parentID: number): Promise<TriggerMutationResult> {
+  return app().AddCommentTrigger(name, parentID)
+}
+export function AddTriggerVariable(name: string, varType: string, isArray: boolean, arraySize: number, initValue: string): Promise<TriggerMutationResult> {
+  return app().AddTriggerVariable(name, varType, isArray, arraySize, initValue)
+}
+export function DeleteTriggerNode(id: number): Promise<TriggerMutationResult> {
+  return app().DeleteTriggerNode(id)
+}
+export function RenameTriggerNode(id: number, name: string): Promise<TriggerMutationResult> {
+  return app().RenameTriggerNode(id, name)
+}
+export function SetTriggerEnabled(id: number, enabled: boolean): Promise<TriggerMutationResult> {
+  return app().SetTriggerEnabled(id, enabled)
+}
+export function SetTriggerInitiallyOn(id: number, initiallyOn: boolean): Promise<TriggerMutationResult> {
+  return app().SetTriggerInitiallyOn(id, initiallyOn)
+}
+export function SetTriggerRunOnInit(id: number, runOnInit: boolean): Promise<TriggerMutationResult> {
+  return app().SetTriggerRunOnInit(id, runOnInit)
+}
+export function MoveTriggerNode(id: number, newParentID: number): Promise<TriggerMutationResult> {
+  return app().MoveTriggerNode(id, newParentID)
+}
+export function SetTriggerCustomText(id: number, text: string): Promise<TriggerMutationResult> {
+  return app().SetTriggerCustomText(id, text)
+}
+export function SetTriggerDescription(id: number, text: string): Promise<TriggerMutationResult> {
+  return app().SetTriggerDescription(id, text)
+}
+export function SetTriggerVariable(id: number, name: string, varType: string, isArray: boolean, arraySize: number, initValue: string): Promise<TriggerMutationResult> {
+  return app().SetTriggerVariable(id, name, varType, isArray, arraySize, initValue)
+}
+export function SetMapHeaderScript(content: string): Promise<TriggerMutationResult> {
+  return app().SetMapHeaderScript(content)
 }
 
 // Stringify a parameter into a human-readable inline label. Mirrors

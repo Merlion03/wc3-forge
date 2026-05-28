@@ -231,3 +231,164 @@ func triggerKindMain(tr wtg.Trigger) string {
 	}
 	return "trigger_gui"
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2a — structural mutation Wails surface. Each method dispatches to
+// the matching Session mutator. Errors propagate to the JS caller via the
+// usual Wails error channel.
+//
+// Return type for every mutation is TriggerMutationResultDTO — the updated
+// tree + (when applicable) the affected node's detail. The JS caller can
+// repaint without a follow-up fetch.
+// ---------------------------------------------------------------------------
+
+// TriggerMutationResultDTO mirrors forge.triggerMutationResponse. NewID is
+// the affected node's id (or 0 for delete / map-header); Detail is the full
+// triggers.get payload for that node (nil for deleted nodes).
+type TriggerMutationResultDTO struct {
+	Tree   TriggerTreeDTO    `json:"tree"`
+	NewID  int32             `json:"new_id,omitempty"`
+	Detail *TriggerDetailDTO `json:"detail,omitempty"`
+}
+
+// buildTriggerMutationResult re-fetches the tree + detail post-mutation,
+// duplicating the bridge's buildMutationResponse but with the main-package
+// DTO shapes so Wails picks them up cleanly.
+func (a *App) buildTriggerMutationResult(affectedID int32) TriggerMutationResultDTO {
+	resp := TriggerMutationResultDTO{NewID: affectedID, Tree: a.ListTriggerTree()}
+	if affectedID != 0 {
+		if d, err := a.GetTrigger(affectedID); err == nil {
+			resp.Detail = d
+		}
+	}
+	return resp
+}
+
+// AddTriggerCategory appends a category and returns the updated tree.
+func (a *App) AddTriggerCategory(name string, parentID int32) (TriggerMutationResultDTO, error) {
+	id, err := forge.Current.AddTriggerCategory(name, parentID)
+	if err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// AddGUITrigger appends a GUI trigger.
+func (a *App) AddGUITrigger(name string, parentID int32) (TriggerMutationResultDTO, error) {
+	id, err := forge.Current.AddGUITrigger(name, parentID)
+	if err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// AddScriptTrigger appends a custom-script trigger.
+func (a *App) AddScriptTrigger(name string, parentID int32) (TriggerMutationResultDTO, error) {
+	id, err := forge.Current.AddScriptTrigger(name, parentID)
+	if err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// AddCommentTrigger appends a comment-only trigger.
+func (a *App) AddCommentTrigger(name string, parentID int32) (TriggerMutationResultDTO, error) {
+	id, err := forge.Current.AddCommentTrigger(name, parentID)
+	if err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// AddTriggerVariable appends a global trigger variable.
+func (a *App) AddTriggerVariable(name, varType string, isArray bool, arraySize int32, initValue string) (TriggerMutationResultDTO, error) {
+	id, err := forge.Current.AddTriggerVariable(name, varType, isArray, arraySize, initValue)
+	if err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// DeleteTriggerNode removes a node by id (category re-parents children to root).
+func (a *App) DeleteTriggerNode(id int32) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.DeleteTriggerNode(id); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(0), nil
+}
+
+// RenameTriggerNode updates a node's name.
+func (a *App) RenameTriggerNode(id int32, name string) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.RenameTriggerNode(id, name); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// SetTriggerEnabled toggles is_enabled.
+func (a *App) SetTriggerEnabled(id int32, enabled bool) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetTriggerEnabled(id, enabled); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// SetTriggerInitiallyOn toggles initially_on.
+func (a *App) SetTriggerInitiallyOn(id int32, initiallyOn bool) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetTriggerInitiallyOn(id, initiallyOn); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// SetTriggerRunOnInit toggles run_on_initialization.
+func (a *App) SetTriggerRunOnInit(id int32, runOnInit bool) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetTriggerRunOnInit(id, runOnInit); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// MoveTriggerNode re-parents a node. newParentID must point at a
+// category-like node (map/library/category).
+func (a *App) MoveTriggerNode(id, newParentID int32) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.MoveTriggerNode(id, newParentID); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// SetTriggerCustomText updates a script trigger's custom_text. Also handles
+// the synthetic Map Header script entry in hand-rolled-script maps.
+func (a *App) SetTriggerCustomText(id int32, text string) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetTriggerCustomText(id, text); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// SetTriggerDescription updates a comment/trigger description.
+func (a *App) SetTriggerDescription(id int32, text string) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetTriggerDescription(id, text); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// SetTriggerVariable updates a variable's full field set (5-field form).
+func (a *App) SetTriggerVariable(id int32, name, varType string, isArray bool, arraySize int32, initValue string) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetTriggerVariable(id, name, varType, isArray, arraySize, initValue); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(id), nil
+}
+
+// SetMapHeaderScript replaces the synthesized Map Header trigger's
+// custom_text for hand-rolled-script maps. Convenience over
+// SetTriggerCustomText.
+func (a *App) SetMapHeaderScript(content string) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetMapHeaderScript(content); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(0), nil
+}

@@ -34,6 +34,25 @@ func registerTriggerHandlers(reg func(method string, h bridge.Handler)) {
 	reg("triggers.tree", handleTriggersTree)
 	reg("triggers.get", handleTriggersGet)
 	reg("triggers.functions_meta", handleTriggersFunctionsMeta)
+	// Phase 2a — structural mutation surface. Each handler validates,
+	// dispatches into the corresponding Session mutator, and returns the
+	// updated tree + the affected node's get-payload so the JS layer
+	// doesn't need a second round-trip after each mutation.
+	reg("triggers.add_category", handleTriggersAddCategory)
+	reg("triggers.add_gui", handleTriggersAddGUI)
+	reg("triggers.add_script", handleTriggersAddScript)
+	reg("triggers.add_comment", handleTriggersAddComment)
+	reg("triggers.add_variable", handleTriggersAddVariable)
+	reg("triggers.delete", handleTriggersDelete)
+	reg("triggers.rename", handleTriggersRename)
+	reg("triggers.set_enabled", handleTriggersSetEnabled)
+	reg("triggers.set_initially_on", handleTriggersSetInitiallyOn)
+	reg("triggers.set_run_on_init", handleTriggersSetRunOnInit)
+	reg("triggers.move", handleTriggersMove)
+	reg("triggers.set_custom_text", handleTriggersSetCustomText)
+	reg("triggers.set_description", handleTriggersSetDescription)
+	reg("triggers.set_variable", handleTriggersSetVariable)
+	reg("triggers.set_map_header_script", handleTriggersSetMapHeaderScript)
 }
 
 // TriggerTreeNode is the one-shot tree-shape DTO. The frontend stitches
@@ -422,3 +441,267 @@ func isNumeric(s string) bool {
 // goimports re-grooming. The types here use them indirectly.
 var _ = wct.File{}
 var _ = wtg.Triggers{}
+
+// ---------------------------------------------------------------------------
+// Phase 2a mutation handlers. Pattern matches the Object Editor's
+// makeSetFieldHandler/makeCreateCustomHandler: validate, dispatch, return
+// the updated tree + the affected node's get-payload in one round-trip so
+// the JS caller doesn't have to follow up with a tree-refresh fetch.
+// ---------------------------------------------------------------------------
+
+// triggerMutationResponse is the standard wire shape returned by every
+// mutation handler. Tree is the post-mutation full tree; Detail is the
+// triggers.get payload for the affected node (NewID for adds, ID for
+// edits/deletes). Detail is nil when the affected node was deleted.
+type triggerMutationResponse struct {
+	Tree   TriggerTreeResponse `json:"tree"`
+	NewID  int32               `json:"new_id,omitempty"`
+	Detail *TriggerDetail      `json:"detail,omitempty"`
+}
+
+// buildMutationResponse re-runs handleTriggersTree + handleTriggersGet so
+// the response carries the latest state. Detail is best-effort — a missing
+// node returns nil rather than erroring (the deleted-node case).
+func buildMutationResponse(affectedID int32) triggerMutationResponse {
+	resp := triggerMutationResponse{NewID: affectedID}
+	if t, err := handleTriggersTree(nil); err == nil {
+		if tt, ok := t.(TriggerTreeResponse); ok {
+			resp.Tree = tt
+		}
+	}
+	if affectedID != 0 {
+		params, _ := json.Marshal(triggersGetParams{ID: affectedID})
+		if d, err := handleTriggersGet(params); err == nil {
+			if dd, ok := d.(TriggerDetail); ok {
+				resp.Detail = &dd
+			}
+		}
+	}
+	return resp
+}
+
+type triggersAddCategoryParams struct {
+	Name     string `json:"name"`
+	ParentID int32  `json:"parent_id"`
+}
+
+func handleTriggersAddCategory(params json.RawMessage) (any, error) {
+	var p triggersAddCategoryParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	id, err := Current.AddTriggerCategory(p.Name, p.ParentID)
+	if err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(id), nil
+}
+
+type triggersAddTriggerParams struct {
+	Name     string `json:"name"`
+	ParentID int32  `json:"parent_id"`
+}
+
+func handleTriggersAddGUI(params json.RawMessage) (any, error) {
+	var p triggersAddTriggerParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	id, err := Current.AddGUITrigger(p.Name, p.ParentID)
+	if err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(id), nil
+}
+
+func handleTriggersAddScript(params json.RawMessage) (any, error) {
+	var p triggersAddTriggerParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	id, err := Current.AddScriptTrigger(p.Name, p.ParentID)
+	if err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(id), nil
+}
+
+func handleTriggersAddComment(params json.RawMessage) (any, error) {
+	var p triggersAddTriggerParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	id, err := Current.AddCommentTrigger(p.Name, p.ParentID)
+	if err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(id), nil
+}
+
+type triggersAddVariableParams struct {
+	Name         string `json:"name"`
+	Type         string `json:"type"`
+	IsArray      bool   `json:"is_array"`
+	ArraySize    int32  `json:"array_size"`
+	InitialValue string `json:"initial_value"`
+}
+
+func handleTriggersAddVariable(params json.RawMessage) (any, error) {
+	var p triggersAddVariableParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	id, err := Current.AddTriggerVariable(p.Name, p.Type, p.IsArray, p.ArraySize, p.InitialValue)
+	if err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(id), nil
+}
+
+type triggersIDOnlyParams struct {
+	ID int32 `json:"id"`
+}
+
+func handleTriggersDelete(params json.RawMessage) (any, error) {
+	var p triggersIDOnlyParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.DeleteTriggerNode(p.ID); err != nil {
+		return nil, err
+	}
+	// Affected id is 0 — the node is gone; just return the refreshed tree.
+	return buildMutationResponse(0), nil
+}
+
+type triggersRenameParams struct {
+	ID   int32  `json:"id"`
+	Name string `json:"name"`
+}
+
+func handleTriggersRename(params json.RawMessage) (any, error) {
+	var p triggersRenameParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.RenameTriggerNode(p.ID, p.Name); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.ID), nil
+}
+
+type triggersIDBoolParams struct {
+	ID    int32 `json:"id"`
+	Value bool  `json:"value"`
+}
+
+func handleTriggersSetEnabled(params json.RawMessage) (any, error) {
+	var p triggersIDBoolParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SetTriggerEnabled(p.ID, p.Value); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.ID), nil
+}
+
+func handleTriggersSetInitiallyOn(params json.RawMessage) (any, error) {
+	var p triggersIDBoolParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SetTriggerInitiallyOn(p.ID, p.Value); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.ID), nil
+}
+
+func handleTriggersSetRunOnInit(params json.RawMessage) (any, error) {
+	var p triggersIDBoolParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SetTriggerRunOnInit(p.ID, p.Value); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.ID), nil
+}
+
+type triggersMoveParams struct {
+	ID          int32 `json:"id"`
+	NewParentID int32 `json:"new_parent_id"`
+}
+
+func handleTriggersMove(params json.RawMessage) (any, error) {
+	var p triggersMoveParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.MoveTriggerNode(p.ID, p.NewParentID); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.ID), nil
+}
+
+type triggersSetTextParams struct {
+	ID   int32  `json:"id"`
+	Text string `json:"text"`
+}
+
+func handleTriggersSetCustomText(params json.RawMessage) (any, error) {
+	var p triggersSetTextParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SetTriggerCustomText(p.ID, p.Text); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.ID), nil
+}
+
+func handleTriggersSetDescription(params json.RawMessage) (any, error) {
+	var p triggersSetTextParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SetTriggerDescription(p.ID, p.Text); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.ID), nil
+}
+
+type triggersSetVariableParams struct {
+	ID           int32  `json:"id"`
+	Name         string `json:"name"`
+	Type         string `json:"type"`
+	IsArray      bool   `json:"is_array"`
+	ArraySize    int32  `json:"array_size"`
+	InitialValue string `json:"initial_value"`
+}
+
+func handleTriggersSetVariable(params json.RawMessage) (any, error) {
+	var p triggersSetVariableParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SetTriggerVariable(p.ID, p.Name, p.Type, p.IsArray, p.ArraySize, p.InitialValue); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.ID), nil
+}
+
+type triggersSetMapHeaderParams struct {
+	Content string `json:"content"`
+}
+
+func handleTriggersSetMapHeaderScript(params json.RawMessage) (any, error) {
+	var p triggersSetMapHeaderParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SetMapHeaderScript(p.Content); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(0), nil
+}
