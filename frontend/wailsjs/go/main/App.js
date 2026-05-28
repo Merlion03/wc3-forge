@@ -22,6 +22,26 @@ export function CloseMap() {
   return window['go']['main']['App']['CloseMap']();
 }
 
+export function ConvertObject(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ConvertObject'](arg1, arg2, arg3);
+}
+
+export function CreateCustomObject(arg1, arg2, arg3) {
+  return window['go']['main']['App']['CreateCustomObject'](arg1, arg2, arg3);
+}
+
+export function CreateCustomUnit(arg1, arg2) {
+  return window['go']['main']['App']['CreateCustomUnit'](arg1, arg2);
+}
+
+export function DeleteCustomObject(arg1, arg2) {
+  return window['go']['main']['App']['DeleteCustomObject'](arg1, arg2);
+}
+
+export function DeleteCustomUnit(arg1) {
+  return window['go']['main']['App']['DeleteCustomUnit'](arg1);
+}
+
 export function DiscardTo(arg1) {
   return window['go']['main']['App']['DiscardTo'](arg1);
 }
@@ -64,6 +84,10 @@ export function GetMapBytes() {
 
 export function GetMinimapBytes() {
   return window['go']['main']['App']['GetMinimapBytes']();
+}
+
+export function GetObject(arg1, arg2) {
+  return window['go']['main']['App']['GetObject'](arg1, arg2);
 }
 
 export function GetPathingMap() {
@@ -110,12 +134,36 @@ export function LaunchInWC3() {
   return window['go']['main']['App']['LaunchInWC3']();
 }
 
+export function ListCampaignLoadingScreens() {
+  return window['go']['main']['App']['ListCampaignLoadingScreens']();
+}
+
+export function ListCommandButtons() {
+  return window['go']['main']['App']['ListCommandButtons']();
+}
+
 export function ListDoodads() {
   return window['go']['main']['App']['ListDoodads']();
 }
 
+export function ListImportedLoadingScreens() {
+  return window['go']['main']['App']['ListImportedLoadingScreens']();
+}
+
+export function ListObjects(arg1) {
+  return window['go']['main']['App']['ListObjects'](arg1);
+}
+
 export function ListSkyModels() {
   return window['go']['main']['App']['ListSkyModels']();
+}
+
+export function ListSoundEnvironments() {
+  return window['go']['main']['App']['ListSoundEnvironments']();
+}
+
+export function ListTilesetOptions() {
+  return window['go']['main']['App']['ListTilesetOptions']();
 }
 
 export function ListTilesets() {
@@ -128,6 +176,10 @@ export function ListUnitObjects() {
 
 export function ListUnits() {
   return window['go']['main']['App']['ListUnits']();
+}
+
+export function ListWeathers() {
+  return window['go']['main']['App']['ListWeathers']();
 }
 
 export function LogJS(arg1) {
@@ -198,6 +250,10 @@ export function SelectUnit(arg1) {
   return window['go']['main']['App']['SelectUnit'](arg1);
 }
 
+export function SetObjectField(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SetObjectField'](arg1, arg2, arg3, arg4);
+}
+
 export function SetReforgedMode(arg1) {
   return window['go']['main']['App']['SetReforgedMode'](arg1);
 }
@@ -212,6 +268,10 @@ export function SetSkyModel(arg1) {
 
 export function SetUnitAnimation(arg1, arg2) {
   return window['go']['main']['App']['SetUnitAnimation'](arg1, arg2);
+}
+
+export function SetUnitObjectField(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetUnitObjectField'](arg1, arg2, arg3);
 }
 
 export function Status() {
