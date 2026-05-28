@@ -57,8 +57,19 @@ func TranspileFunction(name, jass string) (lua string, err error) {
 		// Best-effort: still emit what we got.
 		return em.b.String(), parseErr
 	}
-	if len(p.errs) > 0 {
-		return em.b.String(), fmt.Errorf("%s", strings.Join(p.errs, "; "))
+	// Filter empty / whitespace-only entries from the soft-error list before
+	// joining — otherwise an upstream bug pushing a blank entry would cause
+	// `fmt.Errorf("%s", "")` (non-nil but empty error) to leak into the
+	// transpile-preview UI as a blank diagnostic bullet. Phase 5 fix.
+	cleaned := p.errs[:0]
+	for _, msg := range p.errs {
+		if strings.TrimSpace(msg) == "" {
+			continue
+		}
+		cleaned = append(cleaned, msg)
+	}
+	if len(cleaned) > 0 {
+		return em.b.String(), fmt.Errorf("%s", strings.Join(cleaned, "; "))
 	}
 	return em.b.String(), nil
 }
@@ -397,6 +408,8 @@ func (e *emitter) emitExpr(x Expr) string {
 		if op == "not" {
 			return "not " + e.emitExprWithParens(n.X)
 		}
+		// Bitwise not (`~`) and unary minus emit straight through — Lua 5.3+
+		// supports both with identical spelling.
 		return op + e.emitExprWithParens(n.X)
 	case *BinaryExpr:
 		// String concat heuristic: `+` on string literals becomes `..`. We
@@ -410,18 +423,48 @@ func (e *emitter) emitExpr(x Expr) string {
 			op = mapBinaryOp(op)
 		}
 		return e.emitExprWithParens(n.L) + " " + op + " " + e.emitExprWithParens(n.R)
+	case *TernaryExpr:
+		// Lua has no native ternary; lower to `(cond and then) or else`.
+		// Documented caveat: if `then` evaluates to `false` or `nil` the
+		// idiom returns `else` instead of `then`. JASS has no nil but a
+		// boolean `then` is the risky case — append an inline comment when
+		// `then` looks like a boolean expression.
+		out := "((" + e.emitExpr(n.Cond) + ") and (" + e.emitExpr(n.Then) + ") or (" + e.emitExpr(n.Else) + "))"
+		if isLikelyBoolExpr(n.Then) {
+			out += " --[[ ternary: `else` fallback unreliable if `then` is false ]]"
+		}
+		return out
 	}
 	return "--[[expr?]]"
 }
 
-// emitExprWithParens conservatively parenthesizes nested binary expressions
-// so the emitted Lua keeps source precedence. Leaf nodes don't need them.
+// emitExprWithParens conservatively parenthesizes nested binary / ternary
+// expressions so the emitted Lua keeps source precedence. Leaf nodes don't
+// need them.
 func (e *emitter) emitExprWithParens(x Expr) string {
 	switch x.(type) {
-	case *BinaryExpr:
+	case *BinaryExpr, *TernaryExpr:
 		return "(" + e.emitExpr(x) + ")"
 	}
 	return e.emitExpr(x)
+}
+
+// isLikelyBoolExpr is a cheap heuristic the ternary lowering uses to decide
+// whether to append the "false-then" caveat comment. Conservative: only known-
+// boolean-shaped subtrees flag it.
+func isLikelyBoolExpr(x Expr) bool {
+	switch n := x.(type) {
+	case *BoolLit:
+		return true
+	case *UnaryExpr:
+		return n.Op == "not"
+	case *BinaryExpr:
+		switch n.Op {
+		case "==", "!=", "<", "<=", ">", ">=", "and", "or":
+			return true
+		}
+	}
+	return false
 }
 
 // isStringExpr is the heuristic for the `+` → `..` concat rewrite. Recursive
@@ -437,10 +480,21 @@ func isStringExpr(x Expr) bool {
 }
 
 // mapBinaryOp translates JASS comparison operators to Lua. JASS uses `!=`;
-// Lua uses `~=`. Everything else is identical.
+// Lua uses `~=`. Bitwise operators (Phase 5) pass through mostly identical
+// for Lua 5.3+ EXCEPT bitwise XOR: Lua uses `~` (which is also Lua's bitwise
+// not unary), whereas vJASS / C-style bitwise XOR is `^`. We translate `^` →
+// `~` for binary positions; the parser distinguishes unary-`~` from binary-
+// `~` by context so the round-trip stays consistent.
+//
+// `|` (bitwise or), `&` (bitwise and), `<<` / `>>` (shifts) pass through as-is
+// — Lua 5.3+ uses the same spelling.
 func mapBinaryOp(op string) string {
-	if op == "!=" {
+	switch op {
+	case "!=":
 		return "~="
+	case "^":
+		// JASS `^` (bitwise xor, vJASS extension) → Lua `~` (binary form).
+		return "~"
 	}
 	return op
 }

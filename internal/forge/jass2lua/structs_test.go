@@ -564,3 +564,223 @@ native MyNative takes nothing returns nothing
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5 — real-world cleanup tests.
+// ---------------------------------------------------------------------------
+
+// TestPreprocessStructs_TrailingFieldComment verifies a field decl with a
+// trailing inline `// comment` is parsed, not flagged as unrecognized.
+func TestPreprocessStructs_TrailingFieldComment(t *testing.T) {
+	src := `struct Foo
+    real av        // alpha value
+    integer life  // remaining life
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Fatalf("unexpected errors: %+v", res.Errors)
+	}
+	s := res.Structs["Foo"]
+	if len(s.Fields) != 2 {
+		t.Fatalf("expected 2 fields, got %d: %+v", len(s.Fields), s.Fields)
+	}
+	if s.Fields[0].Name != "av" || s.Fields[0].Type != "real" {
+		t.Errorf("bad field 0: %+v", s.Fields[0])
+	}
+	if s.Fields[1].Name != "life" || s.Fields[1].Type != "integer" {
+		t.Errorf("bad field 1: %+v", s.Fields[1])
+	}
+}
+
+// TestPreprocessStructs_BareFieldDecl verifies a field decl without `= default`
+// parses correctly; the type's zero is used at emit time.
+func TestPreprocessStructs_BareFieldDecl(t *testing.T) {
+	src := `struct Foo
+    unit s
+    integer n
+    real r
+    string label
+    boolean flag
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Fatalf("unexpected errors: %+v", res.Errors)
+	}
+	s := res.Structs["Foo"]
+	if len(s.Fields) != 5 {
+		t.Fatalf("expected 5 fields, got %d", len(s.Fields))
+	}
+	lua := EmitStructLua(s)
+	// Each type's default initializer should appear in the allocator.
+	for _, want := range []string{"s = nil", "n = 0", "r = 0.0", `label = ""`, "flag = false"} {
+		if !strings.Contains(lua, want) {
+			t.Errorf("expected %q in emit, got:\n%s", want, lua)
+		}
+	}
+}
+
+// TestPreprocessStructs_StaticConstant — `static constant <type> NAME = EXPR`
+// parses as a static field with the constant nature documented (no Lua
+// enforcement). Both `static constant` and bare `constant` forms are accepted.
+func TestPreprocessStructs_StaticConstant(t *testing.T) {
+	src := `struct Foo
+    static constant real INTERVAL = 0.03125
+    constant integer COUNT = 5
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Fatalf("unexpected errors: %+v", res.Errors)
+	}
+	s := res.Structs["Foo"]
+	if len(s.Statics) != 1 {
+		t.Errorf("expected 1 static, got %d: %+v", len(s.Statics), s.Statics)
+	}
+	// Bare constant becomes an instance field with the default — JassHelper's
+	// semantics here are arguable; we don't promote it to a static because
+	// without `static`, the constant lives in instance scope. Either way, no
+	// "unrecognized body line" error should fire.
+	if s.Statics[0].Name != "INTERVAL" || s.Statics[0].Default != "0.03125" {
+		t.Errorf("bad static: %+v", s.Statics[0])
+	}
+}
+
+// TestPreprocessStructs_StaticIfElseEndif — full `static if … else … endif`
+// blocks inside a struct body. Always-take-first means the if-body parses;
+// the else-body is dropped; no stray `else` / `endif` lines escape.
+func TestPreprocessStructs_StaticIfElseEndif(t *testing.T) {
+	src := `struct Foo
+    static if DEBUG_MODE then
+        integer x = 1
+    else
+        integer x = 2
+    endif
+    integer y = 10
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Errorf("unexpected errors: %+v", res.Errors)
+	}
+	s := res.Structs["Foo"]
+	if len(s.Fields) != 2 {
+		t.Fatalf("expected 2 fields (x=1 + y=10), got %d: %+v", len(s.Fields), s.Fields)
+	}
+	if s.Fields[0].Default != "1" {
+		t.Errorf("expected first branch (x=1), got %+v", s.Fields[0])
+	}
+}
+
+// TestPreprocessStructs_StaticIfNested — nested static-if blocks. Inner ones
+// behave correctly within outer ones; depth tracking via stack.
+func TestPreprocessStructs_StaticIfNested(t *testing.T) {
+	src := `struct Foo
+    static if A
+        static if B
+            integer x = 1
+        else
+            integer x = 2
+        endif
+    else
+        integer x = 3
+    endif
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Errorf("unexpected errors: %+v", res.Errors)
+	}
+	s := res.Structs["Foo"]
+	// Always-take-first → outer if true → inner if true → x = 1.
+	if len(s.Fields) != 1 || s.Fields[0].Default != "1" {
+		t.Errorf("expected x=1 from nested first branches, got: %+v", s.Fields)
+	}
+}
+
+// TestPreprocessStructs_OperatorIndex — `static method operator [] takes …`
+// parses as a method with Operator="[]" and emits a __index metamethod.
+func TestPreprocessStructs_OperatorIndex(t *testing.T) {
+	src := `struct Foo
+    static method operator [] takes player p returns thistype
+        return 0
+    endmethod
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Fatalf("unexpected errors: %+v", res.Errors)
+	}
+	s := res.Structs["Foo"]
+	if len(s.Methods) != 1 {
+		t.Fatalf("expected 1 method, got %d", len(s.Methods))
+	}
+	if s.Methods[0].Operator != "[]" {
+		t.Errorf("expected Operator=`[]`, got %q", s.Methods[0].Operator)
+	}
+	lua := EmitStructLua(s)
+	if !strings.Contains(lua, "Foo._op_index") {
+		t.Errorf("expected fallback Foo._op_index method, got:\n%s", lua)
+	}
+	if !strings.Contains(lua, "Foo.__index = function") {
+		t.Errorf("expected __index metamethod reassignment, got:\n%s", lua)
+	}
+}
+
+// TestPreprocessStructs_OperatorComparison — `<` / `==` etc. parse and emit
+// as __lt / __eq metamethods.
+func TestPreprocessStructs_OperatorComparison(t *testing.T) {
+	src := `struct Foo
+    static method operator < takes thistype a, thistype b returns boolean
+        return true
+    endmethod
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Fatalf("unexpected errors: %+v", res.Errors)
+	}
+	s := res.Structs["Foo"]
+	lua := EmitStructLua(s)
+	if !strings.Contains(lua, "Foo.__lt = Foo._op_lt") {
+		t.Errorf("expected __lt metamethod wiring, got:\n%s", lua)
+	}
+}
+
+// TestPreprocessStructs_OperatorPlus — arithmetic operator overload maps to
+// __add.
+func TestPreprocessStructs_OperatorPlus(t *testing.T) {
+	src := `struct Vec
+    static method operator + takes thistype a, thistype b returns thistype
+        return 0
+    endmethod
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Fatalf("unexpected errors: %+v", res.Errors)
+	}
+	s := res.Structs["Vec"]
+	lua := EmitStructLua(s)
+	if !strings.Contains(lua, "Vec.__add = Vec._op_add") {
+		t.Errorf("expected __add metamethod wiring, got:\n%s", lua)
+	}
+}
+
+// TestPreprocessStructs_InlineCommentOnStaticField — a static field with a
+// trailing comment parses + retains its value.
+func TestPreprocessStructs_InlineCommentOnStaticField(t *testing.T) {
+	src := `struct Foo
+    static integer counter = 0   // global counter
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Fatalf("unexpected errors: %+v", res.Errors)
+	}
+	s := res.Structs["Foo"]
+	if len(s.Statics) != 1 || s.Statics[0].Name != "counter" || s.Statics[0].Default != "0" {
+		t.Errorf("expected counter=0 static, got %+v", s.Statics)
+	}
+}

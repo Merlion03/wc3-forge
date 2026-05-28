@@ -180,12 +180,19 @@ type StructField struct {
 }
 
 // StructMethod is one instance or static method.
+//
+// Phase 5: operator-overload methods (`static method operator [] takes …`,
+// `method operator < takes …`, etc.) populate Operator with the operator
+// token. The emitter then maps to a Lua metamethod (`__index`, `__lt`, …)
+// when possible, or to a regular method named `_op_<op>` with a warning when
+// the mapping isn't supported.
 type StructMethod struct {
-	Name    string
-	Static  bool
-	Params  []StructParam
-	Returns string // "" for `returns nothing`
-	Body    string // raw JASS body bytes (the contents between method/endmethod)
+	Name     string
+	Static   bool
+	Params   []StructParam
+	Returns  string // "" for `returns nothing`
+	Body     string // raw JASS body bytes (the contents between method/endmethod)
+	Operator string // "[]", "<", "==", "+", etc.; "" for non-operator methods
 }
 
 // StructParam is one entry of a method's `takes` list.
@@ -222,17 +229,38 @@ var (
 	structOpenerRe = regexp.MustCompile(`^\s*struct\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+extends\s+([A-Za-z_][A-Za-z0-9_]*))?\s*$`)
 	structCloserRe = regexp.MustCompile(`^\s*endstruct\s*$`)
 
-	// methodOpenerRe matches both instance + static methods.
+	// methodOpenerRe matches both instance + static methods (no operator).
 	// Groups: 1=optional `static`, 2=name, 3=takes-list (or "nothing"),
 	//         4=return type (or "nothing").
-	methodOpenerRe = regexp.MustCompile(`^\s*(static\s+)?method\s+(?:operator\s+)?([A-Za-z_][A-Za-z0-9_=]*)\s+takes\s+(.+?)\s+returns\s+([A-Za-z_][A-Za-z0-9_]*)\s*$`)
+	methodOpenerRe = regexp.MustCompile(`^\s*(static\s+)?method\s+([A-Za-z_][A-Za-z0-9_]*)\s+takes\s+(.+?)\s+returns\s+([A-Za-z_][A-Za-z0-9_]*)\s*$`)
 	methodCloserRe = regexp.MustCompile(`^\s*endmethod\s*$`)
 
+	// operatorOpenerRe matches operator-overload method openers (Phase 5):
+	//   static method operator [] takes …          → array-read overload
+	//   method operator []= takes …                → array-write overload
+	//   method operator < takes …                  → comparison overload
+	//   method operator + takes …                  → arithmetic overload
+	//   method operator nameProperty takes …       → property-getter (vJASS)
+	//   method operator nameProperty= takes …      → property-setter (vJASS)
+	// Groups: 1=optional `static`, 2=operator token, 3=takes-list, 4=return type.
+	//
+	// Property-style operator overloads (`operator name`, `operator name=`) are
+	// vJASS sugar: `x.name` invokes `operator name`; `set x.name = v` invokes
+	// `operator name=`. The Lua mapping degrades these into normally-named
+	// methods (`_op_name_get`, `_op_name_set`) since Lua __index/__newindex are
+	// the only generic property hooks and they collide with method dispatch.
+	operatorOpenerRe = regexp.MustCompile(`^\s*(static\s+)?method\s+operator\s+(\[\]=|\[\]|==|!=|<=|>=|<|>|\+|-|\*|/|%|=|[A-Za-z_][A-Za-z0-9_]*=?)\s+takes\s+(.+?)\s+returns\s+([A-Za-z_][A-Za-z0-9_]*)\s*$`)
+
 	// fieldRe matches a struct field declaration. Groups:
-	//   1=optional `static`/`readonly`/`delegate` modifier(s), 2=type, 3=name, 4=optional default.
-	// We handle modifiers in the body of the parser since regex can't capture
-	// all orderings of an arbitrary multi-modifier prefix cleanly.
-	fieldRe = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s+(?:array\s+)?([A-Za-z_][A-Za-z0-9_]*)(?:\s*=\s*(.+))?\s*$`)
+	//   1=type, 2=name, 3=optional default expression.
+	// Phase 5 changes:
+	//   - The `=` clause + RHS is fully optional (bare decls like `unit s`
+	//     default to the type's zero).
+	//   - Trailing inline comments (`// …`) are stripped BEFORE the regex runs,
+	//     so they don't pollute the default-expression capture.
+	// We handle leading modifiers (static / readonly / delegate / constant)
+	// in the parser body since regex can't capture all orderings cleanly.
+	fieldRe = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s+(?:array\s+)?([A-Za-z_][A-Za-z0-9_]*)(?:\s*=\s*(.+?))?\s*$`)
 )
 
 // ---------------------------------------------------------------------------
@@ -457,13 +485,18 @@ func extractStructBlocks(lines []string, modules map[string]ModuleDef, res *Stru
 //	implement optional Foo   → group1="optional ", group2="Foo"
 var implementRe = regexp.MustCompile(`^\s*implement\s+(optional\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*$`)
 
-// staticIfRe / staticEndifRe match struct-body `static if … endif` pairs.
-// JassHelper supports a static if (compile-time conditional) wrapping arbitrary
-// member declarations. We always take the body — there's no evaluator for the
-// condition at this layer.
+// staticIfRe / staticElseifRe / staticElseRe / staticEndifRe match struct-body
+// `static if … (elseif|else) … endif` blocks. JassHelper supports a static if
+// (compile-time conditional) wrapping arbitrary member declarations. We always
+// take the FIRST branch — there's no evaluator for the condition at this
+// layer. Phase 5: extended to ALSO strip the else/elseif branches (Phase 3+4
+// only stripped the bare opener+endif, which let `else` and `endif` lines
+// leak through into parseStructBody as unrecognized).
 var (
-	staticIfRe    = regexp.MustCompile(`^\s*static\s+if\b`)
-	staticEndifRe = regexp.MustCompile(`^\s*endif\s*$`)
+	staticIfRe     = regexp.MustCompile(`^\s*static\s+if\b`)
+	staticElseifRe = regexp.MustCompile(`^\s*elseif\b`)
+	staticElseRe   = regexp.MustCompile(`^\s*else\s*$`)
+	staticEndifRe  = regexp.MustCompile(`^\s*endif\s*$`)
 )
 
 // debugMethodPrefixRe matches a `debug method` / `debug static method` opener.
@@ -510,27 +543,48 @@ func inlineImplements(structName string, bodyLines []string, modules map[string]
 	return out
 }
 
-// stripStaticIf walks bodyLines and removes `static if SOMETHING` / `endif`
-// keyword pairs while preserving the body lines between them verbatim. We
-// always take the if-body (no condition evaluation). Nested static-ifs are
-// supported via a depth counter.
+// stripStaticIf walks bodyLines and removes `static if SOMETHING …
+// (elseif/else) … endif` blocks, KEEPING only the FIRST branch's body (no
+// condition evaluation). Nested static-ifs are supported via a stack.
+//
+// State per open static-if (stack frame):
+//   emitting=true  — we're inside the first branch (the one we always take)
+//   emitting=false — we've passed `else` / `elseif`, so skip until `endif`
 //
 // Plain `endif` inside a struct body is rare outside this context; we only
-// match it when we're tracking an open `static if`.
+// treat it as a closer when we're tracking an open `static if`.
 func stripStaticIf(bodyLines []string) []string {
 	if len(bodyLines) == 0 {
 		return bodyLines
 	}
 	var out []string
-	depth := 0
+	// stack[i] == true means we're currently emitting at depth i.
+	var stack []bool
 	for _, line := range bodyLines {
 		trim := strings.TrimRight(line, "\r\n")
 		if staticIfRe.MatchString(trim) {
-			depth++
+			// New nested static-if. Inherit emitting-state from the parent
+			// frame (if any) — a static-if inside a skipped branch stays
+			// skipped.
+			parentEmitting := true
+			if len(stack) > 0 && !stack[len(stack)-1] {
+				parentEmitting = false
+			}
+			stack = append(stack, parentEmitting)
 			continue
 		}
-		if depth > 0 && staticEndifRe.MatchString(trim) {
-			depth--
+		if len(stack) > 0 && staticEndifRe.MatchString(trim) {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		if len(stack) > 0 && (staticElseRe.MatchString(trim) || staticElseifRe.MatchString(trim)) {
+			// Transition off the first branch. We never re-enable emit; the
+			// always-take-first policy means every later branch is dropped.
+			stack[len(stack)-1] = false
+			continue
+		}
+		// Check whether we're currently in a skipped region.
+		if len(stack) > 0 && !stack[len(stack)-1] {
 			continue
 		}
 		out = append(out, line)
@@ -555,9 +609,30 @@ func stripDebugMethodPrefix(bodyLines []string) []string {
 	return out
 }
 
+// stripInlineComment removes a trailing `// …` comment from a struct-body
+// line, returning the bytes BEFORE the comment marker. String literals don't
+// matter at the field-decl level (field initializers are constants — strings
+// containing `//` are rare). Phase 5 addition; lets us accept lines like
+//   `real av        // alpha value`
+// as a bare field decl + an annotation we currently drop on the floor.
+func stripInlineComment(s string) string {
+	if i := strings.Index(s, "//"); i >= 0 {
+		return strings.TrimRight(s[:i], " \t")
+	}
+	return s
+}
+
 // parseStructBody walks the lines between `struct ... endstruct` and
 // populates def.Fields / def.Statics / def.Methods / def.OnInit. Unrecognized
 // lines produce a diagnostic but processing continues.
+//
+// Phase 5 additions:
+//   - Inline `// comment` on field decls is stripped before field-regex.
+//   - Bare field decls (`unit s`) without `= default` are accepted; type's
+//     zero is used at emit time.
+//   - `constant` and `static constant` field modifiers parse correctly.
+//   - `static method operator [] takes …` (and other operator overloads)
+//     parse as StructMethod with Operator set; emit maps to Lua metamethods.
 func parseStructBody(def *StructDef, lines []string, res *StructResult) {
 	i := 0
 	for i < len(lines) {
@@ -577,8 +652,29 @@ func parseStructBody(def *StructDef, lines []string, res *StructResult) {
 			i++
 			continue
 		}
+		// Strip trailing inline comments so method/field openers with
+		// `// comment` tails match cleanly (Phase 5). The bare/full strings
+		// were declared above — re-derive trimNoComment here for the
+		// method/operator regex matches without altering `trim` (still used
+		// for field-modifier matching below, which has its own strip pass).
+		trimNoComment := stripInlineComment(trim)
+		// Operator-overload method opener (Phase 5)?
+		if om := operatorOpenerRe.FindStringSubmatch(trimNoComment); om != nil {
+			method := StructMethod{
+				Static:   strings.TrimSpace(om[1]) == "static",
+				Operator: om[2],
+				Name:     "_op_" + sanitizeOperatorName(om[2]),
+			}
+			method.Params = parseMethodParams(om[3])
+			if om[4] != "nothing" {
+				method.Returns = om[4]
+			}
+			collectMethodBody(def, &method, lines, &i, res)
+			def.Methods = append(def.Methods, method)
+			continue
+		}
 		// Method opener?
-		if m := methodOpenerRe.FindStringSubmatch(trim); m != nil {
+		if m := methodOpenerRe.FindStringSubmatch(trimNoComment); m != nil {
 			method := StructMethod{
 				Static: strings.TrimSpace(m[1]) == "static",
 				Name:   strings.TrimSpace(m[2]),
@@ -587,27 +683,7 @@ func parseStructBody(def *StructDef, lines []string, res *StructResult) {
 			if m[4] != "nothing" {
 				method.Returns = m[4]
 			}
-			// Collect body until endmethod.
-			var body strings.Builder
-			i++
-			closed := false
-			for i < len(lines) {
-				inner := lines[i]
-				if methodCloserRe.MatchString(strings.TrimRight(inner, "\r\n")) {
-					closed = true
-					i++
-					break
-				}
-				body.WriteString(inner)
-				i++
-			}
-			if !closed {
-				res.Errors = append(res.Errors, StructError{
-					Line:    def.StartLine,
-					Message: fmt.Sprintf("struct %q method %q: missing `endmethod`", def.Name, method.Name),
-				})
-			}
-			method.Body = body.String()
+			collectMethodBody(def, &method, lines, &i, res)
 			def.Methods = append(def.Methods, method)
 			switch {
 			case method.Static && method.Name == "create":
@@ -623,11 +699,19 @@ func parseStructBody(def *StructDef, lines []string, res *StructResult) {
 			}
 			continue
 		}
-		// Field declaration. Parse leading modifiers manually.
+		// Field declaration. Parse leading modifiers manually. Phase 5 adds
+		// `constant` and `debug` (alongside the existing
+		// static/readonly/delegate). `debug` on a field is a JassHelper
+		// conditional — the field only exists in debug builds. We treat it
+		// as a regular field (always emit it) since Lua has no per-mode
+		// compilation concept here.
 		modStatic := false
 		modReadonly := false
 		modDelegate := false
-		rest := trim
+		modConstant := false
+		// Strip a trailing inline `// …` comment FIRST so it doesn't pollute
+		// the field-default capture or modifier matching.
+		rest := stripInlineComment(trim)
 		for {
 			b := strings.TrimSpace(rest)
 			if strings.HasPrefix(b, "static ") {
@@ -643,6 +727,17 @@ func parseStructBody(def *StructDef, lines []string, res *StructResult) {
 			if strings.HasPrefix(b, "delegate ") {
 				modDelegate = true
 				rest = strings.TrimPrefix(b, "delegate ")
+				continue
+			}
+			if strings.HasPrefix(b, "constant ") {
+				modConstant = true
+				rest = strings.TrimPrefix(b, "constant ")
+				continue
+			}
+			if strings.HasPrefix(b, "debug ") {
+				// `debug` on a field: JassHelper-conditional, drop the
+				// prefix and treat as a normal field.
+				rest = strings.TrimPrefix(b, "debug ")
 				continue
 			}
 			rest = b
@@ -671,6 +766,7 @@ func parseStructBody(def *StructDef, lines []string, res *StructResult) {
 			// __index metamethod fallthrough.
 			def.Delegates = append(def.Delegates, field.Name)
 		}
+		_ = modConstant // Lua has no enforced const; emit annotation only.
 		if modStatic {
 			def.Statics = append(def.Statics, field)
 		} else {
@@ -678,6 +774,84 @@ func parseStructBody(def *StructDef, lines []string, res *StructResult) {
 		}
 		i++
 	}
+}
+
+// collectMethodBody reads lines from *i until `endmethod`, populating
+// method.Body with the captured bytes. Records a StructError if `endmethod`
+// is missing before the body runs out. Advances *i past the `endmethod` line
+// (or to the end of lines if missing).
+func collectMethodBody(def *StructDef, method *StructMethod, lines []string, i *int, res *StructResult) {
+	var body strings.Builder
+	*i++ // step past opener
+	closed := false
+	for *i < len(lines) {
+		inner := lines[*i]
+		if methodCloserRe.MatchString(strings.TrimRight(inner, "\r\n")) {
+			closed = true
+			*i++
+			break
+		}
+		body.WriteString(inner)
+		*i++
+	}
+	if !closed {
+		opName := method.Name
+		if method.Operator != "" {
+			opName = "operator " + method.Operator
+		}
+		res.Errors = append(res.Errors, StructError{
+			Line:    def.StartLine,
+			Message: fmt.Sprintf("struct %q method %q: missing `endmethod`", def.Name, opName),
+		})
+	}
+	method.Body = body.String()
+}
+
+// sanitizeOperatorName turns an operator token into an identifier-safe suffix
+// for the fallback method name (e.g. `[]` → `index`, `<` → `lt`, `+` → `add`).
+// Used when the emitter can't map the operator to a Lua metamethod and falls
+// back to a regular named method.
+//
+// Property-style operator overloads (vJASS sugar — `operator name` /
+// `operator name=`) map to `<name>_get` / `<name>_set` so the fallback method
+// reads cleanly without colliding with regular method names.
+func sanitizeOperatorName(op string) string {
+	switch op {
+	case "[]":
+		return "index"
+	case "[]=":
+		return "newindex"
+	case "<":
+		return "lt"
+	case "<=":
+		return "le"
+	case ">":
+		return "gt"
+	case ">=":
+		return "ge"
+	case "==":
+		return "eq"
+	case "!=":
+		return "ne"
+	case "=":
+		return "assign"
+	case "+":
+		return "add"
+	case "-":
+		return "sub"
+	case "*":
+		return "mul"
+	case "/":
+		return "div"
+	case "%":
+		return "mod"
+	}
+	// Property-style operator (identifier-shaped op). `foo=` is the setter,
+	// `foo` is the getter.
+	if strings.HasSuffix(op, "=") {
+		return strings.TrimSuffix(op, "=") + "_set"
+	}
+	return op + "_get"
 }
 
 // parseMethodParams parses a method's `takes` clause. JASS supports
@@ -906,6 +1080,11 @@ func emitStructLua(b *strings.Builder, s StructDef) {
 	// User-defined methods.
 	for _, m := range s.Methods {
 		emitStructMethod(b, s, m)
+		// Operator overload (Phase 5): after emitting the named fallback
+		// method, wire up the corresponding Lua metamethod when possible.
+		if m.Operator != "" {
+			emitOperatorMetamethod(b, s, m)
+		}
 	}
 
 	// Auto-synthesize `create` if user didn't define one. The synthesized
@@ -925,6 +1104,77 @@ func emitStructLua(b *strings.Builder, s StructDef) {
 		b.WriteString("\tsetmetatable(self, nil)\n")
 		b.WriteString("end\n")
 	}
+}
+
+// emitOperatorMetamethod wires a struct's operator overload to the Lua
+// metamethod it most closely maps to. Called AFTER emitStructMethod has
+// already emitted the named fallback method (e.g. `Foo._op_lt` for `<`).
+//
+// Mapping:
+//   `[]`  → __index function delegating to user's _op_index, with fallback
+//           to the existing Foo table for non-overloaded lookups. Static
+//           operator only emits a comment (Lua metamethods are per-instance).
+//   `<`   → __lt
+//   `<=`  → __le
+//   `==`  → __eq
+//   `+` → __add, `-` → __sub, `*` → __mul, `/` → __div, `%` → __mod
+//
+// Other operators emit a comment noting the metamethod wasn't hooked up.
+// The named fallback method stays available via `Foo:_op_<name>(...)`.
+func emitOperatorMetamethod(b *strings.Builder, s StructDef, m StructMethod) {
+	switch m.Operator {
+	case "[]":
+		// `__index` was already set to either `Foo` (no delegates) or a
+		// function (delegates). To preserve method lookup, we wrap whichever
+		// previous form was used and chain the user's overload after.
+		//
+		// We re-emit __index as a function that:
+		//   1. Tries the user's `_op_index` overload (its return value, if
+		//      non-nil, wins).
+		//   2. Falls back to the existing Foo.<k> static-table lookup.
+		fmt.Fprintf(b, "do\n")
+		fmt.Fprintf(b, "\tlocal _prev_index = %s.__index\n", s.Name)
+		fmt.Fprintf(b, "\t%s.__index = function(t, k)\n", s.Name)
+		fmt.Fprintf(b, "\t\tlocal v = %s._op_index(t, k)\n", s.Name)
+		fmt.Fprintf(b, "\t\tif v ~= nil then return v end\n")
+		fmt.Fprintf(b, "\t\tif type(_prev_index) == 'function' then return _prev_index(t, k) end\n")
+		fmt.Fprintf(b, "\t\treturn _prev_index[k]\n")
+		fmt.Fprintf(b, "\tend\n")
+		fmt.Fprintf(b, "end\n")
+		return
+	case "[]=":
+		// `__newindex` — Lua-side instance-write hook. Phase 5 v1: route every
+		// write through the user's `_op_newindex` overload.
+		fmt.Fprintf(b, "%s.__newindex = %s._op_newindex\n", s.Name, s.Name)
+		return
+	case "<":
+		fmt.Fprintf(b, "%s.__lt = %s._op_lt\n", s.Name, s.Name)
+		return
+	case "<=":
+		fmt.Fprintf(b, "%s.__le = %s._op_le\n", s.Name, s.Name)
+		return
+	case "==":
+		fmt.Fprintf(b, "%s.__eq = %s._op_eq\n", s.Name, s.Name)
+		return
+	case "+":
+		fmt.Fprintf(b, "%s.__add = %s._op_add\n", s.Name, s.Name)
+		return
+	case "-":
+		fmt.Fprintf(b, "%s.__sub = %s._op_sub\n", s.Name, s.Name)
+		return
+	case "*":
+		fmt.Fprintf(b, "%s.__mul = %s._op_mul\n", s.Name, s.Name)
+		return
+	case "/":
+		fmt.Fprintf(b, "%s.__div = %s._op_div\n", s.Name, s.Name)
+		return
+	case "%":
+		fmt.Fprintf(b, "%s.__mod = %s._op_mod\n", s.Name, s.Name)
+		return
+	}
+	// Unknown operator — emit a comment so the user knows the named method
+	// exists but the metamethod hookup wasn't generated.
+	fmt.Fprintf(b, "-- jass2lua: operator %q on struct %q has no Lua metamethod; available as %s.%s\n", m.Operator, s.Name, s.Name, m.Name)
 }
 
 // emitStructMethod writes one method as a Lua function. Instance methods use

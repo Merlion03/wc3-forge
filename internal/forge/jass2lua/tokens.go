@@ -141,11 +141,14 @@ func (l *lexer) advance() byte {
 }
 
 func (l *lexer) next() (Token, error) {
-	// Skip horizontal whitespace (spaces, tabs, carriage returns). Newlines
-	// are significant and emitted as TokEOL.
+	// Skip horizontal whitespace (spaces, tabs, carriage returns) and NUL
+	// bytes. NUL bytes appear in real-world maps' war3map.wct GlobalJASS
+	// from file corruption, mid-edit save crashes, or save-game data sneaking
+	// into the script. Stripping them is safer than aborting the whole
+	// conversion.
 	for l.pos < len(l.src) {
 		c := l.src[l.pos]
-		if c == ' ' || c == '\t' || c == '\r' {
+		if c == ' ' || c == '\t' || c == '\r' || c == 0 {
 			l.advance()
 			continue
 		}
@@ -202,11 +205,18 @@ func (l *lexer) next() (Token, error) {
 		return l.lexIdent(startLine, startCol)
 	}
 
-	// Two-char operators: ==, !=, <=, >=
+	// Two-char operators: ==, !=, <=, >=, <<, >>
 	if (c == '=' || c == '!' || c == '<' || c == '>') && l.peek(1) == '=' {
 		l.advance()
 		l.advance()
 		return Token{Kind: TokOp, Value: string([]byte{c, '='}), Line: startLine, Col: startCol}, nil
+	}
+	// Bitwise shift: << / >>. Lexed as a single TokOp so the parser can
+	// dispatch on the whole operator string in one shot.
+	if (c == '<' && l.peek(1) == '<') || (c == '>' && l.peek(1) == '>') {
+		l.advance()
+		l.advance()
+		return Token{Kind: TokOp, Value: string([]byte{c, c}), Line: startLine, Col: startCol}, nil
 	}
 
 	// One-char operator / punctuation.
@@ -363,7 +373,13 @@ func isOpChar(c byte) bool {
 		// (`recv:method(args)`) before the transpiler runs. Accepting `:` as
 		// an op token lets that pre-rewritten source flow through; the
 		// parser handles it identically to `.` and the emitter preserves
-		// the colon.
+		// the colon. `:` is also the ternary RHS separator (Phase 5).
+		return true
+	case '?', '|', '&', '~', '^':
+		// Phase 5: ternary (`?`) and bitwise (`|`, `&`, `~`, `^`) operators.
+		// JASS proper doesn't have these but vJASS / BlizzardAPI maps in the
+		// wild use them. The parser handles them as low-precedence operators
+		// and the emitter maps them to Lua 5.3+ native operators.
 		return true
 	}
 	return false

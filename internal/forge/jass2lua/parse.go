@@ -206,6 +206,17 @@ type MemberCallExpr struct {
 	Args   []Expr
 }
 
+// TernaryExpr is the vJASS / BlizzardAPI ternary expression `cond ? then : else`.
+// Phase 5 addition. Lua has no native ternary; the emitter lowers to the
+// idiomatic `(cond and then) or else` form with a documented caveat: if `then`
+// is `false` or `nil`, the expression incorrectly returns `else`. JASS has no
+// nil but `boolean` then-values are the risky case.
+type TernaryExpr struct {
+	Cond Expr
+	Then Expr
+	Else Expr
+}
+
 // Method markers.
 func (*FuncDecl) node()     {}
 func (*GlobalsBlock) node() {}
@@ -235,6 +246,7 @@ func (*RawLit) node()       {}
 func (*IndexExpr) node()    {}
 func (*MemberExpr) node()   {}
 func (*MemberCallExpr) node() {}
+func (*TernaryExpr) node()  {}
 
 func (*CommentStmt) stmt()  {}
 func (*IfStmt) stmt()       {}
@@ -260,6 +272,7 @@ func (*RawLit) expr()     {}
 func (*IndexExpr) expr()  {}
 func (*MemberExpr) expr() {}
 func (*MemberCallExpr) expr() {}
+func (*TernaryExpr) expr() {}
 
 func (*Ident) lhs()      {}
 func (*IndexExpr) lhs()  {}
@@ -904,18 +917,55 @@ func (p *parser) parseStmtsUntil(terminators ...string) ([]Stmt, string, error) 
 // ---------------------------------------------------------------------------
 
 func (p *parser) parseExpr() (Expr, error) {
-	return p.parseBinary(0)
+	return p.parseTernary()
 }
 
-// Precedence table — matches JASS/standard order:
+// parseTernary handles the vJASS / BlizzardAPI ternary `cond ? a : b`. The
+// operator is right-associative and binds lower than everything else, so we
+// parse a full binary expression for the condition, then if `?` follows,
+// recurse for the then/else arms.
 //
-//	1 — or
-//	2 — and
-//	3 — not (unary)
-//	4 — == != < <= > >=
-//	5 — + -
-//	6 — * / %
-//	7 — unary -
+// Lua doesn't have a native ternary; the emitter lowers this to the standard
+// `(cond and a) or b` idiom (with the documented `a is false/nil` caveat).
+func (p *parser) parseTernary() (Expr, error) {
+	cond, err := p.parseBinary(0)
+	if err != nil {
+		return nil, err
+	}
+	if p.peek().Kind == TokOp && p.peek().Value == "?" {
+		p.advance()
+		thenE, err := p.parseTernary()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TokOp, ":"); err != nil {
+			return nil, err
+		}
+		elseE, err := p.parseTernary()
+		if err != nil {
+			return nil, err
+		}
+		return &TernaryExpr{Cond: cond, Then: thenE, Else: elseE}, nil
+	}
+	return cond, nil
+}
+
+// Precedence table — matches JASS/standard + C-like bitwise ordering. Higher
+// numbers bind tighter.
+//
+//	1  — or (logical)
+//	2  — and (logical)
+//	3  — | (bitwise or)
+//	4  — ^ (bitwise xor)       — vJASS / BlizzardAPI extension
+//	5  — & (bitwise and)
+//	6  — == !=
+//	7  — < <= > >=
+//	8  — << >>                 — vJASS / BlizzardAPI extension
+//	9  — + -
+//	10 — * / %
+//	(unary `not` / `-` / `~` bind tighter than any binary op)
+//
+// `not`, `-`, and `~` (bitwise not) are unary and handled by parseUnary.
 func opPrec(t Token) int {
 	if t.Kind == TokKeyword {
 		switch t.Value {
@@ -927,12 +977,22 @@ func opPrec(t Token) int {
 	}
 	if t.Kind == TokOp {
 		switch t.Value {
-		case "==", "!=", "<", "<=", ">", ">=":
+		case "|":
+			return 3
+		case "^":
 			return 4
-		case "+", "-":
+		case "&":
 			return 5
-		case "*", "/", "%":
+		case "==", "!=":
 			return 6
+		case "<", "<=", ">", ">=":
+			return 7
+		case "<<", ">>":
+			return 8
+		case "+", "-":
+			return 9
+		case "*", "/", "%":
+			return 10
 		}
 	}
 	return 0
@@ -981,6 +1041,15 @@ func (p *parser) parseUnary() (Expr, error) {
 		// Unary plus — drop.
 		p.advance()
 		return p.parseUnary()
+	}
+	if t.Kind == TokOp && t.Value == "~" {
+		// Bitwise not (Phase 5). Emitter maps to Lua 5.3+ unary `~`.
+		p.advance()
+		x, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+		return &UnaryExpr{Op: "~", X: x}, nil
 	}
 	return p.parsePrimary()
 }
@@ -1080,8 +1149,7 @@ func (p *parser) parseMemberChain(head Expr) (Expr, error) {
 			return head, nil
 		}
 		switch t.Value {
-		case ".", ":":
-			colon := t.Value == ":"
+		case ".":
 			p.advance()
 			if p.peek().Kind != TokIdent {
 				return nil, fmt.Errorf("expected member name after %q at line %d:%d", t.Value, p.peek().Line, p.peek().Col)
@@ -1097,11 +1165,35 @@ func (p *parser) parseMemberChain(head Expr) (Expr, error) {
 				if _, err := p.expect(TokOp, ")"); err != nil {
 					return nil, err
 				}
-				head = &MemberCallExpr{Recv: head, Method: member, Colon: colon, Args: args}
+				head = &MemberCallExpr{Recv: head, Method: member, Colon: false, Args: args}
 				continue
 			}
 			// Plain field access.
-			head = &MemberExpr{Base: head, Member: member, Colon: colon}
+			head = &MemberExpr{Base: head, Member: member, Colon: false}
+		case ":":
+			// `:` is ambiguous between the struct-preprocessor's instance-call
+			// separator (`recv:method(args)`) and the ternary RHS separator
+			// (`cond ? a : b`). Disambiguate by lookahead: ONLY consume `:`
+			// as a method-call separator when followed by IDENT `(`. Anything
+			// else returns `head` so the outer ternary parser can claim it.
+			// Phase 5 fix.
+			if p.peekAt(1).Kind != TokIdent {
+				return head, nil
+			}
+			if !(p.peekAt(2).Kind == TokOp && p.peekAt(2).Value == "(") {
+				return head, nil
+			}
+			p.advance() // :
+			member := p.advance().Value
+			p.advance() // (
+			args, err := p.parseArgList()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(TokOp, ")"); err != nil {
+				return nil, err
+			}
+			head = &MemberCallExpr{Recv: head, Method: member, Colon: true, Args: args}
 		case "[":
 			p.advance()
 			idx, err := p.parseExpr()

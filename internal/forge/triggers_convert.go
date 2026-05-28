@@ -324,6 +324,14 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 //	  → TranspileScript → SpliceStructLua
 //
 // Diagnostics from each pass surface separately on the section.
+//
+// Phase 5: appendNonEmpty filters defensively so a nil-but-not-empty error
+// message (e.g. `fmt.Errorf("")` or a `Parse()` result with empty parse
+// errors) never produces a blank bullet in the UI's transpiler-diagnostics
+// list. This was the root cause of the "424 sections with empty error
+// strings" observation: an unsurfaced parser-error branch could push
+// blank entries into `p.errs`, and the helper join produced a non-nil
+// error.Error() that was empty or all-whitespace.
 func transpileSectionScript(id int32, label, kind, src string) TranspileSection {
 	stripped := jass2lua.StripBlockComments(src)
 	pp := jass2lua.Preprocess(stripped)
@@ -350,9 +358,7 @@ func transpileSectionScript(id int32, label, kind, src string) TranspileSection 
 		InitOrder:          ls.InitOrder,
 		StructInits:        st.Inits,
 	}
-	if err != nil {
-		sec.Errors = append(sec.Errors, err.Error())
-	}
+	sec.Errors = appendErrorMessage(sec.Errors, err)
 	return sec
 }
 
@@ -387,26 +393,55 @@ func transpileSectionCustomText(id int32, triggerName, src string) TranspileSect
 		InitOrder:          ls.InitOrder,
 		StructInits:        st.Inits,
 	}
-	if err != nil {
-		sec.Errors = append(sec.Errors, err.Error())
-	}
+	sec.Errors = appendErrorMessage(sec.Errors, err)
 	return sec
+}
+
+// appendErrorMessage is the Phase 5 defensive helper that filters empty /
+// whitespace-only error strings before adding them to the section's Errors
+// slice. The bug it fixes: parser-error aggregation paths can produce
+// `fmt.Errorf("")` (e.g. join of `[]string{""}` or a snippet capture that
+// loses its source bytes), and the unfiltered code path was leaking those
+// blank strings into the UI as empty bullets. Net effect on Enfo's FFB
+// preview: ~424 sections with `errors` non-empty but unreadable.
+//
+// We also defang trailing-newline / leading-newline cases so messages flow
+// cleanly into the UI's <li> render without odd spacing.
+func appendErrorMessage(dst []string, err error) []string {
+	if err == nil {
+		return dst
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return dst
+	}
+	return append(dst, msg)
 }
 
 // preprocessWarningsToStrings flattens PreprocessError diagnostics into the
 // "line N: message" strings the UI surfaces. Returns nil for the no-warning
 // case so the JSON omits the field entirely (json:"...,omitempty").
+//
+// Empty-message entries are dropped defensively (Phase 5) so a future
+// preprocessor bug pushing an empty message can't paint blank bullets.
 func preprocessWarningsToStrings(errs []jass2lua.PreprocessError) []string {
 	if len(errs) == 0 {
 		return nil
 	}
 	out := make([]string, 0, len(errs))
 	for _, e := range errs {
-		if e.Line > 0 {
-			out = append(out, fmt.Sprintf("line %d: %s", e.Line, e.Message))
-		} else {
-			out = append(out, e.Message)
+		msg := strings.TrimSpace(e.Message)
+		if msg == "" {
+			continue
 		}
+		if e.Line > 0 {
+			out = append(out, fmt.Sprintf("line %d: %s", e.Line, msg))
+		} else {
+			out = append(out, msg)
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -415,53 +450,76 @@ func preprocessWarningsToStrings(errs []jass2lua.PreprocessError) []string {
 // "line N: message" strings the UI surfaces. Same shape as
 // preprocessWarningsToStrings; kept as a separate function so changes to
 // either pass's diagnostic shape don't ripple across both.
+//
+// Empty-message entries are filtered (Phase 5 — see appendErrorMessage).
 func libScopeWarningsToStrings(errs []jass2lua.LibScopeError) []string {
 	if len(errs) == 0 {
 		return nil
 	}
 	out := make([]string, 0, len(errs))
 	for _, e := range errs {
-		if e.Line > 0 {
-			out = append(out, fmt.Sprintf("line %d: %s", e.Line, e.Message))
-		} else {
-			out = append(out, e.Message)
+		msg := strings.TrimSpace(e.Message)
+		if msg == "" {
+			continue
 		}
+		if e.Line > 0 {
+			out = append(out, fmt.Sprintf("line %d: %s", e.Line, msg))
+		} else {
+			out = append(out, msg)
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
 
 // moduleWarningsToStrings flattens ModuleError diagnostics into the
 // "line N: message" strings the UI surfaces. Same shape as the other
-// per-pass helpers.
+// per-pass helpers. Empty-message entries are filtered (Phase 5).
 func moduleWarningsToStrings(errs []jass2lua.ModuleError) []string {
 	if len(errs) == 0 {
 		return nil
 	}
 	out := make([]string, 0, len(errs))
 	for _, e := range errs {
-		if e.Line > 0 {
-			out = append(out, fmt.Sprintf("line %d: %s", e.Line, e.Message))
-		} else {
-			out = append(out, e.Message)
+		msg := strings.TrimSpace(e.Message)
+		if msg == "" {
+			continue
 		}
+		if e.Line > 0 {
+			out = append(out, fmt.Sprintf("line %d: %s", e.Line, msg))
+		} else {
+			out = append(out, msg)
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
 
 // structWarningsToStrings flattens StructError diagnostics into the
 // "line N: message" strings the UI surfaces. Same shape as the other
-// per-pass helpers.
+// per-pass helpers. Empty-message entries are filtered (Phase 5).
 func structWarningsToStrings(errs []jass2lua.StructError) []string {
 	if len(errs) == 0 {
 		return nil
 	}
 	out := make([]string, 0, len(errs))
 	for _, e := range errs {
-		if e.Line > 0 {
-			out = append(out, fmt.Sprintf("line %d: %s", e.Line, e.Message))
-		} else {
-			out = append(out, e.Message)
+		msg := strings.TrimSpace(e.Message)
+		if msg == "" {
+			continue
 		}
+		if e.Line > 0 {
+			out = append(out, fmt.Sprintf("line %d: %s", e.Line, msg))
+		} else {
+			out = append(out, msg)
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

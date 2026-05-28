@@ -576,3 +576,28 @@ func max(a, b int) int {
 	}
 	return b
 }
+
+// TestAppendErrorMessage_FiltersEmpty is the Phase 5 regression test for the
+// "empty error bullet" bug. Previously, sections would surface blank entries
+// in the transpiler-diagnostics list when an unsurfaced parser branch pushed
+// an empty `err.Error()` string. The defensive filter drops them.
+func TestAppendErrorMessage_FiltersEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"nil", nil, 0},
+		{"empty string", errors.New(""), 0},
+		{"whitespace only", errors.New("   \t\n  "), 0},
+		{"real message", errors.New("unexpected token"), 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := appendErrorMessage(nil, c.err)
+			if len(got) != c.want {
+				t.Errorf("got %d entries, want %d (entries=%v)", len(got), c.want, got)
+			}
+		})
+	}
+}
