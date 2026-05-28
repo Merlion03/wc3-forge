@@ -37,18 +37,31 @@
     SetTriggerDescription,
     SetTriggerVariable,
     SetMapHeaderScript,
+    AddTriggerECA,
+    DeleteTriggerECA,
+    MoveTriggerECA,
+    SetTriggerECAEnabled,
+    SetTriggerParamValue,
     paramLabel,
     renderECALabel,
     MAGIC_ECAS,
+    ECAType,
+    ParamType,
     type TriggerTree,
     type TriggerTreeNode,
     type TriggerDetail,
     type TriggerECA,
+    type TriggerParameter,
+    type TriggerVariableRecord,
     type TriggerFunctionMeta,
     type TriggerFunctionsMeta,
   } from './trigger-editor-bindings'
   import { parseWC3Color } from './wc3color'
   import * as Dialog from '$lib/components/ui/dialog'
+  import FunctionPicker from './FunctionPicker.svelte'
+  import ParamEditor from './ParamEditor.svelte'
+  import TriggerEntityPicker from './TriggerEntityPicker.svelte'
+  import type { ObjectKind } from './object-editor-bindings'
   import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view'
   import { EditorState } from '@codemirror/state'
   import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
@@ -725,6 +738,203 @@
       errorMsg = `Variable save failed: ${e}`
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Phase 2b1 — ECA add/delete/move + per-param editing.
+  //
+  // The FunctionPicker, ParamEditor, and TriggerEntityPicker are modal — we
+  // own their open state here and dispatch into Session via the bindings. All
+  // mutations refresh `tree` + `detail` from the response so the UI repaints
+  // immediately.
+  // ---------------------------------------------------------------------------
+
+  // FunctionPicker state. When non-null, the picker is open for the given
+  // section + the currently-selected trigger. The user's pick is committed via
+  // commitFunctionPick.
+  let funcPickerSection: 'TriggerEvents' | 'TriggerConditions' | 'TriggerActions' | 'TriggerCalls' | null = $state(null)
+  let funcPickerForTriggerId: number | null = $state(null)
+  function openFunctionPicker(section: typeof funcPickerSection) {
+    if (!detail || detail.kind !== 'trigger_gui' || !detail.trigger) return
+    funcPickerSection = section
+    funcPickerForTriggerId = detail.trigger.id
+  }
+  async function commitFunctionPick(name: string) {
+    if (funcPickerForTriggerId == null || !funcPickerSection) return
+    const ecaType = sectionToECAType(funcPickerSection)
+    try {
+      const res = await AddTriggerECA(funcPickerForTriggerId, ecaType, name, -1)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Add ECA failed: ${e}`
+    } finally {
+      funcPickerSection = null
+      funcPickerForTriggerId = null
+    }
+  }
+  function sectionToECAType(section: typeof funcPickerSection): number {
+    switch (section) {
+      case 'TriggerEvents': return ECAType.Event
+      case 'TriggerConditions': return ECAType.Condition
+      case 'TriggerActions': return ECAType.Action
+      case 'TriggerCalls': return ECAType.Call
+      default: return ECAType.Action
+    }
+  }
+
+  // ParamEditor state. The user clicks an ECA's `~ArgN` token; we open the
+  // ParamEditor with the slot's declared type + the current Parameter value.
+  let paramEditorOpen = $state(false)
+  let paramEditorTriggerId: number | null = $state(null)
+  let paramEditorPath: number[] = $state([])
+  let paramEditorIndex = $state(0)
+  let paramEditorType = $state('')
+  let paramEditorParam: TriggerParameter | null = $state(null)
+
+  function openParamEditor(triggerId: number, ecaPath: number[], paramIndex: number, declaredType: string, param: TriggerParameter | null) {
+    paramEditorTriggerId = triggerId
+    paramEditorPath = ecaPath
+    paramEditorIndex = paramIndex
+    paramEditorType = declaredType
+    paramEditorParam = param
+    paramEditorOpen = true
+  }
+  async function commitParamValue({ value, paramType }: { value: string; paramType: number }) {
+    if (paramEditorTriggerId == null) return
+    try {
+      const res = await SetTriggerParamValue(paramEditorTriggerId, paramEditorPath, paramEditorIndex, value, paramType)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Set param failed: ${e}`
+    }
+  }
+
+  // *code entity-picker state. Opened from ParamEditor's "Pick…" button.
+  let entityPickerOpen = $state(false)
+  let entityPickerKind: ObjectKind = $state('units')
+  let entityPickerCurrent = $state('')
+  let entityPickerCommit: ((id: string) => void) | null = null
+  function onPickEntityFromParamEditor(kind: ObjectKind, current: string, commit: (id: string) => void) {
+    entityPickerKind = kind
+    entityPickerCurrent = current
+    entityPickerCommit = commit
+    entityPickerOpen = true
+  }
+  function onEntityPicked(id: string) {
+    entityPickerCommit?.(id)
+    entityPickerCommit = null
+    entityPickerOpen = false
+  }
+
+  // Delete-ECA / Move-ECA / Toggle-Enabled handlers.
+  async function deleteECA(triggerId: number, ecaPath: number[]) {
+    if (!window.confirm('Delete this ECA?')) return
+    try {
+      const res = await DeleteTriggerECA(triggerId, ecaPath)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Delete ECA failed: ${e}`
+    }
+  }
+  async function moveECAByDelta(triggerId: number, ecaPath: number[], delta: number) {
+    const leaf = ecaPath[ecaPath.length - 1]
+    const newPos = leaf + delta
+    if (newPos < 0) return
+    const newPath = [...ecaPath.slice(0, -1), newPos]
+    void newPath
+    try {
+      const res = await MoveTriggerECA(triggerId, ecaPath, newPos)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Move ECA failed: ${e}`
+    }
+  }
+  async function toggleECAEnabled(triggerId: number, ecaPath: number[], enabled: boolean) {
+    try {
+      const res = await SetTriggerECAEnabled(triggerId, ecaPath, enabled)
+      tree = res.tree
+      if (res.detail) detail = res.detail
+    } catch (e) {
+      errorMsg = `Toggle ECA failed: ${e}`
+    }
+  }
+
+  // topLevelPathOf returns the index path for a top-level ECA inside its
+  // trigger. Used by the template to derive the eca_path arg for mutations.
+  // For 2b1 every clickable row is top-level; nested children sit inside
+  // magic ECAs we still render read-only (2b2 will add inline editors for
+  // those children).
+  function topLevelPathOf(all: TriggerECA[], eca: TriggerECA): number[] {
+    for (let i = 0; i < all.length; i++) {
+      if (all[i] === eca) return [i]
+    }
+    return [0]
+  }
+
+  // Variables visible to the currently-selected trigger's ParamEditor. Today
+  // every global variable is in scope; future per-trigger locals would filter.
+  let visibleVariables = $derived.by(() => {
+    const out: TriggerVariableRecord[] = []
+    for (const n of tree.nodes ?? []) {
+      if (n.kind === 'variable') {
+        out.push({
+          name: n.name,
+          type: 'integer', // not in the tree-node payload; default to integer
+          id: n.id,
+          parent_id: n.parent_id,
+          is_initialized: false,
+          initial_value: '',
+          is_array: false,
+        } as TriggerVariableRecord)
+      }
+    }
+    return out
+  })
+
+  // For each ECA row, build a click-token spec from its parameters_template.
+  // The picker calls openParamEditor with the right argument index when the
+  // user clicks a `~ArgN` token. Literals stay as plain text. Returns an
+  // ordered list of { kind: 'text'|'param', text? , paramIndex?, type? }.
+  type LabelToken = { kind: 'text'; text: string } | { kind: 'param'; paramIndex: number; type: string; label: string }
+  function buildLabelTokens(eca: TriggerECA): LabelToken[] {
+    const meta = metaByName.get(eca.name)
+    const tpl = meta?.parameters_template
+    const params = eca.parameters ?? []
+    if (!tpl || tpl.length === 0) {
+      // Fallback: synthetic "name(p1, p2, …)" with every param clickable.
+      const tokens: LabelToken[] = [{ kind: 'text', text: `${eca.name}(` }]
+      params.forEach((p, i) => {
+        if (i > 0) tokens.push({ kind: 'text', text: ', ' })
+        tokens.push({
+          kind: 'param',
+          paramIndex: i,
+          type: meta?.arg_types?.[i] || '',
+          label: paramLabel(p),
+        })
+      })
+      tokens.push({ kind: 'text', text: ')' })
+      return tokens
+    }
+    const tokens: LabelToken[] = []
+    let argIdx = 0
+    for (const seg of tpl) {
+      if (seg.startsWith('~')) {
+        tokens.push({
+          kind: 'param',
+          paramIndex: argIdx,
+          type: meta?.arg_types?.[argIdx] || '',
+          label: paramLabel(params[argIdx]),
+        })
+        argIdx++
+      } else {
+        tokens.push({ kind: 'text', text: seg })
+      }
+    }
+    return tokens
+  }
 </script>
 
 <Dialog.Root bind:open onOpenChange={(v) => { if (!v) onClose?.() }}>
@@ -876,51 +1086,78 @@
               </div>
             </div>
 
+            <!-- Events -->
             <details open class="te-section">
               <summary class="te-section-summary">Events ({parts.events.length})</summary>
               <div class="te-eca-list">
-                {#each renderECARows(parts.events, 0) as r (r.raw === r.raw && r.label)}
-                  <div
-                    class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}"
-                    style="padding-left: {r.depth * 16}px"
-                    title={r.hint || undefined}
-                  >{@html renderColoredLabel(r.label)}</div>
+                {#each t.ecas?.filter((e) => e.type === 0) ?? [] as e, i (i + '|' + e.name)}
+                  {@const path = topLevelPathOf(t.ecas ?? [], e)}
+                  <div class="te-eca-row te-eca-edit" title={metaByName.get(e.name)?.hint || ''}>
+                    <button class="te-eca-act" title="Toggle enabled" onclick={() => void toggleECAEnabled(t.id, path, !e.enabled)}>{e.enabled ? '☑' : '☐'}</button>
+                    <button class="te-eca-act" title="Move up" onclick={() => void moveECAByDelta(t.id, path, -1)}>↑</button>
+                    <button class="te-eca-act" title="Move down" onclick={() => void moveECAByDelta(t.id, path, +1)}>↓</button>
+                    <span class="te-eca-tokens {e.enabled ? '' : 'te-disabled'}">
+                      {#each buildLabelTokens(e) as tok}
+                        {#if tok.kind === 'text'}{@html renderColoredLabel(tok.text)}{:else}<button class="te-tok" onclick={() => openParamEditor(t.id, path, tok.paramIndex, tok.type, e.parameters?.[tok.paramIndex] ?? null)}>{@html renderColoredLabel(tok.label || '(unset)')}</button>{/if}
+                      {/each}
+                    </span>
+                    <button class="te-eca-act te-eca-del" title="Delete ECA" onclick={() => void deleteECA(t.id, path)}>×</button>
+                  </div>
                 {/each}
                 {#if parts.events.length === 0}
                   <div class="te-eca-empty">(none)</div>
                 {/if}
+                <button class="te-eca-add" onclick={() => openFunctionPicker('TriggerEvents')}>+ Add Event</button>
               </div>
             </details>
 
+            <!-- Conditions -->
             <details open class="te-section">
               <summary class="te-section-summary">Conditions ({parts.conditions.length})</summary>
               <div class="te-eca-list">
-                {#each renderECARows(parts.conditions, 0) as r (r.raw === r.raw && r.label)}
-                  <div
-                    class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}"
-                    style="padding-left: {r.depth * 16}px"
-                    title={r.hint || undefined}
-                  >{@html renderColoredLabel(r.label)}</div>
+                {#each t.ecas?.filter((e) => e.type === 1) ?? [] as e, i (i + '|' + e.name)}
+                  {@const path = topLevelPathOf(t.ecas ?? [], e)}
+                  <div class="te-eca-row te-eca-edit" title={metaByName.get(e.name)?.hint || ''}>
+                    <button class="te-eca-act" title="Toggle enabled" onclick={() => void toggleECAEnabled(t.id, path, !e.enabled)}>{e.enabled ? '☑' : '☐'}</button>
+                    <button class="te-eca-act" title="Move up" onclick={() => void moveECAByDelta(t.id, path, -1)}>↑</button>
+                    <button class="te-eca-act" title="Move down" onclick={() => void moveECAByDelta(t.id, path, +1)}>↓</button>
+                    <span class="te-eca-tokens {e.enabled ? '' : 'te-disabled'}">
+                      {#each buildLabelTokens(e) as tok}
+                        {#if tok.kind === 'text'}{@html renderColoredLabel(tok.text)}{:else}<button class="te-tok" onclick={() => openParamEditor(t.id, path, tok.paramIndex, tok.type, e.parameters?.[tok.paramIndex] ?? null)}>{@html renderColoredLabel(tok.label || '(unset)')}</button>{/if}
+                      {/each}
+                    </span>
+                    <button class="te-eca-act te-eca-del" title="Delete ECA" onclick={() => void deleteECA(t.id, path)}>×</button>
+                  </div>
                 {/each}
                 {#if parts.conditions.length === 0}
                   <div class="te-eca-empty">(none)</div>
                 {/if}
+                <button class="te-eca-add" onclick={() => openFunctionPicker('TriggerConditions')}>+ Add Condition</button>
               </div>
             </details>
 
+            <!-- Actions -->
             <details open class="te-section">
               <summary class="te-section-summary">Actions ({parts.actions.length})</summary>
               <div class="te-eca-list">
-                {#each renderECARows(parts.actions, 0) as r (r.raw === r.raw && r.label)}
-                  <div
-                    class="te-eca-row {r.isMagicChild ? 'te-eca-magic' : ''}"
-                    style="padding-left: {r.depth * 16}px"
-                    title={r.hint || undefined}
-                  >{@html renderColoredLabel(r.label)}</div>
+                {#each t.ecas?.filter((e) => e.type !== 0 && e.type !== 1) ?? [] as e, i (i + '|' + e.name)}
+                  {@const path = topLevelPathOf(t.ecas ?? [], e)}
+                  <div class="te-eca-row te-eca-edit" title={metaByName.get(e.name)?.hint || ''}>
+                    <button class="te-eca-act" title="Toggle enabled" onclick={() => void toggleECAEnabled(t.id, path, !e.enabled)}>{e.enabled ? '☑' : '☐'}</button>
+                    <button class="te-eca-act" title="Move up" onclick={() => void moveECAByDelta(t.id, path, -1)}>↑</button>
+                    <button class="te-eca-act" title="Move down" onclick={() => void moveECAByDelta(t.id, path, +1)}>↓</button>
+                    <span class="te-eca-tokens {e.enabled ? '' : 'te-disabled'}">
+                      {#each buildLabelTokens(e) as tok}
+                        {#if tok.kind === 'text'}{@html renderColoredLabel(tok.text)}{:else}<button class="te-tok" onclick={() => openParamEditor(t.id, path, tok.paramIndex, tok.type, e.parameters?.[tok.paramIndex] ?? null)}>{@html renderColoredLabel(tok.label || '(unset)')}</button>{/if}
+                      {/each}
+                    </span>
+                    <button class="te-eca-act te-eca-del" title="Delete ECA" onclick={() => void deleteECA(t.id, path)}>×</button>
+                  </div>
                 {/each}
                 {#if parts.actions.length === 0}
                   <div class="te-eca-empty">(none)</div>
                 {/if}
+                <button class="te-eca-add" onclick={() => openFunctionPicker('TriggerActions')}>+ Add Action</button>
               </div>
             </details>
           </div>
@@ -929,6 +1166,38 @@
     </div>
   </Dialog.Content>
 </Dialog.Root>
+
+<!-- Phase 2b1 modal stack — kept outside the Dialog.Root so they layer above
+     the main trigger-editor dialog without z-index gymnastics. -->
+{#if funcPickerSection != null}
+  <FunctionPicker
+    open
+    section={funcPickerSection}
+    meta={functionsMeta}
+    onPick={commitFunctionPick}
+    onClose={() => { funcPickerSection = null; funcPickerForTriggerId = null }}
+  />
+{/if}
+
+<ParamEditor
+  bind:open={paramEditorOpen}
+  paramType={paramEditorType}
+  param={paramEditorParam}
+  presets={functionsMeta?.presets ?? []}
+  typeMeta={functionsMeta?.type_meta ?? []}
+  variables={visibleVariables}
+  onChange={commitParamValue}
+  onPickEntity={onPickEntityFromParamEditor}
+  onClose={() => (paramEditorOpen = false)}
+/>
+
+<TriggerEntityPicker
+  bind:open={entityPickerOpen}
+  kind={entityPickerKind}
+  currentValue={entityPickerCurrent}
+  onPick={onEntityPicked}
+  onClose={() => (entityPickerOpen = false)}
+/>
 
 <style>
   .te-tree {
@@ -972,8 +1241,65 @@
     white-space: pre-wrap;
     color: #d4d4d8;
   }
-  .te-eca-magic { color: #a5b4fc; font-style: italic; }
+  /* .te-eca-magic was used by the read-only Phase 2a row renderer for magic
+     ECA section headers; Phase 2b1 doesn't surface those at the top-level
+     edit list (children stay read-only behind the picker until 2b2 lands).
+     Keeping the selector as a :global hook so a future child-row template
+     can re-light it without rebuilding the stylesheet. */
+  :global(.te-eca-magic) { color: #a5b4fc; font-style: italic; }
   .te-eca-empty { padding: 4px 10px; color: #71717a; font-size: 12px; font-style: italic; }
+
+  /* Phase 2b1 — editable ECA rows + per-token clickable params. */
+  .te-eca-edit {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 2px 8px;
+  }
+  .te-eca-edit:hover { background: rgba(255,255,255,0.03); }
+  .te-eca-act {
+    background: transparent;
+    border: 0;
+    color: #71717a;
+    padding: 0 4px;
+    cursor: pointer;
+    font-size: 11px;
+    border-radius: 2px;
+    flex: none;
+  }
+  .te-eca-act:hover { background: rgba(255,255,255,0.08); color: #fbbf24; }
+  .te-eca-del:hover { color: #f87171; }
+  .te-eca-tokens {
+    flex: 1;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .te-tok {
+    display: inline;
+    background: rgba(96, 165, 250, 0.12);
+    color: #c7d2fe;
+    border: 0;
+    border-bottom: 1px dashed #6366f1;
+    padding: 0 2px;
+    margin: 0 1px;
+    cursor: pointer;
+    font: inherit;
+    border-radius: 2px;
+  }
+  .te-tok:hover { background: rgba(96, 165, 250, 0.28); color: #fff; }
+  .te-eca-add {
+    display: block;
+    width: calc(100% - 16px);
+    margin: 4px 8px 2px 8px;
+    padding: 4px;
+    background: rgba(96, 165, 250, 0.10);
+    color: #c7d2fe;
+    border: 1px dashed #3f3f46;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .te-eca-add:hover { background: rgba(96, 165, 250, 0.22); color: #fff; border-color: #60a5fa; }
 
   /* .te-script was the Phase 1a <pre>-based viewer; CodeMirror now owns
      script + comment rendering, but the class is kept as a hook in case a
