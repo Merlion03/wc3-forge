@@ -486,30 +486,34 @@ func luaStringLit(s string) string {
 // BEFORE this scan runs. They're intentionally absent from this list so a
 // textmacro-only map (Phase 1 of vJASS support) flows through cleanly.
 //
-// Phase 2 adds the library/scope preprocessor (PreprocessLibScope) which
+// Phase 2 added the library/scope preprocessor (PreprocessLibScope) which
 // runs AFTER textmacro expansion. It consumes library / endlibrary / scope /
 // endscope plus the requires/needs/uses/initializer/optional keywords AND
-// strips private/public visibility prefixes from inner decls. Those are
-// therefore also absent from this list — a map whose only vJASS surface is
-// library + scope now flows through cleanly.
+// strips private/public visibility prefixes from inner decls.
 //
-// Phase 3 adds the struct preprocessor (PreprocessStructs) which strips
+// Phase 3 added the struct preprocessor (PreprocessStructs) which strips
 // struct/endstruct blocks (with method/endmethod, static, delegate, readonly,
 // thistype, onInit inside them) and replaces each with a marker comment that
-// the codegen splices the emitted Lua at. Those keywords are therefore also
-// absent from this list.
+// the codegen splices the emitted Lua at.
 //
-// Module / interface / define remain blockers; Phase 4 will remove them.
-var vJASSKeywords = []string{
-	"module", "endmodule",
-	"define",
-	"interface", "endinterface",
-}
+// Phase 4 added module / interface / define handling. The keyword scan now
+// has no remaining blockers — every known vJASS construct is handled by a
+// preprocessor pass. The list is kept (currently empty) as a safety net: if
+// a future map uses a JassHelper construct we don't yet know about, adding
+// it here is the gate.
+var vJASSKeywords = []string{}
 
 // FindVJASSKeyword scans the source for the first vJASS-only keyword. Returns
 // the matched keyword and true if found; "" / false otherwise. Word-boundary
 // match using the lexer so quoted strings and comments don't trip it.
+//
+// As of Phase 4 the keyword list is empty — every known vJASS construct has
+// a preprocessor pass. The function still exists for a future safety-net
+// keyword to be added without rippling through callers.
 func FindVJASSKeyword(src string) (string, bool) {
+	if len(vJASSKeywords) == 0 {
+		return "", false
+	}
 	toks, err := Tokenize(src)
 	if err != nil {
 		// Lex failed — be conservative; report no keyword (the convert flow

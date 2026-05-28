@@ -159,6 +159,11 @@ type StructDef struct {
 	HasDestroy   bool // user defined `method destroy` — skip auto-synthesis
 	HasAllocate  bool // user defined `static method allocate` — skip auto-synthesis
 	OnInit       string // method name (usually "onInit"); "" if none
+	// Delegates is the list of delegate-typed field NAMES (in source order).
+	// When a method-or-field lookup on an instance fails, we fall through to
+	// these in declaration order. Phase 4 emits an `__index` metamethod for
+	// every struct with at least one delegate.
+	Delegates []string
 	StartLine    int
 	EndLine      int
 }
@@ -235,19 +240,33 @@ var (
 // ---------------------------------------------------------------------------
 
 // PreprocessStructs parses + strips vJASS struct blocks. Call AFTER
-// PreprocessLibScope and BEFORE the vJASS keyword gate / transpiler.
+// PreprocessLibScope + PreprocessModules and BEFORE the vJASS keyword gate /
+// transpiler.
+//
+// modules (optional, may be nil) supplies the parsed module definitions so
+// that `implement Foo` lines inside struct bodies inline the module's
+// fields + methods. Pass nil for the common single-pass case (tests, etc.).
+//
+// knownNames (optional, may be nil) supplies a set of top-level names — library
+// functions, top-level globals, etc. — that the dot-vs-colon rewrite consults
+// to leave receivers like `Foo_doThing` alone (dot). Without it, the rewriter
+// falls back to "anything not a struct name is colon", which mis-translates
+// enum-like globals and library-exposed function calls.
 //
 // Conservative on errors: malformed struct opener, missing endstruct, unknown
 // field modifier — every one produces a StructError + a comment marker in
 // the output, but processing continues.
-func PreprocessStructs(src string) StructResult {
+func PreprocessStructs(src string, modules map[string]ModuleDef, knownNames map[string]bool) StructResult {
 	res := StructResult{
 		Structs: map[string]StructDef{},
 	}
 	lines := splitLinesKeepEnd(src)
 
 	// Pass 1 — extract blocks; replace each block with a marker comment.
-	stripped, blocks := extractStructBlocks(lines, &res)
+	// Module `implement Foo` inlining happens INSIDE extractStructBlocks
+	// before parseStructBody runs, so the resolved struct sees the merged
+	// surface.
+	stripped, blocks := extractStructBlocks(lines, modules, &res)
 
 	// Pass 2 — register parsed defs.
 	for _, b := range blocks {
@@ -272,7 +291,7 @@ func PreprocessStructs(src string) StructResult {
 	// tokenize the stripped source and emit dot/colon based on receiver
 	// identity. Lex errors degrade to leaving the source alone (the downstream
 	// transpiler will surface its own error).
-	rewritten, err := rewriteStructRefs(stripped, res.Structs)
+	rewritten, err := rewriteStructRefs(stripped, res.Structs, knownNames)
 	if err != nil {
 		res.Errors = append(res.Errors, StructError{
 			Line:    0,
@@ -350,10 +369,21 @@ func SpliceStructLua(lua string, res StructResult) string {
 // block, and returns (a) the source with each block replaced by a single
 // marker comment, and (b) the parsed defs in source order.
 //
+// modules (may be nil) supplies module defs for inline expansion when an
+// `implement Foo` (or `implement optional Foo`) line appears inside a struct
+// body. The module body is pasted in verbatim BEFORE parseStructBody runs;
+// each implementing struct gets its own copy.
+//
+// Edge cases handled here (Phase 4):
+//   - `implement Foo` / `implement optional Foo` — inline-paste module body.
+//   - `static if SOMETHING` / `endif` inside struct body — strip the keyword
+//     pair and emit body verbatim (always-take-first semantics; we don't
+//     evaluate the condition).
+//
 // Nested structs are NOT supported (vJASS forbids them); an inner `struct`
 // inside a struct body falls through as body text and the parser will surface
 // a diagnostic.
-func extractStructBlocks(lines []string, res *StructResult) (string, []StructDef) {
+func extractStructBlocks(lines []string, modules map[string]ModuleDef, res *StructResult) (string, []StructDef) {
 	var out strings.Builder
 	var blocks []StructDef
 	i := 0
@@ -376,7 +406,7 @@ func extractStructBlocks(lines []string, res *StructResult) (string, []StructDef
 		if def.Extends == "array" {
 			// `extends array` — treat like plain struct (auto-allocate) +
 			// warning. Real-world usage is rare; full semantics (user-managed
-			// indices) is Phase 4.
+			// indices) require user-managed indices we don't synthesize.
 			res.Errors = append(res.Errors, StructError{
 				Line:    startLine,
 				Message: fmt.Sprintf("struct %q: `extends array` is treated as a normal struct (auto-allocated); user-managed indices not yet supported", def.Name),
@@ -405,6 +435,13 @@ func extractStructBlocks(lines []string, res *StructResult) (string, []StructDef
 				Message: fmt.Sprintf("struct %q: missing `endstruct` before EOF", def.Name),
 			})
 		}
+		// Phase 4 pre-passes on the body BEFORE parseStructBody walks it:
+		//   1. Inline `implement Foo` lines from the modules map.
+		//   2. Strip `static if … endif` keyword pairs (keep the body).
+		//   3. Strip `debug ` prefix from `debug method` openers.
+		bodyLines = inlineImplements(def.Name, bodyLines, modules, res, startLine)
+		bodyLines = stripStaticIf(bodyLines)
+		bodyLines = stripDebugMethodPrefix(bodyLines)
 		parseStructBody(&def, bodyLines, res)
 		// Emit the marker comment in place. Use a leading blank line so it's
 		// easy to spot in the converted Lua.
@@ -412,6 +449,110 @@ func extractStructBlocks(lines []string, res *StructResult) (string, []StructDef
 		blocks = append(blocks, def)
 	}
 	return out.String(), blocks
+}
+
+// implementRe matches a struct-body `implement [optional] Foo` line.
+//
+//	implement Foo            → group1="", group2="Foo"
+//	implement optional Foo   → group1="optional ", group2="Foo"
+var implementRe = regexp.MustCompile(`^\s*implement\s+(optional\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*$`)
+
+// staticIfRe / staticEndifRe match struct-body `static if … endif` pairs.
+// JassHelper supports a static if (compile-time conditional) wrapping arbitrary
+// member declarations. We always take the body — there's no evaluator for the
+// condition at this layer.
+var (
+	staticIfRe    = regexp.MustCompile(`^\s*static\s+if\b`)
+	staticEndifRe = regexp.MustCompile(`^\s*endif\s*$`)
+)
+
+// debugMethodPrefixRe matches a `debug method` / `debug static method` opener.
+// We strip the leading `debug ` so the rest is treated as a regular method.
+var debugMethodPrefixRe = regexp.MustCompile(`^(\s*)debug\s+(static\s+method\b|method\b)`)
+
+// inlineImplements walks bodyLines and replaces any `implement Foo` /
+// `implement optional Foo` line with the body of module Foo (when present).
+// Missing modules: `implement Foo` → diagnostic + marker comment;
+// `implement optional Foo` → silent + marker comment.
+//
+// Each implementing struct gets its own copy of the module body — modules
+// can be implemented by multiple structs without sharing.
+func inlineImplements(structName string, bodyLines []string, modules map[string]ModuleDef, res *StructResult, structStartLine int) []string {
+	var out []string
+	for idx, line := range bodyLines {
+		trim := strings.TrimRight(line, "\r\n")
+		m := implementRe.FindStringSubmatch(trim)
+		if m == nil {
+			out = append(out, line)
+			continue
+		}
+		isOptional := strings.TrimSpace(m[1]) == "optional"
+		modName := m[2]
+		mod, ok := modules[modName]
+		if !ok {
+			if isOptional {
+				out = append(out, fmt.Sprintf("// jass2lua: implement optional %s — module not found; skipped\n", modName))
+				continue
+			}
+			res.Errors = append(res.Errors, StructError{
+				Line:    structStartLine + idx,
+				Message: fmt.Sprintf("struct %q: implement %s — unknown module; pasting empty body", structName, modName),
+			})
+			out = append(out, fmt.Sprintf("// jass2lua: implement %s — module not found; pasting empty body\n", modName))
+			continue
+		}
+		// Paste the module's raw body verbatim. Each implementing struct
+		// gets its own copy.
+		out = append(out, fmt.Sprintf("// jass2lua: implement %s — module body pasted\n", modName))
+		paste := splitLinesKeepEnd(mod.Raw)
+		out = append(out, paste...)
+	}
+	return out
+}
+
+// stripStaticIf walks bodyLines and removes `static if SOMETHING` / `endif`
+// keyword pairs while preserving the body lines between them verbatim. We
+// always take the if-body (no condition evaluation). Nested static-ifs are
+// supported via a depth counter.
+//
+// Plain `endif` inside a struct body is rare outside this context; we only
+// match it when we're tracking an open `static if`.
+func stripStaticIf(bodyLines []string) []string {
+	if len(bodyLines) == 0 {
+		return bodyLines
+	}
+	var out []string
+	depth := 0
+	for _, line := range bodyLines {
+		trim := strings.TrimRight(line, "\r\n")
+		if staticIfRe.MatchString(trim) {
+			depth++
+			continue
+		}
+		if depth > 0 && staticEndifRe.MatchString(trim) {
+			depth--
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// stripDebugMethodPrefix walks bodyLines and removes a leading `debug ` from
+// any method opener (`debug method foo …`, `debug static method bar …`).
+// Pure-JASS already accepts `debug call …` as a statement; structs add the
+// `debug method` form which we treat identically to a regular method.
+func stripDebugMethodPrefix(bodyLines []string) []string {
+	if len(bodyLines) == 0 {
+		return bodyLines
+	}
+	out := make([]string, 0, len(bodyLines))
+	for _, line := range bodyLines {
+		// $1 = indent, $2 = `method` or `static method` keyword head.
+		rewritten := debugMethodPrefixRe.ReplaceAllString(line, "$1$2")
+		out = append(out, rewritten)
+	}
+	return out
 }
 
 // parseStructBody walks the lines between `struct ... endstruct` and
@@ -424,6 +565,15 @@ func parseStructBody(def *StructDef, lines []string, res *StructResult) {
 		trim := strings.TrimRight(line, "\r\n")
 		bare := strings.TrimSpace(trim)
 		if bare == "" || strings.HasPrefix(bare, "//") {
+			i++
+			continue
+		}
+		// Stray `implement` line — when extractStructBlocks didn't have a
+		// modules map (parseStructBody is called directly without
+		// inlineImplements) we silently drop them with a marker. We don't
+		// emit a hard diagnostic so the no-module-context call sites (e.g.
+		// module-parsing recursion) stay clean.
+		if implementRe.MatchString(trim) {
 			i++
 			continue
 		}
@@ -516,11 +666,10 @@ func parseStructBody(def *StructDef, lines []string, res *StructResult) {
 			Readonly: modReadonly,
 			Delegate: modDelegate,
 		}
-		if modDelegate {
-			res.Errors = append(res.Errors, StructError{
-				Line:    def.StartLine + i,
-				Message: fmt.Sprintf("struct %q field %q: `delegate` is treated as a plain field; method-fallthrough not synthesized (Phase 4)", def.Name, field.Name),
-			})
+		if modDelegate && !modStatic {
+			// Track the delegate name so emitStructLua wires up the
+			// __index metamethod fallthrough.
+			def.Delegates = append(def.Delegates, field.Name)
 		}
 		if modStatic {
 			def.Statics = append(def.Statics, field)
@@ -577,7 +726,7 @@ func parseMethodParams(raw string) []StructParam {
 // The token stream is walked window-by-window: detect IDENT, DOT, IDENT,
 // optional whitespace, LPAREN. For non-struct receivers, swap the DOT for a
 // COLON in the output.
-func rewriteStructRefs(src string, structs map[string]StructDef) (string, error) {
+func rewriteStructRefs(src string, structs map[string]StructDef, knownNames map[string]bool) (string, error) {
 	if len(structs) == 0 || src == "" {
 		return src, nil
 	}
@@ -585,10 +734,20 @@ func rewriteStructRefs(src string, structs map[string]StructDef) (string, error)
 	if err != nil {
 		return "", err
 	}
-	// Build a quick lookup of known struct names.
+	// Build a quick lookup of known struct names. Struct names always force
+	// the dot-form (Lua static call).
 	known := make(map[string]bool, len(structs))
 	for name := range structs {
 		known[name] = true
+	}
+	// Build the dot-forcing set from knownNames (library publics, top-level
+	// globals, top-level functions). A receiver that matches any of these
+	// stays dot — it's not an instance.
+	dotForcing := make(map[string]bool, len(knownNames))
+	for k, v := range knownNames {
+		if v {
+			dotForcing[k] = true
+		}
 	}
 	// Find DOTs to swap. We work in a positions list keyed by (line, col)
 	// since the tokenizer doesn't emit byte offsets. To avoid an O(n²) walk
@@ -634,9 +793,14 @@ func rewriteStructRefs(src string, structs map[string]StructDef) (string, error)
 		// Receiver name (t.Value): if it's a known struct, leave the dot. If
 		// it's `thistype` (rare outside method bodies) leave alone (it'd be
 		// rewritten by the struct method body emit path anyway). Otherwise
-		// swap the dot for a colon.
+		// consult dotForcing — library publics, top-level globals, top-level
+		// functions all stay dot. Anything else falls through to colon.
 		recv := t.Value
 		if known[recv] {
+			continue
+		}
+		if dotForcing[recv] {
+			// Known top-level name (library function, global, etc.) — dot.
 			continue
 		}
 		// Skip rewrites on common false-positives: keywords-like identifiers
@@ -695,7 +859,27 @@ func emitStructLua(b *strings.Builder, s StructDef) {
 		fmt.Fprintf(b, "-- struct %s\n", s.Name)
 		fmt.Fprintf(b, "%s = %s or {}\n", s.Name, s.Name)
 	}
-	fmt.Fprintf(b, "%s.__index = %s\n", s.Name, s.Name)
+	if len(s.Delegates) == 0 {
+		fmt.Fprintf(b, "%s.__index = %s\n", s.Name, s.Name)
+	} else {
+		// Delegate fallthrough: __index becomes a function so a missing
+		// member falls through to the delegate's table. Emit once per
+		// struct; check each delegate in declaration order. The struct's
+		// own table is checked FIRST (rawget) so user-defined members
+		// always win.
+		fmt.Fprintf(b, "%s.__index = function(t, k)\n", s.Name)
+		fmt.Fprintf(b, "\tlocal v = rawget(%s, k)\n", s.Name)
+		b.WriteString("\tif v ~= nil then return v end\n")
+		for _, dn := range s.Delegates {
+			fmt.Fprintf(b, "\tlocal d_%s = rawget(t, %q)\n", dn, dn)
+			fmt.Fprintf(b, "\tif d_%s ~= nil then\n", dn)
+			fmt.Fprintf(b, "\t\tlocal dv = d_%s[k]\n", dn)
+			b.WriteString("\t\tif dv ~= nil then return dv end\n")
+			b.WriteString("\tend\n")
+		}
+		b.WriteString("\treturn nil\n")
+		b.WriteString("end\n")
+	}
 
 	// Static fields (class-level).
 	for _, f := range s.Statics {
@@ -939,6 +1123,79 @@ func defaultForStructField(f StructField) string {
 // ---------------------------------------------------------------------------
 // Sorted name iteration for deterministic output (used by tests).
 // ---------------------------------------------------------------------------
+
+// CollectTopLevelNames builds the dot-forcing set the struct preprocessor
+// uses for receiver disambiguation. The set is:
+//
+//   - every top-level function name declared in `src` (parsed via the JASS
+//     parser, so it only includes well-formed decls);
+//   - every top-level global declared in a `globals` block; and
+//   - every entry in `libraryPublics` (already mangled at libscope time).
+//
+// Anything in this set takes the dot-form in `recv.method(args)` rewrites,
+// even if it's NOT a known struct name. This catches enum-like globals and
+// library function calls that Phase 3 would have mis-rewritten to colon.
+//
+// libraryPublics may be nil. structs may be nil; the result still contains
+// the source-derived top-level names.
+func CollectTopLevelNames(src string, libraryPublics []string, structs map[string]StructDef) map[string]bool {
+	out := map[string]bool{}
+	for _, name := range libraryPublics {
+		out[name] = true
+	}
+	for name := range structs {
+		out[name] = true
+	}
+	// Quick line-based scan for top-level globals and functions. We don't
+	// run the full parser here (it'd choke on the unstripped vJASS surface);
+	// instead we do a cheap heuristic that matches the same patterns the
+	// libscope pre-pass uses.
+	lines := splitLinesKeepEnd(src)
+	inGlobals := false
+	inFunction := false
+	for _, line := range lines {
+		bare := strings.TrimSpace(strings.TrimRight(line, "\r\n"))
+		switch {
+		case bare == "globals":
+			inGlobals = true
+			continue
+		case bare == "endglobals":
+			inGlobals = false
+			continue
+		case strings.HasPrefix(bare, "function ") || strings.HasPrefix(bare, "constant function "):
+			if !inGlobals && !inFunction {
+				if m := funcDeclRe.FindStringSubmatch(bare); m != nil {
+					out[m[1]] = true
+				}
+			}
+			inFunction = true
+			continue
+		case strings.HasPrefix(bare, "native ") || strings.HasPrefix(bare, "constant native "):
+			if !inGlobals {
+				// Same shape as function for our purposes — pull the ident.
+				if m := funcDeclRe.FindStringSubmatch(bare); m != nil {
+					out[m[1]] = true
+				} else {
+					// Fall back: match `native FOO takes …`.
+					fields := strings.Fields(bare)
+					if len(fields) >= 2 {
+						out[fields[1]] = true
+					}
+				}
+			}
+			continue
+		case bare == "endfunction":
+			inFunction = false
+			continue
+		}
+		if inGlobals {
+			if m := globalDeclRe.FindStringSubmatch(strings.TrimRight(line, "\r\n")); m != nil {
+				out[m[3]] = true
+			}
+		}
+	}
+	return out
+}
 
 // StructNamesSorted returns the names in res.Structs sorted alphabetically.
 func StructNamesSorted(res StructResult) []string {

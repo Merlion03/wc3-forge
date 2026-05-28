@@ -349,8 +349,9 @@ endfunction
 }
 
 // TestFindVJASSKeyword exercises the vJASS detector against representative
-// inputs. After Phase 2 the library/scope/requires/private/public keywords
-// no longer block — they're handled by PreprocessLibScope.
+// inputs. After Phase 4 the keyword list is empty — every known vJASS
+// construct has a preprocessor pass and no source-level keyword should trip
+// the gate. The remaining tests confirm the gate stays quiet.
 func TestFindVJASSKeyword(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -372,12 +373,12 @@ endscope`, "", false},
 endfunction`, "", false},
 		{"requires_no_longer_blocks", `library Foo requires Bar
 endlibrary`, "", false},
-		// module / interface still block (Phase 4). `struct` is handled by
-		// PreprocessStructs (Phase 3) and no longer trips the keyword gate.
-		{"module", `module M
-endmodule`, "module", true},
-		{"interface", `interface I
-endinterface`, "interface", true},
+		// module / interface / define no longer block after Phase 4 — they
+		// have their own preprocessors that consume them before the gate.
+		{"module_no_longer_blocks", `module M
+endmodule`, "", false},
+		{"interface_no_longer_blocks", `interface I
+endinterface`, "", false},
 		{"textmacro", `//! textmacro FOO takes BAR
 //! endtextmacro`, "", false}, // textmacro lives in a comment; correct false
 		// Quoted "struct" / "module" should NOT trip.

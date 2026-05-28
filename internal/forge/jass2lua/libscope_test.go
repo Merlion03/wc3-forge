@@ -458,16 +458,16 @@ endstruct`,
 			false, // struct is removed from vJASSKeywords gate (Phase 3)
 		},
 		{
-			"module_still_blocks",
+			"module_no_longer_blocks",
 			`module M
 endmodule`,
-			true,
+			false,
 		},
 		{
-			"interface_still_blocks",
+			"interface_no_longer_blocks",
 			`interface I
 endinterface`,
-			true,
+			false,
 		},
 	}
 	for _, c := range cases {

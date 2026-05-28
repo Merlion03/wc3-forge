@@ -40,6 +40,7 @@
     errors?: string[]
     preprocess_warnings?: string[]
     libscope_warnings?: string[]
+    module_warnings?: string[]
     struct_warnings?: string[]
     init_order?: Array<{
       Name: string
@@ -75,6 +76,7 @@
   let previewError: string = $state('')
   let warningsExpanded: boolean = $state(false)
   let libscopeWarningsExpanded: boolean = $state(false)
+  let moduleWarningsExpanded: boolean = $state(false)
   let structWarningsExpanded: boolean = $state(false)
 
   let hasBlockers: boolean = $derived(blockers.length > 0)
@@ -269,12 +271,13 @@
                         selectedSectionIdx = i
                         warningsExpanded = false
                         libscopeWarningsExpanded = false
+                        moduleWarningsExpanded = false
                         structWarningsExpanded = false
                       }}
                     >
                       <span class="font-medium truncate">{section.label}</span>
                       <span class="text-[10px] uppercase tracking-wide opacity-60">
-                        {sectionBadge(section.kind)}{section.errors && section.errors.length > 0 ? ' • ⚠ errors' : ''}{section.preprocess_warnings && section.preprocess_warnings.length > 0 ? ' • ⚠ macros' : ''}{section.libscope_warnings && section.libscope_warnings.length > 0 ? ' • ⚠ libs' : ''}{section.struct_warnings && section.struct_warnings.length > 0 ? ' • ⚠ structs' : ''}
+                        {sectionBadge(section.kind)}{section.errors && section.errors.length > 0 ? ' • ⚠ errors' : ''}{section.preprocess_warnings && section.preprocess_warnings.length > 0 ? ' • ⚠ macros' : ''}{section.libscope_warnings && section.libscope_warnings.length > 0 ? ' • ⚠ libs' : ''}{section.module_warnings && section.module_warnings.length > 0 ? ' • ⚠ modules' : ''}{section.struct_warnings && section.struct_warnings.length > 0 ? ' • ⚠ structs' : ''}
                       </span>
                     </button>
                   </li>
@@ -335,6 +338,29 @@
                     {/if}
                   </div>
                 {/if}
+                {#if currentSection.module_warnings && currentSection.module_warnings.length > 0}
+                  <div class="px-4 py-1.5 border-b bg-amber-500/10 text-xs text-amber-300">
+                    <button
+                      type="button"
+                      class="flex items-center gap-1.5 w-full text-left hover:opacity-80 transition-opacity"
+                      onclick={() => (moduleWarningsExpanded = !moduleWarningsExpanded)}
+                      title="Toggle module preprocessor warnings"
+                    >
+                      <span class="opacity-70">{moduleWarningsExpanded ? '▼' : '▶'}</span>
+                      <span class="font-medium">
+                        ⚠ {currentSection.module_warnings.length} module warning{currentSection.module_warnings.length === 1 ? '' : 's'}
+                      </span>
+                      <span class="opacity-60 text-[10px]">(non-blocking; common: missing endmodule, duplicate name, unresolved implement)</span>
+                    </button>
+                    {#if moduleWarningsExpanded}
+                      <ul class="mt-1.5 pl-5 list-disc space-y-0.5 max-h-24 overflow-y-auto">
+                        {#each currentSection.module_warnings as w (w)}
+                          <li class="font-mono break-all opacity-90">{w}</li>
+                        {/each}
+                      </ul>
+                    {/if}
+                  </div>
+                {/if}
                 {#if currentSection.struct_warnings && currentSection.struct_warnings.length > 0}
                   <div class="px-4 py-1.5 border-b bg-amber-500/10 text-xs text-amber-300">
                     <button
@@ -347,7 +373,7 @@
                       <span class="font-medium">
                         ⚠ {currentSection.struct_warnings.length} struct warning{currentSection.struct_warnings.length === 1 ? '' : 's'}
                       </span>
-                      <span class="opacity-60 text-[10px]">(non-blocking; common: `extends array`, `delegate`)</span>
+                      <span class="opacity-60 text-[10px]">(non-blocking; common: `extends array`, missing endstruct, unknown body line)</span>
                     </button>
                     {#if structWarningsExpanded}
                       <ul class="mt-1.5 pl-5 list-disc space-y-0.5 max-h-24 overflow-y-auto">

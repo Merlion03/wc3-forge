@@ -145,17 +145,20 @@ func TestCheckConvertToLua_PureJassScriptTriggerNotBlocked(t *testing.T) {
 	}
 }
 
-// TestCheckConvertToLua_VJassScriptTriggerBlocks asserts an is_script trigger
-// with a vJASS `struct` keyword IS a blocker.
+// TestCheckConvertToLua_ModuleScriptTriggerNoLongerBlocks asserts an
+// is_script trigger whose only vJASS surface is a `module` (Phase 4) is NOT
+// a blocker — modules are now consumed by PreprocessModules and pasted into
+// implementing structs.
 //
-// Phase 2 stopped blocking `library`; Phase 3 stopped blocking `struct`.
-// We pivoted this test to `module`, the remaining Phase-4-only blocker.
-func TestCheckConvertToLua_VJassScriptTriggerBlocks(t *testing.T) {
+// This test originally asserted the opposite (module blocks). Phase 4
+// eliminated the last source-level vJASS blocker; the test now confirms the
+// converse semantics and verifies the convert flow proceeds.
+func TestCheckConvertToLua_ModuleScriptTriggerNoLongerBlocks(t *testing.T) {
 	tr := guiOnlyTriggers()
 	tr.Triggers = append(tr.Triggers, wtg.Trigger{
 		Classifier: wtg.ClassifierScript, ID: 11, ParentID: 1,
-		Name: "VJassThing", IsEnabled: true, InitiallyOn: true, IsScript: true,
-		CustomText: "module Foo\nendmodule\n",
+		Name: "ModuleOnly", IsEnabled: true, InitiallyOn: true, IsScript: true,
+		CustomText: "module Foo\n    integer x = 0\nendmodule\n",
 	})
 	tr.Elements = append(tr.Elements, wtg.ElementRef{Kind: wtg.ElementKindTrigger, Index: 1})
 	dir := writeConvertFixture(t, tr)
@@ -167,19 +170,8 @@ func TestCheckConvertToLua_VJassScriptTriggerBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckConvertToLua: %v", err)
 	}
-	if len(res.Blockers) != 1 {
-		t.Fatalf("expected 1 vJASS blocker, got %d: %+v", len(res.Blockers), res.Blockers)
-	}
-	if res.Blockers[0].Kind != "script_vjass" || res.Blockers[0].TriggerName != "VJassThing" {
-		t.Errorf("unexpected blocker: %+v", res.Blockers[0])
-	}
-
-	convertRes, err := s.ConvertToLua()
-	if !errors.Is(err, ErrConvertBlocked) {
-		t.Fatalf("ConvertToLua should refuse with ErrConvertBlocked, got %v", err)
-	}
-	if convertRes == nil || len(convertRes.Blockers) != 1 {
-		t.Errorf("ConvertToLua refused but did not return blocker list: %+v", convertRes)
+	if len(res.Blockers) != 0 {
+		t.Fatalf("expected no blockers for module-only trigger after Phase 4, got %d: %+v", len(res.Blockers), res.Blockers)
 	}
 }
 
@@ -209,8 +201,9 @@ func TestCheckConvertToLua_LibraryScriptTriggerNoLongerBlocks(t *testing.T) {
 	}
 }
 
-// TestCheckConvertToLua_MixedTriggers asserts a map with one pure-JASS trigger
-// and one vJASS trigger blocks (because of the vJASS one).
+// TestCheckConvertToLua_MixedTriggers asserts a map mixing a pure-JASS
+// trigger with a module-bearing trigger has NO blockers after Phase 4 —
+// modules are no longer source-level blockers.
 func TestCheckConvertToLua_MixedTriggers(t *testing.T) {
 	tr := guiOnlyTriggers()
 	tr.Triggers = append(tr.Triggers,
@@ -221,8 +214,8 @@ func TestCheckConvertToLua_MixedTriggers(t *testing.T) {
 		},
 		wtg.Trigger{
 			Classifier: wtg.ClassifierScript, ID: 12, ParentID: 1,
-			Name: "WithStruct", IsEnabled: true, InitiallyOn: true, IsScript: true,
-			CustomText: "module S\nendmodule\n",
+			Name: "WithModule", IsEnabled: true, InitiallyOn: true, IsScript: true,
+			CustomText: "module S\n    integer x = 0\nendmodule\n",
 		},
 	)
 	tr.Elements = append(tr.Elements,
@@ -238,11 +231,8 @@ func TestCheckConvertToLua_MixedTriggers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckConvertToLua: %v", err)
 	}
-	if len(res.Blockers) != 1 {
-		t.Fatalf("expected exactly 1 vJASS blocker (the struct trigger), got %d: %+v", len(res.Blockers), res.Blockers)
-	}
-	if res.Blockers[0].TriggerName != "WithStruct" {
-		t.Errorf("expected blocker on the struct trigger, got %+v", res.Blockers[0])
+	if len(res.Blockers) != 0 {
+		t.Fatalf("expected no blockers after Phase 4 (module no longer blocks), got %d: %+v", len(res.Blockers), res.Blockers)
 	}
 }
 
@@ -291,21 +281,23 @@ func TestCheckConvertToLua_HandRolledPureJassNotBlocked(t *testing.T) {
 	}
 }
 
-// TestCheckConvertToLua_HandRolledVJassBlocks asserts a hand-rolled war3map.j
-// containing `module` (Phase 4 vJASS surface) IS a blocker.
+// TestCheckConvertToLua_HandRolledModuleNoLongerBlocks asserts a
+// hand-rolled war3map.j whose only vJASS surface is `module` is NOT a
+// blocker after Phase 4 (modules consumed by PreprocessModules).
 //
-// Pre-Phase-2 this test used `library`; pre-Phase-3 it used `struct`. Both
-// are now handled. Module remains the canonical Phase-4 blocker.
-func TestCheckConvertToLua_HandRolledVJassBlocks(t *testing.T) {
+// Pre-Phase-2 this test used `library`; pre-Phase-3 `struct`; pre-Phase-4
+// `module`. All are now handled. The function is retained so a future
+// safety-net keyword has a regression slot to graduate into.
+func TestCheckConvertToLua_HandRolledModuleNoLongerBlocks(t *testing.T) {
 	dir := t.TempDir()
 	info := &w3i.Info{
 		FileVersion: w3i.FileVersionTFT,
-		Name:        "vJassFixture",
+		Name:        "ModuleOnlyFixture",
 		Tileset:     'L',
 	}
 	infoBytes, _ := w3i.Encode(info)
 	_ = os.WriteFile(filepath.Join(dir, "war3map.w3i"), infoBytes, 0o644)
-	_ = os.WriteFile(filepath.Join(dir, "war3map.j"), []byte("module Stuff\nendmodule\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "war3map.j"), []byte("module Stuff\n    integer x = 0\nendmodule\n"), 0o644)
 
 	s := &Session{}
 	if err := s.Open(dir); err != nil {
@@ -315,11 +307,8 @@ func TestCheckConvertToLua_HandRolledVJassBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckConvertToLua: %v", err)
 	}
-	if len(res.Blockers) != 1 {
-		t.Fatalf("expected 1 vJASS map_header blocker, got %d: %+v", len(res.Blockers), res.Blockers)
-	}
-	if res.Blockers[0].Kind != "map_header_vjass" {
-		t.Errorf("expected kind=map_header_vjass, got %+v", res.Blockers[0])
+	if len(res.Blockers) != 0 {
+		t.Fatalf("expected no blockers for module-only hand-rolled map after Phase 4, got %d: %+v", len(res.Blockers), res.Blockers)
 	}
 }
 

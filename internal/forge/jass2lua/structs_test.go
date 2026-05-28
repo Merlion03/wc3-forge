@@ -12,7 +12,7 @@ func TestPreprocessStructs_PassThrough(t *testing.T) {
     call BJDebugMsg("hi")
 endfunction
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	if len(res.Errors) != 0 {
 		t.Errorf("unexpected errors: %+v", res.Errors)
 	}
@@ -33,7 +33,7 @@ func TestPreprocessStructs_MinimalField(t *testing.T) {
     endmethod
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	if len(res.Errors) != 0 {
 		t.Errorf("unexpected errors: %+v", res.Errors)
 	}
@@ -70,7 +70,7 @@ func TestPreprocessStructs_Inheritance(t *testing.T) {
     integer y = 1
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	if len(res.Errors) != 0 {
 		t.Errorf("unexpected errors: %+v", res.Errors)
 	}
@@ -91,7 +91,7 @@ func TestPreprocessStructs_StaticFields(t *testing.T) {
     integer instance_x = 0
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	s := res.Structs["Foo"]
 	if len(s.Statics) != 1 || s.Statics[0].Name != "count" {
 		t.Errorf("expected one static `count`, got: %+v", s.Statics)
@@ -117,7 +117,7 @@ func TestPreprocessStructs_StaticMethod(t *testing.T) {
     endmethod
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	s := res.Structs["Foo"]
 	if len(s.Methods) != 1 || !s.Methods[0].Static {
 		t.Fatalf("expected one static method, got: %+v", s.Methods)
@@ -140,7 +140,7 @@ func TestPreprocessStructs_UserCreate(t *testing.T) {
     endmethod
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	s := res.Structs["Foo"]
 	if !s.HasCreate {
 		t.Errorf("expected HasCreate=true")
@@ -164,7 +164,7 @@ func TestPreprocessStructs_AutoCreate(t *testing.T) {
     integer x = 0
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	s := res.Structs["Foo"]
 	if s.HasCreate {
 		t.Errorf("expected HasCreate=false for no-user-create struct")
@@ -183,7 +183,7 @@ func TestPreprocessStructs_OnInit(t *testing.T) {
     endmethod
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	if len(res.Inits) != 1 {
 		t.Fatalf("expected 1 onInit, got %d: %+v", len(res.Inits), res.Inits)
 	}
@@ -201,7 +201,7 @@ func TestPreprocessStructs_ThistypeSubstitution(t *testing.T) {
     endmethod
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	s := res.Structs["Foo"]
 	lua := EmitStructLua(s)
 	if strings.Contains(lua, "thistype") {
@@ -222,7 +222,7 @@ func TestPreprocessStructs_ThisToSelf(t *testing.T) {
     endmethod
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	s := res.Structs["Foo"]
 	lua := EmitStructLua(s)
 	if strings.Contains(lua, "this.x") {
@@ -242,7 +242,7 @@ func TestPreprocessStructs_MultipleMethods(t *testing.T) {
     endmethod
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	s := res.Structs["Foo"]
 	if len(s.Methods) != 2 {
 		t.Fatalf("expected 2 methods, got %d", len(s.Methods))
@@ -262,7 +262,7 @@ func TestPreprocessStructs_EmptyStruct(t *testing.T) {
 	src := `struct Foo
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	if len(res.Errors) != 0 {
 		t.Errorf("unexpected errors for empty struct: %+v", res.Errors)
 	}
@@ -286,7 +286,7 @@ func TestPreprocessStructs_ExtendsArrayWarning(t *testing.T) {
     integer x
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	if len(res.Errors) == 0 {
 		t.Errorf("expected a warning for extends array")
 	}
@@ -306,26 +306,32 @@ endstruct
 	}
 }
 
-// TestPreprocessStructs_DelegateWarning: `delegate` member produces a warning.
-func TestPreprocessStructs_DelegateWarning(t *testing.T) {
+// TestPreprocessStructs_DelegateField: `delegate` member is parsed without
+// warning (Phase 4 added metamethod fallthrough; no longer noisy) and the
+// field is tagged for the emit phase.
+func TestPreprocessStructs_DelegateField(t *testing.T) {
 	src := `struct Foo
     delegate Bar parent
 endstruct
 `
-	res := PreprocessStructs(src)
-	gotWarn := false
-	for _, e := range res.Errors {
-		if strings.Contains(e.Message, "delegate") {
-			gotWarn = true
-			break
-		}
-	}
-	if !gotWarn {
-		t.Errorf("expected a `delegate` warning in: %+v", res.Errors)
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Errorf("expected no delegate warning in Phase 4, got: %+v", res.Errors)
 	}
 	s := res.Structs["Foo"]
 	if len(s.Fields) != 1 || !s.Fields[0].Delegate {
 		t.Errorf("expected one delegate field, got: %+v", s.Fields)
+	}
+	if len(s.Delegates) != 1 || s.Delegates[0] != "parent" {
+		t.Errorf("expected Delegates=[\"parent\"], got: %+v", s.Delegates)
+	}
+	// Emitted Lua should use the metamethod __index = function() pattern.
+	lua := EmitStructLua(s)
+	if !strings.Contains(lua, "Foo.__index = function") {
+		t.Errorf("expected delegate __index metamethod, got:\n%s", lua)
+	}
+	if !strings.Contains(lua, `rawget(t, "parent")`) {
+		t.Errorf("expected rawget for delegate field, got:\n%s", lua)
 	}
 }
 
@@ -336,7 +342,7 @@ func TestPreprocessStructs_ReadonlyAllowed(t *testing.T) {
     readonly integer id
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	if len(res.Errors) != 0 {
 		t.Errorf("expected no errors for readonly, got: %+v", res.Errors)
 	}
@@ -360,7 +366,7 @@ function caller takes nothing returns nothing
     call inst.greet()
 endfunction
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	if len(res.Errors) != 0 {
 		t.Errorf("unexpected errors: %+v", res.Errors)
 	}
@@ -381,7 +387,7 @@ func TestSpliceStructLua(t *testing.T) {
     integer x = 0
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	// The marker would have been transpiled to `-- __VJASS_STRUCT__ Foo`.
 	lua := "before\n" + StructLuaMarker + "Foo\nafter\n"
 	out := SpliceStructLua(lua, res)
@@ -402,7 +408,7 @@ endstruct
 struct B
 endstruct
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	if len(res.StructOrder) != 2 {
 		t.Fatalf("expected 2 structs, got %d", len(res.StructOrder))
 	}
@@ -417,7 +423,7 @@ func TestPreprocessStructs_MissingEndstruct(t *testing.T) {
 	src := `struct Foo
     integer x = 0
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	if len(res.Errors) == 0 {
 		t.Errorf("expected missing-endstruct warning")
 	}
@@ -434,11 +440,127 @@ func TestPreprocessStructs_NoFalseTripOnStringStruct(t *testing.T) {
     call BJDebugMsg("struct Foo")
 endfunction
 `
-	res := PreprocessStructs(src)
+	res := PreprocessStructs(src, nil, nil)
 	if len(res.Structs) != 0 {
 		t.Errorf("expected no structs parsed (string literal), got: %+v", res.Structs)
 	}
 	if res.Expanded != src {
 		t.Errorf("expected pass-through, got:\n%s", res.Expanded)
+	}
+}
+
+// TestPreprocessStructs_StaticIfBodyKept: `static if SOMETHING / endif`
+// inside a struct body strips the keyword pair and keeps the body.
+func TestPreprocessStructs_StaticIfBodyKept(t *testing.T) {
+	src := `struct Foo
+    static if DEBUG_MODE
+    integer debugCounter = 0
+    endif
+    integer x = 0
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Errorf("unexpected errors: %+v", res.Errors)
+	}
+	s := res.Structs["Foo"]
+	// Both fields should be present.
+	names := map[string]bool{}
+	for _, f := range s.Fields {
+		names[f.Name] = true
+	}
+	if !names["debugCounter"] {
+		t.Errorf("expected debugCounter field kept (static-if always-take-first); fields=%+v", s.Fields)
+	}
+	if !names["x"] {
+		t.Errorf("expected x field; fields=%+v", s.Fields)
+	}
+}
+
+// TestPreprocessStructs_DebugMethodPrefix: `debug method foo` strips the
+// `debug` prefix and treats as a regular method.
+func TestPreprocessStructs_DebugMethodPrefix(t *testing.T) {
+	src := `struct Foo
+    debug method dump takes nothing returns nothing
+        call BJDebugMsg("dump")
+    endmethod
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Errorf("unexpected errors: %+v", res.Errors)
+	}
+	s := res.Structs["Foo"]
+	if len(s.Methods) != 1 || s.Methods[0].Name != "dump" {
+		t.Errorf("expected one `dump` method (debug prefix stripped), got: %+v", s.Methods)
+	}
+}
+
+// TestPreprocessStructs_BlockCommentsStripped: `/* … */` block comments
+// inside a struct are stripped by the global StripBlockComments pass before
+// PreprocessStructs sees the source.
+func TestPreprocessStructs_BlockCommentsStripped(t *testing.T) {
+	src := `struct Foo
+    /* this is
+       a multi-line
+       comment */
+    integer x = 0
+endstruct
+`
+	cleaned := StripBlockComments(src)
+	res := PreprocessStructs(cleaned, nil, nil)
+	if len(res.Errors) != 0 {
+		t.Errorf("unexpected errors after StripBlockComments: %+v", res.Errors)
+	}
+	s := res.Structs["Foo"]
+	if len(s.Fields) != 1 || s.Fields[0].Name != "x" {
+		t.Errorf("expected single field x, got: %+v", s.Fields)
+	}
+}
+
+// TestRewriteStructRefs_KnownNamesForceDot: a method-call receiver matching
+// a known top-level name (library public, top-level function, global) stays
+// dot — not rewritten to colon. Regression test for the Phase 3 issue where
+// enum-like globals got colon'd.
+func TestRewriteStructRefs_KnownNamesForceDot(t *testing.T) {
+	src := `struct Foo
+    method greet takes nothing returns nothing
+    endmethod
+endstruct
+
+function caller takes nothing returns nothing
+    call Foo_doThing.run()
+    call inst.greet()
+endfunction
+`
+	known := map[string]bool{
+		"Foo_doThing": true,
+	}
+	res := PreprocessStructs(src, nil, known)
+	if !strings.Contains(res.Expanded, "Foo_doThing.run()") {
+		t.Errorf("expected known name to keep dot, got:\n%s", res.Expanded)
+	}
+	if !strings.Contains(res.Expanded, "inst:greet()") {
+		t.Errorf("expected unknown receiver to swap to colon, got:\n%s", res.Expanded)
+	}
+}
+
+// TestCollectTopLevelNames covers the parsing logic for top-level functions,
+// globals, and library publics — the inputs to the dot-forcing set.
+func TestCollectTopLevelNames(t *testing.T) {
+	src := `globals
+    integer myGlobal = 0
+endglobals
+
+function MyFunc takes nothing returns nothing
+endfunction
+
+native MyNative takes nothing returns nothing
+`
+	out := CollectTopLevelNames(src, []string{"Lib_pub"}, map[string]StructDef{"MyStruct": {}})
+	for _, want := range []string{"myGlobal", "MyFunc", "MyNative", "Lib_pub", "MyStruct"} {
+		if !out[want] {
+			t.Errorf("expected %q in known top-level names, got: %+v", want, out)
+		}
 	}
 }

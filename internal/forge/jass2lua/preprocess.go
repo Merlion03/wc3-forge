@@ -31,11 +31,20 @@ package jass2lua
 //   - Unknown `//!` directives (e.g. `//! i //…`, `//! external …`) become
 //     pass-through comments + a non-fatal PreprocessError.
 //
-// Intentionally NOT implemented (out of scope for Phase 1; Phases 2-4):
+// Phase 4 additions:
+//   - `//! if SOMETHING` / `//! else` / `//! endif` conditional compilation.
+//     For v1 we ALWAYS take the `if` branch and drop the `else` branch — we
+//     don't have a JassHelper-style condition evaluator. This is conservative
+//     for the common pattern (`//! if DEBUG_MODE` … `//! else` … `//! endif`,
+//     where the `if` body is usually the production path).
+//   - `StripBlockComments` — separate helper that strips C-style `/* … */`
+//     block comments BEFORE the textmacro pass. JassHelper accepts them; the
+//     tokenizer doesn't. Multi-line capable.
+//
+// Intentionally NOT implemented (out of scope, no plausible map needs it):
 //   - `//! import` / `//! zinc { … }` / `//! novjass { … }`
 //   - JassHelper's `//! i` directive that injects literal JASS text into the
 //     preprocess output — for now we just round-trip it as a comment.
-//   - Conditional compilation (`//! if … //! endif`).
 
 import (
 	"fmt"
@@ -104,10 +113,57 @@ var runtextmacroCallRe = regexp.MustCompile(`^\s*//!\s*runtextmacro(once)?\s+([A
 // comments and the user is told.
 var otherDirectiveRe = regexp.MustCompile(`^\s*//!\s*(\S+)`)
 
+// Conditional-compilation regexes (Phase 4).
+// `//! if SOMETHING` — opens a conditional block. SOMETHING is consumed but
+// not evaluated; we always take the if-branch.
+var condIfRe = regexp.MustCompile(`^\s*//!\s*if\b\s*(.*)$`)
+
+// `//! else` — switches to the else-branch (which we drop).
+var condElseRe = regexp.MustCompile(`^\s*//!\s*else\s*$`)
+
+// `//! elseif` — same as else for our purposes (drop the rest of the block).
+// We support it to avoid choking on maps that use it.
+var condElseifRe = regexp.MustCompile(`^\s*//!\s*elseif\b`)
+
+// `//! endif` — closes the conditional block.
+var condEndifRe = regexp.MustCompile(`^\s*//!\s*endif\s*$`)
+
+// Block-comment regex for `/* … */` stripping. We use a multi-line, lazy
+// match. Strings + line comments are NOT honored here — the regex isn't a
+// lexer — but real-world maps never put `/*` inside a string literal that
+// also has a matching `*/`, so the false-positive surface is negligible.
+//
+// IMPORTANT: this MUST run BEFORE the tokenizer is fed source, since the
+// JASS lexer would choke on `/*` as an unknown character.
+var blockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
+
 // paramSubRe captures `$ident$` tokens inside a macro body for arg substitution.
 // We intentionally restrict to identifier-shaped names — `$1$` literal
 // (used in some old macros as a dummy) would NOT match and is left as-is.
 var paramSubRe = regexp.MustCompile(`\$([A-Za-z_][A-Za-z0-9_]*)\$`)
+
+// StripBlockComments removes C-style `/* … */` block comments from src. This
+// runs FIRST in the preprocessing pipeline because the JASS lexer doesn't
+// recognize `/*` and would error on it. Multi-line block comments are
+// supported.
+//
+// We replace each block with a single newline-preserving spacer so downstream
+// line-number diagnostics stay roughly aligned. (Inside a single-line block,
+// the spacer is just empty; for multi-line blocks we preserve the newline
+// count.)
+func StripBlockComments(src string) string {
+	if !strings.Contains(src, "/*") {
+		return src
+	}
+	return blockCommentRe.ReplaceAllStringFunc(src, func(m string) string {
+		// Preserve newline count so downstream line numbers stay close.
+		n := strings.Count(m, "\n")
+		if n == 0 {
+			return " "
+		}
+		return strings.Repeat("\n", n)
+	})
+}
 
 // Preprocess parses the JASS source for textmacro definitions + call sites
 // and returns the source with all call sites expanded.
@@ -125,10 +181,16 @@ func Preprocess(jass string) PreprocessResult {
 		Macros: map[string]Macro{},
 	}
 
+	// Pass 0: process `//! if SOMETHING / //! else / //! endif` conditionals.
+	// Always-take-first semantics — we keep the `if` body and drop the `else`
+	// body. The condition itself is discarded (we don't have a JassHelper
+	// evaluator). Nested conditionals supported.
+	conditioned := stripConditionals(jass, &res)
+
 	// Pass 1: scan for textmacro definitions. We strip them from the source
 	// as we go so the remainder can be expanded without re-tripping the
 	// definition matcher.
-	stripped := extractDefinitions(jass, &res)
+	stripped := extractDefinitions(conditioned, &res)
 
 	// Pass 2: expand all call sites. runtextmacroonce dedupe lives here
 	// (not in the recursive expander) so bodies referring to a once-macro
@@ -280,6 +342,11 @@ func expandCalls(src string, macros map[string]Macro, onceFired map[string]bool,
 				// through silently.
 				out.WriteString(line)
 				continue
+			case "if", "else", "elseif", "endif":
+				// Should not happen after stripConditionals consumed them; if
+				// one slipped through (stray closer, etc.), pass it silently.
+				out.WriteString(line)
+				continue
 			}
 			// Don't add an error for very common pragma-style directives —
 			// they're informational, not blockers. We still log so the UI
@@ -360,6 +427,100 @@ func parseCallArgs(raw string) []string {
 		}
 	}
 	return args
+}
+
+// stripConditionals walks the source line-by-line, removing `//! if`,
+// `//! else`, `//! elseif`, and `//! endif` directives and selecting the
+// "if" branch's body verbatim. Nested conditionals are supported via a state
+// stack — when we're inside a `dropped` arm, all nested arms also drop until
+// the outermost endif.
+//
+// Semantics:
+//   - `//! if SOMETHING` opens a new conditional; condition ignored, if-body kept.
+//   - `//! else` switches the current conditional to the dropped arm.
+//   - `//! elseif COND` is treated like `//! else` (always drop) since we
+//     already took the if branch.
+//   - `//! endif` closes the innermost conditional.
+//
+// Unmatched openers (no endif before EOF) get a PreprocessError; whatever was
+// captured before EOF is included so the user still sees partial output.
+func stripConditionals(src string, res *PreprocessResult) string {
+	if !strings.Contains(src, "//!") {
+		return src
+	}
+	var out strings.Builder
+	out.Grow(len(src))
+	lines := splitLinesKeepEnd(src)
+	// Stack entries: false = currently keeping lines (if-branch); true =
+	// currently dropping (else/elseif-branch). When a nested conditional
+	// appears inside a dropped arm, the inner conditional is itself dropped
+	// regardless of its own arm — propagate via "drop wins".
+	type arm struct {
+		dropping bool
+		line     int // opener line for diagnostics
+	}
+	var stack []arm
+	keeping := func() bool {
+		for _, a := range stack {
+			if a.dropping {
+				return false
+			}
+		}
+		return true
+	}
+	for idx, line := range lines {
+		trim := strings.TrimRight(line, "\r\n")
+		if m := condIfRe.FindStringSubmatch(trim); m != nil {
+			// If we're already dropping, the nested arm is dropped regardless.
+			if !keeping() {
+				stack = append(stack, arm{dropping: true, line: idx + 1})
+				continue
+			}
+			_ = m // condition consumed but ignored
+			stack = append(stack, arm{dropping: false, line: idx + 1})
+			continue
+		}
+		if condElseRe.MatchString(trim) || condElseifRe.MatchString(trim) {
+			if len(stack) == 0 {
+				res.Errors = append(res.Errors, PreprocessError{
+					Line:    idx + 1,
+					Message: "//! else / //! elseif without matching //! if; ignoring",
+				})
+				continue
+			}
+			// Flip the innermost arm to dropping. Once dropped, stays dropped.
+			stack[len(stack)-1].dropping = true
+			continue
+		}
+		if condEndifRe.MatchString(trim) {
+			if len(stack) == 0 {
+				res.Errors = append(res.Errors, PreprocessError{
+					Line:    idx + 1,
+					Message: "//! endif without matching //! if; ignoring",
+				})
+				continue
+			}
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		// Regular line: emit only if we're not in a dropped arm.
+		if keeping() {
+			out.WriteString(line)
+		} else {
+			// Preserve newline so line numbers stay aligned.
+			if strings.HasSuffix(line, "\n") {
+				out.WriteByte('\n')
+			}
+		}
+	}
+	// Any unclosed conditionals at EOF: surface a diagnostic.
+	for _, a := range stack {
+		res.Errors = append(res.Errors, PreprocessError{
+			Line:    a.line,
+			Message: "//! if: missing //! endif before EOF",
+		})
+	}
+	return out.String()
 }
 
 // splitLinesKeepEnd splits s on '\n' boundaries, keeping the '\n' attached

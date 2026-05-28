@@ -280,6 +280,116 @@ endfunction
 	}
 }
 
+// TestStripBlockComments_SingleLine: `/* … */` on one line gets replaced
+// with a space.
+func TestStripBlockComments_SingleLine(t *testing.T) {
+	src := `integer x = /* inline */ 5
+`
+	out := StripBlockComments(src)
+	if strings.Contains(out, "/*") || strings.Contains(out, "*/") {
+		t.Errorf("expected block comment stripped, got: %q", out)
+	}
+}
+
+// TestStripBlockComments_MultiLine: multi-line block comments are removed,
+// newline count preserved.
+func TestStripBlockComments_MultiLine(t *testing.T) {
+	src := `integer x = 0
+/* this is
+   multi line */
+integer y = 1
+`
+	out := StripBlockComments(src)
+	if strings.Contains(out, "/*") || strings.Contains(out, "multi line") {
+		t.Errorf("expected multi-line block comment stripped, got:\n%s", out)
+	}
+	// Newline count should be preserved.
+	if strings.Count(out, "\n") != strings.Count(src, "\n") {
+		t.Errorf("expected newline count preserved (%d), got %d:\n%s",
+			strings.Count(src, "\n"), strings.Count(out, "\n"), out)
+	}
+}
+
+// TestStripBlockComments_NoComments_PassThrough: source without block
+// comments round-trips unchanged.
+func TestStripBlockComments_NoComments_PassThrough(t *testing.T) {
+	src := `function Foo takes nothing returns nothing
+endfunction
+`
+	out := StripBlockComments(src)
+	if out != src {
+		t.Errorf("expected passthrough, got:\n%s", out)
+	}
+}
+
+// TestPreprocess_ConditionalIf_TakesFirstBranch: `//! if X / //! else /
+// //! endif` keeps the if-body and drops the else-body. The condition is
+// ignored.
+func TestPreprocess_ConditionalIf_TakesFirstBranch(t *testing.T) {
+	src := `//! if SOMETHING
+local integer kept = 1
+//! else
+local integer dropped = 2
+//! endif
+`
+	res := Preprocess(src)
+	if !strings.Contains(res.Expanded, "local integer kept = 1") {
+		t.Errorf("expected if-branch kept, got:\n%s", res.Expanded)
+	}
+	if strings.Contains(res.Expanded, "local integer dropped = 2") {
+		t.Errorf("expected else-branch dropped, got:\n%s", res.Expanded)
+	}
+	if strings.Contains(res.Expanded, "//! if") || strings.Contains(res.Expanded, "//! else") || strings.Contains(res.Expanded, "//! endif") {
+		t.Errorf("expected conditional keywords stripped, got:\n%s", res.Expanded)
+	}
+}
+
+// TestPreprocess_ConditionalIf_NoElse: if-only conditional keeps body.
+func TestPreprocess_ConditionalIf_NoElse(t *testing.T) {
+	src := `//! if X
+integer kept = 1
+//! endif
+`
+	res := Preprocess(src)
+	if !strings.Contains(res.Expanded, "integer kept = 1") {
+		t.Errorf("expected body kept, got:\n%s", res.Expanded)
+	}
+}
+
+// TestPreprocess_ConditionalIf_Nested: nested conditionals work correctly.
+func TestPreprocess_ConditionalIf_Nested(t *testing.T) {
+	src := `//! if A
+keep_outer = 1
+//! if B
+keep_inner = 2
+//! endif
+//! endif
+`
+	res := Preprocess(res_or(src))
+	if !strings.Contains(res.Expanded, "keep_outer = 1") {
+		t.Errorf("expected outer body kept, got:\n%s", res.Expanded)
+	}
+	if !strings.Contains(res.Expanded, "keep_inner = 2") {
+		t.Errorf("expected inner body kept, got:\n%s", res.Expanded)
+	}
+}
+
+// res_or is a tiny helper so the nested-conditional test reads cleanly
+// without leaking the src var.
+func res_or(s string) string { return s }
+
+// TestPreprocess_ConditionalIf_MissingEndif: missing endif at EOF surfaces
+// a diagnostic but partial output is still useful.
+func TestPreprocess_ConditionalIf_MissingEndif(t *testing.T) {
+	src := `//! if X
+integer kept = 1
+`
+	res := Preprocess(src)
+	if len(res.Errors) == 0 {
+		t.Errorf("expected missing-endif diagnostic")
+	}
+}
+
 // FindVJASSKeyword should NOT trip on textmacro-family keywords after Phase 1
 // (the preprocessor consumes them). Library/scope/struct no longer block
 // after Phases 2/3 either. Module/interface/define still block until Phase 4.
@@ -292,8 +402,8 @@ func TestFindVJASSKeyword_TextmacroFamilyIgnored(t *testing.T) {
 		{"runtextmacro_in_source", `function F takes nothing returns nothing
 //! runtextmacro Foo()
 endfunction`, false},
-		{"module_still_blocks", `module X
-endmodule`, true},
+		{"module_no_longer_blocks", `module X
+endmodule`, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

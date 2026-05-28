@@ -63,6 +63,14 @@ type LibScopeResult struct {
 	// can't be required.
 	InitOrder []LibraryInit
 
+	// PublicNames is the flat set of every mangled public symbol that
+	// libraries export to the outer scope (e.g. "Foo_Bar"). The struct
+	// preprocessor consults this for the dot-vs-colon receiver heuristic:
+	// a method call whose receiver is a known library public name stays
+	// dot. Private mangled names are NOT included (they're not used as
+	// receivers outside their library by definition).
+	PublicNames []string
+
 	// Errors lists non-fatal diagnostics surfaced to the UI as warnings.
 	Errors []LibScopeError
 }
@@ -204,12 +212,15 @@ func PreprocessLibScope(src string) LibScopeResult {
 	// Pass 3 — topological sort over the library requires graph.
 	ordered := topoSortLibraries(blocks, known, &res)
 	for _, b := range ordered {
-		res.InitOrder = append(res.InitOrder, LibraryInit{
+		init := LibraryInit{
 			Name:     b.name,
 			InitFunc: b.initFunc,
 			Public:   sortedNames(b.publicNames),
 			Private:  sortedNames(b.privateNames),
-		})
+		}
+		res.InitOrder = append(res.InitOrder, init)
+		// Flat surface for the struct preprocessor's dot-vs-colon heuristic.
+		res.PublicNames = append(res.PublicNames, init.Public...)
 	}
 
 	// Pass 4 — emit. Top-level lines stay verbatim; library/scope blocks emit
