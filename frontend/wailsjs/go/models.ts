@@ -671,6 +671,48 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class TriggerCameraInfoDTO {
+	    name: string;
+	    target_x: number;
+	    target_y: number;
+	    distance: number;
+	    gg_ref: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerCameraInfoDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.target_x = source["target_x"];
+	        this.target_y = source["target_y"];
+	        this.distance = source["distance"];
+	        this.gg_ref = source["gg_ref"];
+	    }
+	}
+	export class TriggerDestructableInstanceDTO {
+	    creation_number: number;
+	    type_id: string;
+	    x: number;
+	    y: number;
+	    name: string;
+	    gg_ref: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerDestructableInstanceDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.creation_number = source["creation_number"];
+	        this.type_id = source["type_id"];
+	        this.x = source["x"];
+	        this.y = source["y"];
+	        this.name = source["name"];
+	        this.gg_ref = source["gg_ref"];
+	    }
+	}
 	export class TriggerDetailDTO {
 	    kind: string;
 	    category?: wtg.Category;
@@ -918,9 +960,57 @@ export namespace main {
 		}
 	}
 	
+	export class TriggerRegionInfoDTO {
+	    name: string;
+	    creation_number: number;
+	    left: number;
+	    right: number;
+	    top: number;
+	    bottom: number;
+	    gg_ref: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerRegionInfoDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.creation_number = source["creation_number"];
+	        this.left = source["left"];
+	        this.right = source["right"];
+	        this.top = source["top"];
+	        this.bottom = source["bottom"];
+	        this.gg_ref = source["gg_ref"];
+	    }
+	}
 	
 	
 	
+	export class TriggerUnitInstanceDTO {
+	    creation_number: number;
+	    type_id: string;
+	    player: number;
+	    x: number;
+	    y: number;
+	    name: string;
+	    gg_ref: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TriggerUnitInstanceDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.creation_number = source["creation_number"];
+	        this.type_id = source["type_id"];
+	        this.player = source["player"];
+	        this.x = source["x"];
+	        this.y = source["y"];
+	        this.name = source["name"];
+	        this.gg_ref = source["gg_ref"];
+	    }
+	}
 	export class UnitDTO {
 	    creation_number: number;
 	    type_id: string;

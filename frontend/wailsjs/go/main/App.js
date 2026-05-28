@@ -22,6 +22,10 @@ export function AddTriggerECA(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['AddTriggerECA'](arg1, arg2, arg3, arg4);
 }
 
+export function AddTriggerNestedECA(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['AddTriggerNestedECA'](arg1, arg2, arg3, arg4, arg5);
+}
+
 export function AddTriggerVariable(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['AddTriggerVariable'](arg1, arg2, arg3, arg4, arg5);
 }
@@ -40,6 +44,10 @@ export function CanUndo() {
 
 export function ClearSelection() {
   return window['go']['main']['App']['ClearSelection']();
+}
+
+export function ClearTriggerParamSubFunction(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ClearTriggerParamSubFunction'](arg1, arg2, arg3);
 }
 
 export function CloseMap() {
@@ -194,8 +202,24 @@ export function ListTilesets() {
   return window['go']['main']['App']['ListTilesets']();
 }
 
+export function ListTriggerCameras() {
+  return window['go']['main']['App']['ListTriggerCameras']();
+}
+
+export function ListTriggerDestructableInstances() {
+  return window['go']['main']['App']['ListTriggerDestructableInstances']();
+}
+
+export function ListTriggerRegions() {
+  return window['go']['main']['App']['ListTriggerRegions']();
+}
+
 export function ListTriggerTree() {
   return window['go']['main']['App']['ListTriggerTree']();
+}
+
+export function ListTriggerUnitInstances() {
+  return window['go']['main']['App']['ListTriggerUnitInstances']();
 }
 
 export function ListUnitObjects() {
@@ -324,6 +348,14 @@ export function SetTriggerEnabled(arg1, arg2) {
 
 export function SetTriggerInitiallyOn(arg1, arg2) {
   return window['go']['main']['App']['SetTriggerInitiallyOn'](arg1, arg2);
+}
+
+export function SetTriggerParamArray(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SetTriggerParamArray'](arg1, arg2, arg3, arg4);
+}
+
+export function SetTriggerParamSubFunction(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SetTriggerParamSubFunction'](arg1, arg2, arg3, arg4);
 }
 
 export function SetTriggerParamValue(arg1, arg2, arg3, arg4, arg5) {

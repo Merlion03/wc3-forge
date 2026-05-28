@@ -16,6 +16,8 @@ export function AddTriggerCategory(arg1:string,arg2:number):Promise<main.Trigger
 
 export function AddTriggerECA(arg1:number,arg2:number,arg3:string,arg4:number):Promise<main.TriggerMutationResultDTO>;
 
+export function AddTriggerNestedECA(arg1:number,arg2:Array<number>,arg3:number,arg4:string,arg5:number):Promise<main.TriggerMutationResultDTO>;
+
 export function AddTriggerVariable(arg1:string,arg2:string,arg3:boolean,arg4:number,arg5:string):Promise<main.TriggerMutationResultDTO>;
 
 export function BeginUndoGroup(arg1:string):Promise<void>;
@@ -25,6 +27,8 @@ export function CanRedo():Promise<boolean>;
 export function CanUndo():Promise<boolean>;
 
 export function ClearSelection():Promise<main.SelectionDTO>;
+
+export function ClearTriggerParamSubFunction(arg1:number,arg2:Array<number>,arg3:Array<number>):Promise<main.TriggerMutationResultDTO>;
 
 export function CloseMap():Promise<main.MapStatus>;
 
@@ -102,7 +106,15 @@ export function ListSkyModels():Promise<Array<main.SkyModelOption>>;
 
 export function ListTilesets():Promise<Array<main.TilesetInfoDTO>>;
 
+export function ListTriggerCameras():Promise<Array<main.TriggerCameraInfoDTO>>;
+
+export function ListTriggerDestructableInstances():Promise<Array<main.TriggerDestructableInstanceDTO>>;
+
+export function ListTriggerRegions():Promise<Array<main.TriggerRegionInfoDTO>>;
+
 export function ListTriggerTree():Promise<main.TriggerTreeDTO>;
+
+export function ListTriggerUnitInstances():Promise<Array<main.TriggerUnitInstanceDTO>>;
 
 export function ListUnitObjects():Promise<Array<main.UnitObjectListEntity>>;
 
@@ -168,7 +180,11 @@ export function SetTriggerEnabled(arg1:number,arg2:boolean):Promise<main.Trigger
 
 export function SetTriggerInitiallyOn(arg1:number,arg2:boolean):Promise<main.TriggerMutationResultDTO>;
 
-export function SetTriggerParamValue(arg1:number,arg2:Array<number>,arg3:number,arg4:string,arg5:number):Promise<main.TriggerMutationResultDTO>;
+export function SetTriggerParamArray(arg1:number,arg2:Array<number>,arg3:Array<number>,arg4:boolean):Promise<main.TriggerMutationResultDTO>;
+
+export function SetTriggerParamSubFunction(arg1:number,arg2:Array<number>,arg3:Array<number>,arg4:string):Promise<main.TriggerMutationResultDTO>;
+
+export function SetTriggerParamValue(arg1:number,arg2:Array<number>,arg3:Array<number>,arg4:string,arg5:number):Promise<main.TriggerMutationResultDTO>;
 
 export function SetTriggerRunOnInit(arg1:number,arg2:boolean):Promise<main.TriggerMutationResultDTO>;
 
