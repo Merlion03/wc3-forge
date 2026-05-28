@@ -181,14 +181,65 @@ interface WailsApp {
   SetTriggerVariable: (id: number, name: string, varType: string, isArray: boolean, arraySize: number, initValue: string) => Promise<TriggerMutationResult>
   SetMapHeaderScript: (content: string) => Promise<TriggerMutationResult>
   // Phase 2b1 — ECA / param mutation. ecaType: 0=event, 1=condition, 2=action,
-  // 3=call. paramType: 0=preset, 1=variable, 3=string (no 2=function in 2b1;
-  // sub-function building is 2b2's surface). ecaPath is a child-index path —
-  // length-1 for top-level ECAs the 2b1 UI addresses.
+  // 3=call. ecaPath is a child-index path — length-1 for top-level ECAs.
   AddTriggerECA: (triggerID: number, ecaType: number, name: string, position: number) => Promise<TriggerMutationResult>
   DeleteTriggerECA: (triggerID: number, ecaPath: number[]) => Promise<TriggerMutationResult>
   MoveTriggerECA: (triggerID: number, ecaPath: number[], newPosition: number) => Promise<TriggerMutationResult>
   SetTriggerECAEnabled: (triggerID: number, ecaPath: number[], enabled: boolean) => Promise<TriggerMutationResult>
-  SetTriggerParamValue: (triggerID: number, ecaPath: number[], paramIndex: number, value: string, paramType: number) => Promise<TriggerMutationResult>
+  // Phase 2b2 — paramPath replaces 2b1's paramIndex. paramPath[0] indexes the
+  // leaf ECA's parameters; each subsequent element drills into a SubParameter
+  // chain (recursive sub-function authoring). paramType: 0=preset, 1=variable,
+  // 2=function, 3=string.
+  SetTriggerParamValue: (triggerID: number, ecaPath: number[], paramPath: number[], value: string, paramType: number) => Promise<TriggerMutationResult>
+  SetTriggerParamSubFunction: (triggerID: number, ecaPath: number[], paramPath: number[], subName: string) => Promise<TriggerMutationResult>
+  ClearTriggerParamSubFunction: (triggerID: number, ecaPath: number[], paramPath: number[]) => Promise<TriggerMutationResult>
+  SetTriggerParamArray: (triggerID: number, ecaPath: number[], paramPath: number[], isArray: boolean) => Promise<TriggerMutationResult>
+  AddTriggerNestedECA: (triggerID: number, parentPath: number[], ecaType: number, name: string, groupID: number) => Promise<TriggerMutationResult>
+  // Phase 2b2 — entity instance pickers. Live-map data for the unit/dest/
+  // region/camera ParamEditor branches.
+  ListTriggerUnitInstances: () => Promise<TriggerUnitInstance[]>
+  ListTriggerDestructableInstances: () => Promise<TriggerDestructableInstance[]>
+  ListTriggerRegions: () => Promise<TriggerRegionInfo[]>
+  ListTriggerCameras: () => Promise<TriggerCameraInfo[]>
+}
+
+// Phase 2b2 — entity-picker rows. Each carries gg_ref the Trigger Editor
+// commits as the Parameter.Value when the user picks the row.
+export interface TriggerUnitInstance {
+  creation_number: number
+  type_id: string
+  player: number
+  x: number
+  y: number
+  name: string
+  gg_ref: string
+}
+
+export interface TriggerDestructableInstance {
+  creation_number: number
+  type_id: string
+  x: number
+  y: number
+  name: string
+  gg_ref: string
+}
+
+export interface TriggerRegionInfo {
+  name: string
+  creation_number: number
+  left: number
+  right: number
+  top: number
+  bottom: number
+  gg_ref: string
+}
+
+export interface TriggerCameraInfo {
+  name: string
+  target_x: number
+  target_y: number
+  distance: number
+  gg_ref: string
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -285,8 +336,32 @@ export function MoveTriggerECA(triggerID: number, ecaPath: number[], newPosition
 export function SetTriggerECAEnabled(triggerID: number, ecaPath: number[], enabled: boolean): Promise<TriggerMutationResult> {
   return app().SetTriggerECAEnabled(triggerID, ecaPath, enabled)
 }
-export function SetTriggerParamValue(triggerID: number, ecaPath: number[], paramIndex: number, value: string, paramType: number): Promise<TriggerMutationResult> {
-  return app().SetTriggerParamValue(triggerID, ecaPath, paramIndex, value, paramType)
+export function SetTriggerParamValue(triggerID: number, ecaPath: number[], paramPath: number[], value: string, paramType: number): Promise<TriggerMutationResult> {
+  return app().SetTriggerParamValue(triggerID, ecaPath, paramPath, value, paramType)
+}
+export function SetTriggerParamSubFunction(triggerID: number, ecaPath: number[], paramPath: number[], subName: string): Promise<TriggerMutationResult> {
+  return app().SetTriggerParamSubFunction(triggerID, ecaPath, paramPath, subName)
+}
+export function ClearTriggerParamSubFunction(triggerID: number, ecaPath: number[], paramPath: number[]): Promise<TriggerMutationResult> {
+  return app().ClearTriggerParamSubFunction(triggerID, ecaPath, paramPath)
+}
+export function SetTriggerParamArray(triggerID: number, ecaPath: number[], paramPath: number[], isArray: boolean): Promise<TriggerMutationResult> {
+  return app().SetTriggerParamArray(triggerID, ecaPath, paramPath, isArray)
+}
+export function AddTriggerNestedECA(triggerID: number, parentPath: number[], ecaType: number, name: string, groupID: number): Promise<TriggerMutationResult> {
+  return app().AddTriggerNestedECA(triggerID, parentPath, ecaType, name, groupID)
+}
+export function ListTriggerUnitInstances(): Promise<TriggerUnitInstance[]> {
+  return app().ListTriggerUnitInstances()
+}
+export function ListTriggerDestructableInstances(): Promise<TriggerDestructableInstance[]> {
+  return app().ListTriggerDestructableInstances()
+}
+export function ListTriggerRegions(): Promise<TriggerRegionInfo[]> {
+  return app().ListTriggerRegions()
+}
+export function ListTriggerCameras(): Promise<TriggerCameraInfo[]> {
+  return app().ListTriggerCameras()
 }
 
 // Stringify a parameter into a human-readable inline label. Mirrors
