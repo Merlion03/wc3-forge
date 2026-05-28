@@ -207,6 +207,9 @@
     inst.setScene(scene)
     inst.move([0, 0, 0])
     inst.uniformScale(1)
+    // Rotate model 45° around Z so it faces 3/4-view instead of dead-on along
+    // its native MDX facing direction. Quaternion = [0, 0, sin(π/8), cos(π/8)].
+    try { inst.setRotation?.([0, 0, 0.38268343, 0.92387953]) } catch { /* lib quirk; ignore */ }
     inst.setTeamColor(teamColor)
     // Force-loop every sequence regardless of the source MDX's `nonLooping`
     // flag. Without this, picking Death / Decay / a one-shot Attack plays
@@ -233,13 +236,15 @@
     // particle-emitter dummies) — fall back to a sensible default so the
     // camera doesn't end up inside the model.
     const b = m.bounds
-    if (b && b.r > 0) {
-      modelCenter = [b.x ?? 0, b.y ?? 0, b.z ?? 0]
-      modelRadius = b.r
-    } else {
-      modelCenter = [0, 0, 0]
-      modelRadius = 200
-    }
+    const r = (b && b.r > 0) ? b.r : 200
+    modelRadius = r
+    // Ignore bounds.{x,y,z} — for many WC3 models (especially heroes + animated
+    // units) the lib's bounds center sits well off the visible geometry because
+    // it includes skeleton bind-pose extents + particle emitters that extend
+    // off-model. Force the look-target onto the model's local Z-axis at ~40%
+    // of the radius height (roughly waist-level on a humanoid), which keeps the
+    // model centered in the preview regardless of source-MDX bounds quirks.
+    modelCenter = [0, 0, r * 0.4]
     reset()
   }
 

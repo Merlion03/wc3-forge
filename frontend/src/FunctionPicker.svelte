@@ -128,7 +128,7 @@
 </script>
 
 <Dialog.Root bind:open={open} onOpenChange={dismiss}>
-  <Dialog.Content class="!max-w-[820px] !w-[90vw] h-[80vh] flex flex-col p-0 gap-0">
+  <Dialog.Content class="!max-w-[1100px] !w-[90vw] h-[80vh] flex flex-col p-0 gap-0">
     <Dialog.Header class="px-4 py-3 border-b border-border">
       <Dialog.Title>Add {sectionLabel()}</Dialog.Title>
       <Dialog.Description class="text-xs text-muted-foreground">
@@ -150,7 +150,7 @@
 
     <div class="flex-1 min-h-0 flex">
       <!-- Left pane: categories -->
-      <div class="w-[200px] border-r border-border overflow-y-auto fp-catlist">
+      <div class="w-[320px] border-r border-border overflow-y-auto fp-catlist">
         {#each categoryList as code (code)}
           <button
             class="fp-cat {selectedCategory === code ? 'fp-cat-sel' : ''}"
