@@ -20,9 +20,11 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/formats/mpq"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/shd"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/w3c"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3e"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3objmod"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/w3r"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wct"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wpm"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wts"
@@ -134,6 +136,13 @@ type Session struct {
 	pathingMap       *wpm.File      // war3map.wpm
 	strings          wts.Strings    // war3map.wts, for TRIGSTR_<n> resolution
 	gameplay         *miscdata.File // war3mapMisc.txt — per-map gameplay-constants overrides
+
+	// regions / cameras — OPTIONAL. Phase 2b2 added Parse-only support so the
+	// Trigger Editor's gg_rct_*/gg_cam_* entity-name resolver + the region /
+	// camera entity pickers have a real source instead of falling back to the
+	// raw identifier. Encode is deferred (no Region Editor in scope yet).
+	regions *w3r.File // war3map.w3r
+	cameras *w3c.File // war3map.w3c
 
 	// Trigger Editor data — Phase 2a (read-write). war3map.wtg is the GUI
 	// trigger tree (categories + variables + triggers + ECAs); war3map.wct
@@ -461,6 +470,24 @@ func (s *Session) Open(path string) error {
 		gameplay = &miscdata.File{}
 	}
 
+	// war3map.w3r — OPTIONAL regions table. Phase 2b2 needs this for
+	// gg_rct_ → region-name resolution and the Trigger Editor's region picker.
+	// Parse-only; a malformed file logs + returns nil rather than failing
+	// open (region pickers degrade to "no regions" + the resolver falls back
+	// to the raw identifier).
+	regionsFile, err := readOpt(src, "war3map.w3r", w3r.Parse)
+	if err != nil {
+		log.Printf("Open: war3map.w3r: %v (proceeding without regions)", err)
+		regionsFile = nil
+	}
+
+	// war3map.w3c — OPTIONAL game cameras. Same rationale as w3r above.
+	camerasFile, err := readOpt(src, "war3map.w3c", w3c.Parse)
+	if err != nil {
+		log.Printf("Open: war3map.w3c: %v (proceeding without cameras)", err)
+		camerasFile = nil
+	}
+
 	// war3map.wtg + war3map.wct — OPTIONAL. The trigger loader handles both
 	// the "neither present" + "hand-rolled-script only" cases internally;
 	// errors are logged but never fail the open (a malformed .wtg shouldn't
@@ -488,6 +515,8 @@ func (s *Session) Open(path string) error {
 	s.upgradeMods = upgradeMods
 	s.shadowMap = shadowMap
 	s.pathingMap = pathingMap
+	s.regions = regionsFile
+	s.cameras = camerasFile
 	s.strings = wtsStrings
 	s.gameplay = gameplay
 	s.triggers = triggers
@@ -575,6 +604,8 @@ func (s *Session) Close() {
 	s.upgradeMods = nil
 	s.shadowMap = nil
 	s.pathingMap = nil
+	s.regions = nil
+	s.cameras = nil
 	s.strings = nil
 	s.gameplay = nil
 	s.triggers = nil
@@ -778,6 +809,22 @@ func (s *Session) PathingMap() *wpm.File {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.pathingMap
+}
+
+// Regions returns the parsed war3map.w3r, or nil if absent. Phase 2b2 accessor;
+// the Trigger Editor's region picker + the gg_rct_ resolver consume this.
+func (s *Session) Regions() *w3r.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.regions
+}
+
+// Cameras returns the parsed war3map.w3c, or nil if absent. Same Phase 2b2
+// rationale as Regions.
+func (s *Session) Cameras() *w3c.File {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cameras
 }
 
 // Selection returns the current selection. Safe to call before a map is loaded

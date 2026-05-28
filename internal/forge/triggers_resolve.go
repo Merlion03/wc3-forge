@@ -118,13 +118,67 @@ func resolveEntityName(s *Session, raw string) string {
 		return resolveUnitOrDestRef(s, tail, true /*units*/, raw)
 	case "dest":
 		return resolveUnitOrDestRef(s, tail, false /*destructibles/doodads*/, raw)
-	case "rct", "cam":
-		// w3r + w3c parsers don't exist yet — log once and fall back to raw.
-		// TODO Phase 1c: add internal/formats/w3r + internal/formats/w3c, plus
-		// Session.Regions() / Session.Cameras() accessors, then resolve here.
+	case "rct":
+		return resolveRegionRef(s, tail, raw)
+	case "cam":
+		return resolveCameraRef(s, tail, raw)
+	}
+	return ""
+}
+
+// resolveRegionRef looks up the region named `tail` (the underscore-suffix of
+// gg_rct_) inside the loaded war3map.w3r. Returns the region's Name (with no
+// "(N)" suffix — regions are unique by name in HiveWE's editor, unlike unit
+// placements). Returns "" when the regions file is absent OR no match exists;
+// in the latter case we log once so a stale gg_rct_ reference surfaces.
+//
+// HiveWE codegen replaces spaces in region names with underscores when emitting
+// the gg_rct_ global. We mirror that by checking both verbatim AND with
+// underscores → spaces substitution.
+func resolveRegionRef(s *Session, tail, raw string) string {
+	rf := s.Regions()
+	if rf == nil {
 		logUnresolvedOnce(s.Path(), raw)
 		return ""
 	}
+	// Direct match first (most common: region named "StartZone").
+	for i := range rf.Regions {
+		if rf.Regions[i].Name == tail {
+			return rf.Regions[i].Name
+		}
+	}
+	// Underscores-as-spaces fallback.
+	spaced := strings.ReplaceAll(tail, "_", " ")
+	for i := range rf.Regions {
+		if rf.Regions[i].Name == spaced {
+			return rf.Regions[i].Name
+		}
+	}
+	logUnresolvedOnce(s.Path(), raw)
+	return ""
+}
+
+// resolveCameraRef mirrors resolveRegionRef for war3map.w3c. Cameras have the
+// same name-uniqueness guarantee + the same space → underscore codegen
+// transform.
+func resolveCameraRef(s *Session, tail, raw string) string {
+	cf := s.Cameras()
+	if cf == nil {
+		logUnresolvedOnce(s.Path(), raw)
+		return ""
+	}
+	for i := range cf.Cameras {
+		if cf.Cameras[i].Name == tail {
+			return cf.Cameras[i].Name
+		}
+	}
+	spaced := strings.ReplaceAll(tail, "_", " ")
+	for i := range cf.Cameras {
+		if cf.Cameras[i].Name == spaced {
+			return cf.Cameras[i].Name
+		}
+	}
+	logUnresolvedOnce(s.Path(), raw)
 	return ""
 }
 
