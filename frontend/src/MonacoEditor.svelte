@@ -27,6 +27,7 @@
     readOnly = false,
     theme = 'vs-dark',
     onChange,
+    onSave,
     minimap = false,
   }: {
     value?: string
@@ -34,6 +35,12 @@
     readOnly?: boolean
     theme?: 'vs-dark' | 'vs'
     onChange?: (text: string) => void
+    // Optional Ctrl+S / Cmd+S handler. Registered as a Monaco command so the
+    // editor's own keybinding service intercepts the chord before the browser
+    // sees it (and before Monaco's "Save" overlay fires). Capture-phase DOM
+    // listeners on the wrapper don't help — Monaco's keybinding service
+    // doesn't check defaultPrevented.
+    onSave?: () => void
     minimap?: boolean
   } = $props()
 
@@ -48,7 +55,6 @@
   let editor: import('monaco-editor').editor.IStandaloneCodeEditor | null = null
   let model: import('monaco-editor').editor.ITextModel | null = null
   let resizeObs: ResizeObserver | null = null
-  let pendingChangeTimer: ReturnType<typeof setTimeout> | null = null
   let suppressNextValueWrite = false
   let disposed = false
 
@@ -58,10 +64,6 @@
 
   onDestroy(() => {
     disposed = true
-    if (pendingChangeTimer) {
-      clearTimeout(pendingChangeTimer)
-      pendingChangeTimer = null
-    }
     resizeObs?.disconnect()
     resizeObs = null
     editor?.dispose()
@@ -92,6 +94,13 @@
         smoothScrolling: true,
         tabSize: 2,
       })
+      // Ctrl+S / Cmd+S → caller-defined Save. Registered as a Monaco command
+      // so the chord is consumed inside the editor (no browser print dialog,
+      // no Monaco "Save" overlay, no key leakage to the dialog).
+      // KeyMod.CtrlCmd | KeyCode.KeyS == 2049 (Ctrl/Cmd + S).
+      editor.addCommand(mod.KeyMod.CtrlCmd | mod.KeyCode.KeyS, () => {
+        onSave?.()
+      })
       editor.onDidChangeModelContent(() => {
         if (!editor || !model) return
         if (suppressNextValueWrite) {
@@ -103,16 +112,10 @@
         }
         const text = model.getValue()
         // Mirror the post-update text into the bindable prop synchronously
-        // so parents that read `value` see the latest. The debounce only
-        // applies to the onChange callback (matches the CodeMirror behavior).
+        // so parents that read `value` see the latest, then fire onChange
+        // synchronously. Consumers own debouncing / save semantics.
         value = text
-        if (onChange) {
-          if (pendingChangeTimer) clearTimeout(pendingChangeTimer)
-          pendingChangeTimer = setTimeout(() => {
-            pendingChangeTimer = null
-            onChange?.(text)
-          }, 400)
-        }
+        onChange?.(text)
       })
       resizeObs = new ResizeObserver(() => editor?.layout())
       resizeObs.observe(container)

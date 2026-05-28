@@ -73,6 +73,9 @@
   import TriggerInstancePicker, { type InstanceKind } from './TriggerInstancePicker.svelte'
   import type { ObjectKind } from './object-editor-bindings'
   import MonacoEditor from './MonacoEditor.svelte'
+  import SaveIcon from '@lucide/svelte/icons/save'
+  import Undo2Icon from '@lucide/svelte/icons/undo-2'
+  import ListRestartIcon from '@lucide/svelte/icons/list-restart'
 
   let {
     open = $bindable(false),
@@ -154,6 +157,20 @@
     if (testMapBusy) return
     testMapBusy = true
     try {
+      // Flush all pending in-memory editor texts BEFORE TestMap. The
+      // codegen reads from Session, and Session only sees text that's
+      // been explicitly saved. Without this loop, pending edits would
+      // silently fail to land in the generated war3map.lua.
+      if (pendingTexts.size > 0) {
+        const ids = Array.from(pendingTexts.keys())
+        for (const id of ids) {
+          await commitPendingText(id)
+        }
+        if (pendingTexts.size > 0) {
+          showToast('Could not save all triggers; Test Map cancelled.', 'err')
+          return
+        }
+      }
       await TestMap()
       showToast('Test Map launched — opening Warcraft III…', 'ok')
     } catch (e) {
@@ -215,6 +232,15 @@
     if (!open || payload?.kind !== 'trigger') return
     void loadTree()
     if (selectedId != null) {
+      // Skip the detail re-fetch when the user has unsaved edits for this
+      // trigger. selectNode() clears `detail` to null mid-await, which would
+      // drop editorBoundId, which would derive editorValue to '' and wipe
+      // the in-progress edit out of the Monaco model (pendingTexts still
+      // holds the text, but the editor can't see it without a bound id).
+      // Non-text fields (enabled flag, name) will refresh next time the
+      // user switches nodes — acceptable trade for keeping unsaved edits
+      // + focus intact.
+      if (pendingTexts.has(selectedId)) return
       void selectNode(selectedId)
     }
   }
@@ -622,24 +648,44 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Monaco editor binding.
+  // Monaco editor binding — explicit Save (VSCode-style).
   //
-  // The CodeMirror lifecycle that lived here got replaced with a single
-  // <MonacoEditor /> component. The component is reactive on `value` +
-  // `language`, and debounces its onChange callback by 400 ms — same shape
-  // as the old CodeMirror updateListener. We just stash the script text in
-  // a $state and dispatch the right commit path (custom_text vs Map Header
-  // vs comment description) on change.
+  // The Monaco wrapper is pure: every keystroke fires onChange synchronously
+  // with the latest text. We DON'T pipe that into App.SetTriggerCustomText /
+  // App.SetMapHeaderScript anymore — the old auto-commit + entity-changed
+  // refresh loop re-fetched detail, which re-mounted Monaco, which dropped
+  // focus and flashed on every keystroke.
   //
-  // editorBoundId / editorText / editorLanguage are re-derived from
-  // `detail` via $effect; the dependent <MonacoEditor> swaps its model in
-  // place without remounting (cheap; no GC churn).
+  // Instead we keep two per-trigger maps:
+  //   - originalTexts: last server-known text for each loaded trigger.
+  //     Updated by the detail-sync $effect and by commitPendingText on Save.
+  //   - pendingTexts: in-memory editor text awaiting Save. Presence in this
+  //     map === dirty. On Save we route to the right binding and clear the
+  //     entry. On Discard (dialog close confirm) we just clear the map.
+  //
+  // The Monaco component reads `pendingTexts.get(id) ?? originalTexts.get(id)`,
+  // so entity-changed refreshes (rename, enabled-flag, etc.) update detail
+  // and originalText for OTHER triggers without ever stomping the editor's
+  // unsaved buffer for the currently-edited one.
   // ---------------------------------------------------------------------------
 
-  let editorText: string = $state('')
   let editorLanguage: 'lua' | 'jass' | 'plaintext' = $state('lua')
   let editorBoundId: number | null = $state(null)
   let editorCommitKind: 'script' | 'mapheader' | 'description' | null = $state(null)
+  // Per-trigger dirty/clean text. Key = trigger id (also the synthetic Map
+  // Header id). Svelte 5 doesn't track Map mutations — we reassign on every
+  // set/delete to force reactivity.
+  let pendingTexts: Map<number, string> = $state(new Map())
+  let originalTexts: Map<number, string> = $state(new Map())
+
+  // Resolve the currently-rendered text for the bound editor: pending wins,
+  // then original, then empty. $derived keeps Monaco reactive without an
+  // intermediate $state that we'd have to remember to re-set.
+  let editorValue = $derived.by(() => {
+    if (editorBoundId == null) return ''
+    return pendingTexts.get(editorBoundId) ?? originalTexts.get(editorBoundId) ?? ''
+  })
+  let editorDirty = $derived(editorBoundId != null && pendingTexts.has(editorBoundId))
 
   // Detect the script language for a given script trigger. We don't have
   // info.Lua piped to the frontend, so fall back to filename matching for
@@ -651,47 +697,108 @@
     return 'lua'
   }
 
-  // Sync editor state from the loaded detail. We only swap when the bound
-  // trigger id actually changes — otherwise we'd echo every onChange back
-  // into our own editor.
+  // Map header detection mirrors the back-end classifier: synthesized header
+  // triggers are named "war3map.lua" or "war3map.j". The dot path covers both
+  // languages with one regex.
+  function isMapHeaderName(name: string | undefined): boolean {
+    return !!name?.match(/^war3map\.(lua|j)$/)
+  }
+
+  // Sync editor metadata + originalTexts from the loaded detail. Runs on
+  // EVERY detail change (rename, toggle, MCP-driven mutation refresh). The
+  // pendingTexts entry — if any — is the editor's source of truth, so
+  // refreshing originalTexts here is safe even mid-edit.
+  //
+  // NB: selectNode() clears `detail = null` BEFORE awaiting GetTrigger. We
+  // tolerate that transient null when selectedId is still set + matches the
+  // currently-bound editor — leaving editorBoundId intact keeps Monaco's
+  // value stable so the user doesn't see a blank-flash on selection refresh
+  // (notably after their own Save round-trip).
   $effect(() => {
-    const _detail = detail
     if (!detail) {
-      editorBoundId = null
-      editorText = ''
-      editorCommitKind = null
+      if (selectedId == null || editorBoundId !== selectedId) {
+        editorBoundId = null
+        editorCommitKind = null
+      }
       return
     }
     if (detail.kind === 'trigger_script') {
       const t = detail.trigger
       const id = t?.id ?? 0
-      if (editorBoundId === id) return
       editorBoundId = id
-      editorText = t?.custom_text || ''
       editorLanguage = detectLanguage(t?.name)
-      const isMapHeader = !!t?.name?.match(/^war3map\.(lua|j)$/)
-      editorCommitKind = isMapHeader ? 'mapheader' : 'script'
+      editorCommitKind = isMapHeaderName(t?.name) ? 'mapheader' : 'script'
+      // Refresh original text from server. If the user hasn't typed yet,
+      // pendingTexts.get(id) is undefined and Monaco renders this directly.
+      // If they HAVE typed, pendingTexts wins (see $derived above).
+      const fresh = t?.custom_text || ''
+      if (originalTexts.get(id) !== fresh) {
+        originalTexts.set(id, fresh)
+        originalTexts = new Map(originalTexts)
+      }
       return
     }
     if (detail.kind === 'trigger_comment') {
       const t = detail.trigger
       const id = t?.id ?? 0
-      if (editorBoundId === id) return
       editorBoundId = id
-      editorText = t?.description || ''
       editorLanguage = 'plaintext'
       editorCommitKind = 'description'
+      const fresh = t?.description || ''
+      if (originalTexts.get(id) !== fresh) {
+        originalTexts.set(id, fresh)
+        originalTexts = new Map(originalTexts)
+      }
       return
     }
     editorBoundId = null
-    editorText = ''
     editorCommitKind = null
   })
 
-  async function onEditorChange(text: string) {
-    if (editorBoundId == null || editorCommitKind == null) return
+  // onChange from Monaco — pure local-state mutation. If the user types back
+  // to the original, drop the pending entry so the dirty indicator clears
+  // without a Save round-trip (matches VSCode).
+  function onEditorChange(text: string) {
+    if (editorBoundId == null) return
     const id = editorBoundId
-    const kind = editorCommitKind
+    const orig = originalTexts.get(id) ?? ''
+    if (text === orig) {
+      if (pendingTexts.delete(id)) {
+        pendingTexts = new Map(pendingTexts)
+      }
+    } else {
+      pendingTexts.set(id, text)
+      pendingTexts = new Map(pendingTexts)
+    }
+  }
+
+  // Classify a trigger id for routing on Save. Map header detection uses the
+  // tree row's `name` (the detail payload isn't necessarily current for the
+  // id we're flushing — Test Map iterates ALL pending ids, not just the one
+  // visible in the right pane). Defaults to 'script' for unknown ids; that's
+  // the safer fallback (SetTriggerCustomText errors loudly on missing ids
+  // and we surface the error).
+  function classifyPendingId(id: number): 'script' | 'mapheader' | 'description' | null {
+    const node = tree.nodes.find((n) => n.id === id)
+    if (!node) return null
+    if (node.kind === 'trigger_script') {
+      return isMapHeaderName(node.name) ? 'mapheader' : 'script'
+    }
+    if (node.kind === 'trigger_comment') return 'description'
+    return null
+  }
+
+  // Commit one pending editor's text via the appropriate back-end binding.
+  // On success: drop from pending, refresh originalText. On failure: keep
+  // pending + surface the error so the user can retry.
+  async function commitPendingText(id: number): Promise<boolean> {
+    const text = pendingTexts.get(id)
+    if (text === undefined) return true
+    const kind = classifyPendingId(id)
+    if (kind == null) {
+      errorMsg = `Cannot save trigger ${id}: unknown kind`
+      return false
+    }
     try {
       if (kind === 'mapheader') {
         await SetMapHeaderScript(text)
@@ -700,9 +807,68 @@
       } else if (kind === 'description') {
         await SetTriggerDescription(id, text)
       }
+      originalTexts.set(id, text)
+      originalTexts = new Map(originalTexts)
+      pendingTexts.delete(id)
+      pendingTexts = new Map(pendingTexts)
+      return true
     } catch (e) {
       errorMsg = `Save failed: ${e}`
+      return false
     }
+  }
+
+  // Discard the currently-edited trigger's pending text. Monaco re-reads
+  // originalText via the `editorValue` $derived → MonacoEditor's `value`
+  // $effect path; no manual setValue / remount needed.
+  function discardCurrent() {
+    if (editorBoundId == null) return
+    if (!pendingTexts.has(editorBoundId)) return
+    pendingTexts.delete(editorBoundId)
+    pendingTexts = new Map(pendingTexts)
+  }
+
+  // Discard every pending edit across all triggers. Confirms once because the
+  // button click itself isn't a confirmation. Dialog-close uses its own
+  // confirmDiscardOnClose path — same prompt copy, but separate trigger so
+  // the user can't accidentally double-confirm.
+  function discardAll() {
+    if (pendingTexts.size === 0) return
+    const n = pendingTexts.size
+    const ok = window.confirm(`Discard ${n} unsaved trigger edit${n === 1 ? '' : 's'}?`)
+    if (!ok) return
+    pendingTexts = new Map()
+  }
+
+  // Discard one specific trigger's pending edit (used by per-row hover icon
+  // in the tree). Does NOT prompt — the user explicitly clicked the small
+  // discard icon next to a known-dirty row.
+  function discardOne(id: number) {
+    if (!pendingTexts.has(id)) return
+    pendingTexts.delete(id)
+    pendingTexts = new Map(pendingTexts)
+  }
+
+  // Ctrl+S / Cmd+S inside Monaco — wired via MonacoEditor's onSave prop. The
+  // wrapper registers a Monaco command so the chord never escapes the editor
+  // (no browser print dialog, no Monaco "Save" overlay leakage).
+  function onEditorSaveShortcut() {
+    if (editorBoundId != null && pendingTexts.has(editorBoundId)) {
+      void commitPendingText(editorBoundId)
+    }
+  }
+
+  // Close-with-pending guard. Wired into Dialog.Root's onOpenChange. Returns
+  // true when close should proceed, false to keep the dialog open. The
+  // Dialog.Root's bind:open is the source of truth for the modal — if we
+  // veto the close we re-assert `open = true` on the next tick.
+  function confirmDiscardOnClose(): boolean {
+    if (pendingTexts.size === 0) return true
+    const n = pendingTexts.size
+    const ok = window.confirm(`You have ${n} unsaved trigger edit${n === 1 ? '' : 's'}. Discard?`)
+    if (!ok) return false
+    pendingTexts = new Map()
+    return true
   }
 
   // Variable form state. Mirrors the wtg.Variable struct.
@@ -1184,6 +1350,36 @@
   }
 </script>
 
+<!-- Per-editor toolbar — Save + Discard Current + dirty status. Shared by the
+     trigger_script and trigger_comment branches so both right-pane editor
+     mounts get identical Save semantics. Buttons disable when clean. -->
+{#snippet editorToolbar()}
+  <div class="te-editor-toolbar">
+    <button
+      class="te-toolbtn te-toolbtn-icon te-save-btn"
+      title="Save (Ctrl+S)"
+      disabled={!editorDirty}
+      onclick={() => { if (editorBoundId != null) void commitPendingText(editorBoundId) }}
+    >
+      <SaveIcon size={14} />
+      Save
+    </button>
+    <button
+      class="te-toolbtn te-toolbtn-icon"
+      title="Discard changes (current trigger)"
+      aria-label="Discard changes to current trigger"
+      disabled={!editorDirty}
+      onclick={discardCurrent}
+    >
+      <Undo2Icon size={14} />
+      Discard
+    </button>
+    <span class="te-editor-status {editorDirty ? 'te-editor-status-dirty' : ''}">
+      {editorDirty ? 'Modified' : ''}
+    </span>
+  </div>
+{/snippet}
+
 <!-- Editable ECA row snippet — used for both top-level ECAs and (recursively)
      magic-ECA children. Rendering magic children inline lets the user edit
      If/Then/Else / Loop bodies in place without entering a sub-dialog. -->
@@ -1220,7 +1416,22 @@
   {/if}
 {/snippet}
 
-<Dialog.Root bind:open onOpenChange={(v) => { if (!v) onClose?.() }}>
+<Dialog.Root
+  bind:open
+  onOpenChange={(v) => {
+    if (!v) {
+      // Veto the close if the user has unsaved edits and cancels the
+      // discard prompt. Re-assert open=true on the next microtask so the
+      // bind:open snap-back doesn't race the Dialog primitive's own close
+      // animation.
+      if (!confirmDiscardOnClose()) {
+        queueMicrotask(() => (open = true))
+        return
+      }
+      onClose?.()
+    }
+  }}
+>
   <Dialog.Content class="!max-w-[1280px] !w-[95vw] h-[85vh] p-0 flex flex-col">
     <Dialog.Header class="px-4 py-3 border-b">
       <Dialog.Title>Trigger Editor</Dialog.Title>
@@ -1250,11 +1461,20 @@
       <div class="border-l h-6 mx-1 border-zinc-700"></div>
       <button class="te-toolbtn" title="Preview generated war3map.lua" onclick={() => (showScriptPreview = true)}>Preview Script</button>
       <button class="te-toolbtn" title="Search all triggers (Ctrl+P or double-Shift)" onclick={() => (showSearchPalette = true)}>Search…</button>
+      <button class="te-toolbtn te-toolbtn-icon"
+        title={pendingTexts.size === 0 ? 'No unsaved edits' : `Discard ALL unsaved changes (${pendingTexts.size})`}
+        onclick={discardAll}
+        disabled={pendingTexts.size === 0}
+        aria-label="Discard all unsaved changes"
+      >
+        <ListRestartIcon size={14} />
+        {pendingTexts.size > 0 ? `Discard All (${pendingTexts.size})` : 'Discard All'}
+      </button>
       <button class="te-toolbtn" title="Save map + regenerate war3map.lua + launch Warcraft III"
         onclick={() => void onTestMap()} disabled={testMapBusy}>
         {testMapBusy ? 'Launching…' : 'Test Map'}
       </button>
-      <span class="text-zinc-500 text-xs ml-auto">Drag nodes to reorganize · right-click for actions · Ctrl+P / double-Shift to search</span>
+      <span class="text-zinc-500 text-xs ml-auto">Drag nodes to reorganize · Ctrl+S to save · Ctrl+P / double-Shift to search</span>
     </div>
     {#if toastText}
       <div class="px-3 py-1 text-sm {toastKind === 'err' ? 'bg-red-900/40 text-red-200' : 'bg-emerald-900/30 text-emerald-200'}">
@@ -1298,9 +1518,18 @@
               title={row.node.description || row.node.name}
             >
               <span class="te-icon">{iconFor(row.node)}</span>
+              {#if pendingTexts.has(row.node.id)}
+                <span class="te-row-dot" title="Unsaved changes" aria-label="unsaved"></span>
+              {/if}
               <span class="te-name {row.node.is_enabled === false ? 'te-disabled' : ''}">{row.node.name}</span>
             </button>
             <span class="te-row-actions">
+              {#if pendingTexts.has(row.node.id)}
+                <button class="te-row-act te-row-act-discard" title="Discard changes" aria-label="Discard changes"
+                  onclick={(e) => { e.stopPropagation(); discardOne(row.node.id) }}>
+                  <Undo2Icon size={11} />
+                </button>
+              {/if}
               <button class="te-row-act" title="Rename" onclick={(e) => { e.stopPropagation(); void onClickRename(row.node.id, row.node.name) }}>✎</button>
               <button class="te-row-act" title="Delete" onclick={(e) => { e.stopPropagation(); void onClickDelete(row.node.id) }}>×</button>
             </span>
@@ -1344,17 +1573,24 @@
         {:else if detail.kind === 'trigger_comment'}
           {@const t = detail.trigger!}
           <div class="px-4 py-3">
-            <div class="text-zinc-300 text-lg">{t.name}</div>
-            <div class="text-zinc-500 text-sm mb-2">Comment · id={t.id}</div>
-            <div class="te-editor">
-              <MonacoEditor bind:value={editorText} language={editorLanguage} onChange={onEditorChange} />
+            <div class="text-zinc-300 text-lg flex items-center gap-2">
+              {#if editorDirty}<span class="te-dirty-dot" title="Unsaved changes" aria-label="unsaved"></span>{/if}
+              <span>{t.name}</span>
             </div>
-            <div class="text-zinc-500 text-xs mt-2">Edits auto-save 400 ms after typing stops.</div>
+            <div class="text-zinc-500 text-sm mb-2">Comment · id={t.id}</div>
+            {@render editorToolbar()}
+            <div class="te-editor">
+              <MonacoEditor value={editorValue} language={editorLanguage} onChange={onEditorChange} onSave={onEditorSaveShortcut} />
+            </div>
+            <div class="text-zinc-500 text-xs mt-2">Ctrl+S to save · changes stay local until saved.</div>
           </div>
         {:else if detail.kind === 'trigger_script'}
           {@const t = detail.trigger!}
           <div class="px-4 py-3">
-            <div class="text-zinc-300 text-lg">{t.name}</div>
+            <div class="text-zinc-300 text-lg flex items-center gap-2">
+              {#if editorDirty}<span class="te-dirty-dot" title="Unsaved changes" aria-label="unsaved"></span>{/if}
+              <span>{t.name}</span>
+            </div>
             {#if t.description}
               <div class="text-zinc-500 text-sm mb-2">{t.description}</div>
             {/if}
@@ -1364,10 +1600,11 @@
               <label><input type="checkbox" checked={t.initially_on} onchange={(e) => void onToggleInitiallyOn(t.id, e.currentTarget.checked)} /> initially_on</label>
               <label><input type="checkbox" checked={t.run_on_initialization} onchange={(e) => void onToggleRunOnInit(t.id, e.currentTarget.checked)} /> run_on_init</label>
             </div>
+            {@render editorToolbar()}
             <div class="te-editor">
-              <MonacoEditor bind:value={editorText} language={editorLanguage} onChange={onEditorChange} />
+              <MonacoEditor value={editorValue} language={editorLanguage} onChange={onEditorChange} onSave={onEditorSaveShortcut} />
             </div>
-            <div class="text-zinc-500 text-xs mt-2">Edits auto-save 400 ms after typing stops.</div>
+            <div class="text-zinc-500 text-xs mt-2">Ctrl+S to save · changes stay local until saved.</div>
           </div>
         {:else if detail.kind === 'trigger_gui'}
           {@const t = detail.trigger!}
@@ -1700,5 +1937,57 @@
     width: auto !important;
     padding: 2px 8px !important;
     font-size: 11px !important;
+  }
+
+  /* Explicit-Save UI — VSCode-style dirty indicators + toolbar. */
+  .te-toolbtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .te-toolbtn-icon {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .te-save-btn:not(:disabled) {
+    background: rgba(59, 130, 246, 0.18);
+    border-color: #3b82f6;
+    color: #dbeafe;
+  }
+  .te-save-btn:not(:disabled):hover {
+    background: rgba(59, 130, 246, 0.32);
+    color: #fff;
+  }
+  .te-editor-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0 6px 0;
+  }
+  .te-editor-status {
+    font-size: 11px;
+    color: #71717a;
+  }
+  .te-editor-status-dirty {
+    color: #fbbf24;
+  }
+  /* Per-trigger dirty dot — small filled circle next to the name. Mirrors
+     VSCode's modified-tab indicator. */
+  .te-dirty-dot,
+  .te-row-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #60a5fa;
+    flex: none;
+  }
+  .te-row-dot {
+    width: 6px;
+    height: 6px;
+    margin: 0 2px;
+  }
+  .te-row-act-discard:hover {
+    color: #60a5fa;
   }
 </style>
