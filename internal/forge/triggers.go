@@ -1,12 +1,15 @@
 package forge
 
 import (
+	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wct"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wtg"
 	wtgdata "github.com/StephenSHorton/wc3-forge/internal/formats/wtg/data"
+	"github.com/StephenSHorton/wc3-forge/internal/wc3launch"
 )
 
 // Trigger Editor data layer — Phase 1a (read-only).
@@ -258,6 +261,347 @@ func synthesizeHandRolledScriptTriggers(scriptName, scriptText string) *wtg.Trig
 				InitiallyOn: true,
 			},
 		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Lua codegen + Test Map. See triggers_codegen.go for the emitter.
+// ---------------------------------------------------------------------------
+
+// GenerateTriggerScript produces the Lua war3map.lua source from the
+// currently-loaded map's triggers + placed entities + map info. Returns
+// (text, nil) on success.
+//
+// Refuses generation in three cases:
+//   - no map loaded — returns a friendly error
+//   - info.Lua == false — returns ErrLuaOnly (the user must convert the map
+//     to Lua via WC3 World Editor → Map → Convert to Lua first)
+//   - existing war3map.lua starts with PreserveScriptMarker — returns
+//     ErrPreserveScript (the user has hand-edited the script and wants the
+//     editor to leave it alone)
+//
+// The preserve-marker check is the only one that touches disk: we read the
+// existing war3map.lua bytes (if any) and peek at the first line. Pure-text
+// inputs (tests) can call GenerateLuaScript directly to bypass the marker
+// check.
+func (s *Session) GenerateTriggerScript() (string, error) {
+	s.mu.RLock()
+	src := s.source
+	in := CodegenInputs{
+		Triggers: s.triggers,
+		Units:    s.units,
+		Doodads:  s.doodads,
+		Terrain:  s.terrain,
+		Info:     s.info,
+		Regions:  s.regions,
+		Cameras:  s.cameras,
+		TD:       TriggerDataSnapshot(),
+	}
+	if s.triggersWct != nil {
+		in.GlobalJASS = s.triggersWct.GlobalJASS
+	}
+	loaded := s.loaded
+	s.mu.RUnlock()
+	if !loaded {
+		return "", fmt.Errorf("no map loaded")
+	}
+	if in.Info != nil && !in.Info.Lua {
+		return "", ErrLuaOnly
+	}
+	// Preserve-marker peek. Reading the existing war3map.lua under the
+	// source's read path covers both folder + MPQ backed sessions.
+	if src != nil {
+		if b, ok, _ := src.read("war3map.lua"); ok && len(b) > 0 {
+			first := string(b)
+			if i := strings.IndexByte(first, '\n'); i >= 0 {
+				first = first[:i]
+			}
+			if strings.TrimSpace(first) == PreserveScriptMarker {
+				return "", ErrPreserveScript
+			}
+		}
+	}
+	return GenerateLuaScript(in)
+}
+
+// SaveTriggerScript generates the Lua script and writes it to war3map.lua
+// in the session's source. Honors the preserve marker (same as
+// GenerateTriggerScript). Returns the written byte count on success.
+//
+// MPQ-backed sessions short-circuit through the source.write path which
+// returns ErrMPQWriteNotImplemented today; folder-backed sessions write
+// straight to disk.
+func (s *Session) SaveTriggerScript() (int, error) {
+	text, err := s.GenerateTriggerScript()
+	if err != nil {
+		return 0, err
+	}
+	s.mu.RLock()
+	src := s.source
+	s.mu.RUnlock()
+	if src == nil {
+		return 0, fmt.Errorf("no source for writing")
+	}
+	if err := src.write("war3map.lua", []byte(text)); err != nil {
+		return 0, fmt.Errorf("write war3map.lua: %w", err)
+	}
+	return len(text), nil
+}
+
+// TestMap is the full pipeline: Save the rest of the map's dirty files,
+// regenerate + write war3map.lua, then launch WC3 with the map preloaded
+// via internal/wc3launch.LaunchWithMap.
+//
+// Folder-backed sessions can't launch in WC3 directly (the engine wants a
+// packaged .w3x); we surface the wc3launch.ErrMapNotFound error so the UI
+// can render a friendly toast. Calling code is expected to be the editor
+// toolbar "Test Map" button or the MCP triggers.test_map handler.
+func (s *Session) TestMap() error {
+	// 1. Save pending edits to other files (units, doodads, info, terrain,
+	//    gameplay, object mods, triggers wtg/wct). The codegen path doesn't
+	//    flip dirtyTriggers because the GUI tree was the input, not the
+	//    output — but a user who edited a trigger and then clicked Test Map
+	//    expects the changes to be in the in-memory wtg → ALSO on disk.
+	if err := s.Save(); err != nil {
+		return fmt.Errorf("save pending edits: %w", err)
+	}
+	// 2. Regenerate + save the script.
+	if _, err := s.SaveTriggerScript(); err != nil {
+		return fmt.Errorf("regen war3map.lua: %w", err)
+	}
+	// 3. Launch WC3 with the map. Folder-backed sessions error out here
+	//    (LaunchWithMap rejects paths that aren't files); MPQ-backed
+	//    sessions launch the .w3x path stored at Open time.
+	return wc3launch.LaunchWithMap(s.Path())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — global cross-trigger search. Returns a flat list of hits with
+// enough context for the search palette to render + navigate.
+// ---------------------------------------------------------------------------
+
+// TriggerSearchHit is one row in a triggers.search response. TriggerID is
+// the parent trigger's id (for click-to-navigate); Path is the ECA-path
+// inside that trigger (matches the [ec_index, child_index, ...] convention
+// used by the set_param_value mutator); Snippet is a short matched-line
+// preview for the UI.
+type TriggerSearchHit struct {
+	TriggerID   int32  `json:"trigger_id"`
+	TriggerName string `json:"trigger_name"`
+	Kind        string `json:"kind"` // "trigger" | "category" | "variable" | "eca" | "param"
+	Path        []int  `json:"path,omitempty"`
+	ECAName     string `json:"eca_name,omitempty"`
+	Snippet     string `json:"snippet"`
+	Category    string `json:"category,omitempty"`
+}
+
+// SearchTriggers returns up to maxResults fuzzy matches for query across
+// every loaded trigger, category, variable, ECA name, and parameter value.
+// Empty query returns the first maxResults rows by trigger name (so the
+// palette feels populated on first open).
+//
+// Scoring tiers (same shape as ObjectSearchPalette):
+//
+//	1000 = exact match
+//	 500 = prefix match
+//	 300 = name-substring
+//	 100 = ECA-name substring
+//	  50 = param-value substring
+//	  25 = category-name substring
+//
+// Ties broken by trigger name, then ECA path.
+func (s *Session) SearchTriggers(query string, maxResults int) []TriggerSearchHit {
+	if maxResults <= 0 {
+		maxResults = 50
+	}
+	s.mu.RLock()
+	t := s.triggers
+	s.mu.RUnlock()
+	if t == nil {
+		return nil
+	}
+	q := strings.TrimSpace(strings.ToLower(query))
+	type scored struct {
+		hit   TriggerSearchHit
+		score int
+	}
+	var hits []scored
+	add := func(h TriggerSearchHit, score int) {
+		if score <= 0 && q != "" {
+			return
+		}
+		hits = append(hits, scored{hit: h, score: score})
+	}
+
+	// Index of category id → name for the "category" enrichment column on
+	// each hit.
+	catName := map[int32]string{}
+	for _, c := range t.Categories {
+		catName[c.ID] = c.Name
+	}
+
+	scoreText := func(text string) int {
+		if q == "" {
+			return 1
+		}
+		l := strings.ToLower(text)
+		if l == q {
+			return 1000
+		}
+		if strings.HasPrefix(l, q) {
+			return 500
+		}
+		if strings.Contains(l, q) {
+			return 300
+		}
+		return 0
+	}
+
+	for _, c := range t.Categories {
+		score := scoreText(c.Name)
+		if score == 0 {
+			continue
+		}
+		add(TriggerSearchHit{
+			TriggerID:   c.ID,
+			TriggerName: c.Name,
+			Kind:        "category",
+			Snippet:     c.Name,
+		}, score-25)
+	}
+	for _, v := range t.Variables {
+		score := scoreText(v.Name)
+		if score > 0 {
+			add(TriggerSearchHit{
+				TriggerID:   v.ID,
+				TriggerName: v.Name,
+				Kind:        "variable",
+				Snippet:     v.Name + ":" + v.Type,
+			}, score)
+		}
+	}
+	for ti := range t.Triggers {
+		tr := &t.Triggers[ti]
+		// Trigger name match.
+		if score := scoreText(tr.Name); score > 0 {
+			add(TriggerSearchHit{
+				TriggerID:   tr.ID,
+				TriggerName: tr.Name,
+				Kind:        "trigger",
+				Snippet:     tr.Name,
+				Category:    catName[tr.ParentID],
+			}, score)
+		}
+		// Custom-text match (script triggers).
+		if tr.CustomText != "" && q != "" {
+			if strings.Contains(strings.ToLower(tr.CustomText), q) {
+				add(TriggerSearchHit{
+					TriggerID:   tr.ID,
+					TriggerName: tr.Name,
+					Kind:        "eca",
+					Snippet:     snippetFromText(tr.CustomText, q),
+					Category:    catName[tr.ParentID],
+				}, 200)
+			}
+		}
+		// Walk ECAs.
+		walkECAsForSearch(tr.ECAs, nil, func(path []int, e *wtg.ECA) {
+			if score := scoreText(e.Name); score > 0 {
+				add(TriggerSearchHit{
+					TriggerID:   tr.ID,
+					TriggerName: tr.Name,
+					Kind:        "eca",
+					Path:        append([]int(nil), path...),
+					ECAName:     e.Name,
+					Snippet:     e.Name,
+					Category:    catName[tr.ParentID],
+				}, score/2) // half-weight because ECA names appear in lots of triggers
+			}
+			for pi, p := range e.Parameters {
+				if p.Value == "" || q == "" {
+					continue
+				}
+				if !strings.Contains(strings.ToLower(p.Value), q) {
+					continue
+				}
+				add(TriggerSearchHit{
+					TriggerID:   tr.ID,
+					TriggerName: tr.Name,
+					Kind:        "param",
+					Path:        append([]int(nil), path...),
+					ECAName:     e.Name,
+					Snippet:     fmt.Sprintf("%s arg[%d]=%s", e.Name, pi, p.Value),
+					Category:    catName[tr.ParentID],
+				}, 50)
+			}
+		})
+	}
+
+	// Stable sort: score desc, then trigger name asc, then path length asc.
+	// We do an insertion-style sort to avoid pulling in `sort` for small N.
+	// In practice maxResults caps the visible output anyway.
+	for i := 1; i < len(hits); i++ {
+		j := i
+		for j > 0 {
+			a, b := hits[j-1], hits[j]
+			if a.score < b.score ||
+				(a.score == b.score && a.hit.TriggerName > b.hit.TriggerName) {
+				hits[j-1], hits[j] = b, a
+				j--
+			} else {
+				break
+			}
+		}
+	}
+	if len(hits) > maxResults {
+		hits = hits[:maxResults]
+	}
+	out := make([]TriggerSearchHit, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.hit)
+	}
+	return out
+}
+
+// snippetFromText finds the first match of q in body and returns a
+// trimmed ~80-char window centered on the match. Case-insensitive match
+// but case-preserving snippet.
+func snippetFromText(body, q string) string {
+	idx := strings.Index(strings.ToLower(body), q)
+	if idx < 0 {
+		if len(body) > 80 {
+			return strings.TrimSpace(body[:80]) + "…"
+		}
+		return body
+	}
+	start := idx - 30
+	if start < 0 {
+		start = 0
+	}
+	end := idx + len(q) + 50
+	if end > len(body) {
+		end = len(body)
+	}
+	out := body[start:end]
+	if start > 0 {
+		out = "…" + out
+	}
+	if end < len(body) {
+		out = out + "…"
+	}
+	return strings.ReplaceAll(out, "\n", " ")
+}
+
+// walkECAsForSearch is a depth-first walk that invokes fn for each ECA
+// (top-level + nested children of magic ECAs). path tracks the [eca_index,
+// child_index, ...] address so callers can navigate back to the row.
+func walkECAsForSearch(ecas []wtg.ECA, prefix []int, fn func(path []int, e *wtg.ECA)) {
+	for i := range ecas {
+		path := append(append([]int(nil), prefix...), i)
+		fn(path, &ecas[i])
+		if len(ecas[i].Children) > 0 {
+			walkECAsForSearch(ecas[i].Children, path, fn)
+		}
 	}
 }
 
