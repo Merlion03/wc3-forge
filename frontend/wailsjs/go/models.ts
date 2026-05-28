@@ -142,6 +142,194 @@ export namespace main {
 	        this.map_path = source["map_path"];
 	    }
 	}
+	export class CommandButtonEntry {
+	    path: string;
+	    name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CommandButtonEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.name = source["name"];
+	    }
+	}
+	export class UnitObjectField {
+	    id: string;
+	    field: string;
+	    display_name: string;
+	    category: string;
+	    type: string;
+	    value: string;
+	    display: string;
+	    display_raw: string;
+	    overridden: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new UnitObjectField(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.field = source["field"];
+	        this.display_name = source["display_name"];
+	        this.category = source["category"];
+	        this.type = source["type"];
+	        this.value = source["value"];
+	        this.display = source["display"];
+	        this.display_raw = source["display_raw"];
+	        this.overridden = source["overridden"];
+	    }
+	}
+	export class UnitObjectDetail {
+	    id: string;
+	    name: string;
+	    base_id?: string;
+	    is_custom: boolean;
+	    is_edited: boolean;
+	    race: string;
+	    kind: string;
+	    icon_art: string;
+	    model_path: string;
+	    model_fallbacks: string[];
+	    fields: UnitObjectField[];
+	
+	    static createFrom(source: any = {}) {
+	        return new UnitObjectDetail(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.base_id = source["base_id"];
+	        this.is_custom = source["is_custom"];
+	        this.is_edited = source["is_edited"];
+	        this.race = source["race"];
+	        this.kind = source["kind"];
+	        this.icon_art = source["icon_art"];
+	        this.model_path = source["model_path"];
+	        this.model_fallbacks = source["model_fallbacks"];
+	        this.fields = this.convertValues(source["fields"], UnitObjectField);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ConvertObjectResult {
+	    id: string;
+	    detail?: UnitObjectDetail;
+	
+	    static createFrom(source: any = {}) {
+	        return new ConvertObjectResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.detail = this.convertValues(source["detail"], UnitObjectDetail);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class CreateCustomObjectResult {
+	    id: string;
+	    detail?: UnitObjectDetail;
+	
+	    static createFrom(source: any = {}) {
+	        return new CreateCustomObjectResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.detail = this.convertValues(source["detail"], UnitObjectDetail);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class CreateCustomUnitResult {
+	    id: string;
+	    detail?: UnitObjectDetail;
+	
+	    static createFrom(source: any = {}) {
+	        return new CreateCustomUnitResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.detail = this.convertValues(source["detail"], UnitObjectDetail);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class DoodadDTO {
 	    creation_number: number;
 	    type_id: string;
@@ -184,6 +372,34 @@ export namespace main {
 	        this.section = source["section"];
 	        this.key = source["key"];
 	        this.value = source["value"];
+	    }
+	}
+	export class LabeledOption {
+	    key: string;
+	    label: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LabeledOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.label = source["label"];
+	    }
+	}
+	export class LoadingScreenOption {
+	    index: number;
+	    label: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LoadingScreenOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.label = source["label"];
 	    }
 	}
 	export class MapStatus {
@@ -515,84 +731,7 @@ export namespace main {
 	        this.gold_amount = source["gold_amount"];
 	    }
 	}
-	export class UnitObjectField {
-	    id: string;
-	    field: string;
-	    display_name: string;
-	    category: string;
-	    type: string;
-	    value: string;
-	    display: string;
-	    display_raw: string;
-	    overridden: boolean;
-
-	    static createFrom(source: any = {}) {
-	        return new UnitObjectField(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.field = source["field"];
-	        this.display_name = source["display_name"];
-	        this.category = source["category"];
-	        this.type = source["type"];
-	        this.value = source["value"];
-	        this.display = source["display"];
-	        this.display_raw = source["display_raw"];
-	        this.overridden = source["overridden"];
-	    }
-	}
-	export class UnitObjectDetail {
-	    id: string;
-	    name: string;
-	    base_id?: string;
-	    is_custom: boolean;
-	    is_edited: boolean;
-	    race: string;
-	    kind: string;
-	    icon_art: string;
-	    model_path: string;
-	    model_fallbacks: string[];
-	    fields: UnitObjectField[];
 	
-	    static createFrom(source: any = {}) {
-	        return new UnitObjectDetail(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.name = source["name"];
-	        this.base_id = source["base_id"];
-	        this.is_custom = source["is_custom"];
-	        this.is_edited = source["is_edited"];
-	        this.race = source["race"];
-	        this.kind = source["kind"];
-	        this.icon_art = source["icon_art"];
-	        this.model_path = source["model_path"];
-	        this.model_fallbacks = source["model_fallbacks"];
-	        this.fields = this.convertValues(source["fields"], UnitObjectField);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
 	
 	export class UnitObjectListEntity {
 	    id: string;

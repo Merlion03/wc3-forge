@@ -114,6 +114,12 @@ type Flags struct {
 	ForceMinZoom                       bool // 0x400000
 }
 
+// DecodeFlags re-derives the named-boolean fields of Flags from its Raw bits.
+// Exported so callers that mutate Raw (e.g. ApplyInfoUpdates flipping a single
+// option-tab checkbox) can keep the named bools in sync without re-implementing
+// the bit→name mapping.
+func DecodeFlags(raw uint32) Flags { return decodeFlags(raw) }
+
 func decodeFlags(raw uint32) Flags {
 	bit := func(mask uint32) bool { return raw&mask != 0 }
 	return Flags{

@@ -336,13 +336,55 @@ func handleMapInfoSet(params json.RawMessage) (any, error) {
 // unknown keys are silently skipped (counted as zero); callers that want
 // strict validation should pre-validate the map.
 //
-// Key set (v1 — Description/General tab subset of the Map Info Editor):
+// Wire keys (grouped by Map Info Editor tab):
 //
-//	"name"             string  — map title
-//	"author"           string  — map author
-//	"description"      string  — long description
-//	"suggestedPlayers" string  — display string, e.g. "2v2v2v2"
-//	"lua"              bool    — primary script is Lua (v28+ marker)
+//	Description:
+//	  "name"                       string
+//	  "author"                     string
+//	  "description"                string
+//	  "suggestedPlayers"           string
+//
+//	Loading Screen:
+//	  "loadingScreenNumber"        int    (-1 for default/imported, ≥0 for campaign)
+//	  "loadingScreenModel"         string (imported .mdx path; "" for default/campaign)
+//	  "loadingScreenText"          string
+//	  "loadingScreenTitle"         string
+//	  "loadingScreenSubtitle"      string
+//
+//	Options (terrain/water/fog/flag bits):
+//	  "meleeMap"                   bool   (Flags 0x000004)
+//	  "hideMinimapPreview"         bool   (Flags 0x000001)
+//	  "maskedAreaPartiallyVisible" bool   (Flags 0x000010)
+//	  "cliffShoreWaves"            bool   (Flags 0x000800)
+//	  "rollingShoreWaves"          bool   (Flags 0x001000)
+//	  "itemClassification"         bool   (Flags 0x008000)
+//	  "waterTinting"               bool   (Flags 0x010000)
+//	  "waterColor"                 {r,g,b[,a]}  uint8 components
+//	  "fogStyle"                   int    (0=off)
+//	  "fogStartZ"                  number
+//	  "fogEndZ"                    number
+//	  "fogDensity"                 number
+//	  "fogColor"                   {r,g,b[,a]}
+//
+//	Lighting & Weather:
+//	  "weatherID"                  string (FourCC, e.g. "RAhr"; "" disables)
+//	  "customSoundEnv"             string ("" disables)
+//	  "customLightTileset"         string (single tileset letter, e.g. "L"; "" disables)
+//
+//	Size & Camera Bounds:
+//	  "cameraComplements"          {left,right,bottom,top}  int32 tile counts
+//
+//	Advanced:
+//	  "lua"                        bool   (v28+ marker)
+//	  "gameDataSet"                int
+//	  "supportedModes"             uint32
+//	  "gameDataVersion"            uint32
+//	  "camDistanceDefault"         uint32
+//	  "camDistanceMax"             uint32
+//	  "camDistanceMin"             uint32
+//	  "forceDefaultZoom"           bool   (Flags 0x100000)
+//	  "forceMaxZoom"               bool   (Flags 0x200000)
+//	  "forceMinZoom"               bool   (Flags 0x400000)
 //
 // Adding a field: append a case to the switch + document the wire key here.
 //
@@ -355,8 +397,21 @@ func handleMapInfoSet(params json.RawMessage) (any, error) {
 // See encode.go top-of-file for the full Option A vs Option B discussion.
 func ApplyInfoUpdates(info *w3i.Info, updates map[string]any) int {
 	var changed int
+	// flagsDirty tracks whether we touched Flags.Raw so we only re-decode the
+	// named-bool mirror once at the end (each named bool is just a cached
+	// view of one bit of Raw — encode.go writes Raw directly).
+	flagsDirty := false
+	setBit := func(mask uint32, on bool) {
+		if on {
+			info.Flags.Raw |= mask
+		} else {
+			info.Flags.Raw &^= mask
+		}
+		flagsDirty = true
+	}
 	for key, raw := range updates {
 		switch key {
+		// --- Description ---
 		case "name":
 			if s, ok := raw.(string); ok {
 				info.Name = s
@@ -377,14 +432,345 @@ func ApplyInfoUpdates(info *w3i.Info, updates map[string]any) int {
 				info.SuggestedPlayers = s
 				changed++
 			}
+
+		// --- Loading Screen ---
+		case "loadingScreenNumber":
+			if n, ok := asInt32(raw); ok {
+				info.LoadingScreen.Number = n
+				changed++
+			}
+		case "loadingScreenModel":
+			if s, ok := raw.(string); ok {
+				info.LoadingScreen.Model = s
+				changed++
+			}
+		case "loadingScreenText":
+			if s, ok := raw.(string); ok {
+				info.LoadingScreen.Text = s
+				changed++
+			}
+		case "loadingScreenTitle":
+			if s, ok := raw.(string); ok {
+				info.LoadingScreen.Title = s
+				changed++
+			}
+		case "loadingScreenSubtitle":
+			if s, ok := raw.(string); ok {
+				info.LoadingScreen.Subtitle = s
+				changed++
+			}
+
+		// --- Options: flag-bit booleans ---
+		case "meleeMap":
+			if b, ok := raw.(bool); ok {
+				setBit(0x000004, b)
+				changed++
+			}
+		case "hideMinimapPreview":
+			if b, ok := raw.(bool); ok {
+				setBit(0x000001, b)
+				changed++
+			}
+		case "maskedAreaPartiallyVisible":
+			if b, ok := raw.(bool); ok {
+				setBit(0x000010, b)
+				changed++
+			}
+		case "cliffShoreWaves":
+			if b, ok := raw.(bool); ok {
+				setBit(0x000800, b)
+				changed++
+			}
+		case "rollingShoreWaves":
+			if b, ok := raw.(bool); ok {
+				setBit(0x001000, b)
+				changed++
+			}
+		case "itemClassification":
+			if b, ok := raw.(bool); ok {
+				setBit(0x008000, b)
+				changed++
+			}
+		case "waterTinting":
+			if b, ok := raw.(bool); ok {
+				setBit(0x010000, b)
+				changed++
+			}
+
+		// --- Options: water + fog ---
+		case "waterColor":
+			if c, ok := asColor(raw, info.WaterColor); ok {
+				info.WaterColor = c
+				changed++
+			}
+		case "fogStyle":
+			if n, ok := asInt32(raw); ok {
+				info.Fog.Style = n
+				changed++
+			}
+		case "fogStartZ":
+			if f, ok := asFloat32(raw); ok {
+				info.Fog.StartZ = f
+				changed++
+			}
+		case "fogEndZ":
+			if f, ok := asFloat32(raw); ok {
+				info.Fog.EndZ = f
+				changed++
+			}
+		case "fogDensity":
+			if f, ok := asFloat32(raw); ok {
+				info.Fog.Density = f
+				changed++
+			}
+		case "fogColor":
+			if c, ok := asColor(raw, info.Fog.Color); ok {
+				info.Fog.Color = c
+				changed++
+			}
+
+		// --- Lighting & Weather ---
+		case "weatherID":
+			// Wire form: 4-char ASCII FourCC ("RAhr") packed little-endian
+			// into int32, OR empty string to disable. Anything else: skip.
+			if s, ok := raw.(string); ok {
+				info.WeatherID = packFourCCToInt32(s)
+				changed++
+			}
+		case "customSoundEnv":
+			if s, ok := raw.(string); ok {
+				info.CustomSoundEnv = s
+				changed++
+			}
+		case "customLightTileset":
+			// Wire form: single tileset character ("L", "A", ...), or "" /
+			// "\0" to disable (stored as byte 0). HiveWE stores byte 0 to
+			// mean "use the terrain's tileset" and reads back as null char.
+			if s, ok := raw.(string); ok {
+				var b byte
+				if len(s) > 0 {
+					b = s[0]
+				}
+				info.CustomLightTileset = b
+				changed++
+			}
+
+		// --- Size & Camera Bounds ---
+		case "cameraComplements":
+			if v, ok := asIVec4(raw); ok {
+				info.CameraComplements = v
+				changed++
+			}
+
+		// --- Advanced ---
 		case "lua":
 			if b, ok := raw.(bool); ok {
 				info.Lua = b
 				changed++
 			}
+		case "gameDataSet":
+			if n, ok := asInt32(raw); ok {
+				info.GameDataSet = n
+				changed++
+			}
+		case "supportedModes":
+			if n, ok := asUint32(raw); ok {
+				info.SupportedModes = n
+				changed++
+			}
+		case "gameDataVersion":
+			if n, ok := asUint32(raw); ok {
+				info.GameDataVersion = n
+				changed++
+			}
+		case "camDistanceDefault":
+			if n, ok := asUint32(raw); ok {
+				info.CamDistance.Default = n
+				changed++
+			}
+		case "camDistanceMax":
+			if n, ok := asUint32(raw); ok {
+				info.CamDistance.Max = n
+				changed++
+			}
+		case "camDistanceMin":
+			if n, ok := asUint32(raw); ok {
+				info.CamDistance.Min = n
+				changed++
+			}
+		case "forceDefaultZoom":
+			if b, ok := raw.(bool); ok {
+				setBit(0x100000, b)
+				changed++
+			}
+		case "forceMaxZoom":
+			if b, ok := raw.(bool); ok {
+				setBit(0x200000, b)
+				changed++
+			}
+		case "forceMinZoom":
+			if b, ok := raw.(bool); ok {
+				setBit(0x400000, b)
+				changed++
+			}
 		}
 	}
+	if flagsDirty {
+		info.Flags = w3i.DecodeFlags(info.Flags.Raw)
+	}
 	return changed
+}
+
+// asInt32 coerces a JSON-decoded number (or numeric string) to int32. Returns
+// false on type mismatch so the field is silently skipped by the caller, per
+// the "lenient walker" contract of ApplyInfoUpdates.
+func asInt32(raw any) (int32, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return int32(v), true
+	case int:
+		return int32(v), true
+	case int32:
+		return v, true
+	case int64:
+		return int32(v), true
+	}
+	return 0, false
+}
+
+func asUint32(raw any) (uint32, bool) {
+	switch v := raw.(type) {
+	case float64:
+		if v < 0 {
+			return 0, false
+		}
+		return uint32(v), true
+	case int:
+		if v < 0 {
+			return 0, false
+		}
+		return uint32(v), true
+	case int32:
+		if v < 0 {
+			return 0, false
+		}
+		return uint32(v), true
+	case int64:
+		if v < 0 {
+			return 0, false
+		}
+		return uint32(v), true
+	case uint32:
+		return v, true
+	}
+	return 0, false
+}
+
+func asFloat32(raw any) (float32, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return float32(v), true
+	case int:
+		return float32(v), true
+	case int32:
+		return float32(v), true
+	case int64:
+		return float32(v), true
+	}
+	return 0, false
+}
+
+// asColor reads {r,g,b,a?} uint8 component values from a JSON-decoded map.
+// Missing alpha defaults to the prior value's alpha so a Reforged .w3i that
+// happens to ship a non-255 alpha isn't silently clobbered. Returns false on
+// the wrong shape so the caller can skip the update.
+func asColor(raw any, prior w3i.Color) (w3i.Color, bool) {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return w3i.Color{}, false
+	}
+	get := func(key string) (uint8, bool) {
+		v, ok := m[key]
+		if !ok {
+			return 0, false
+		}
+		switch n := v.(type) {
+		case float64:
+			if n < 0 {
+				return 0, true
+			}
+			if n > 255 {
+				return 255, true
+			}
+			return uint8(n), true
+		}
+		return 0, false
+	}
+	r, okR := get("r")
+	g, okG := get("g")
+	b, okB := get("b")
+	if !okR || !okG || !okB {
+		return w3i.Color{}, false
+	}
+	a, okA := get("a")
+	if !okA {
+		a = prior.A
+	}
+	return w3i.Color{R: r, G: g, B: b, A: a}, true
+}
+
+func asIVec4(raw any) (w3i.IVec4, bool) {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return w3i.IVec4{}, false
+	}
+	get := func(key string) (int32, bool) {
+		v, ok := m[key]
+		if !ok {
+			return 0, false
+		}
+		return asInt32(v)
+	}
+	// HiveWE's w3i CameraComplements convention: A=left, B=right, C=bottom,
+	// D=top. Keep that mapping on the wire so MCP and UI both agree.
+	l, ok1 := get("left")
+	r, ok2 := get("right")
+	b, ok3 := get("bottom")
+	t, ok4 := get("top")
+	if !ok1 || !ok2 || !ok3 || !ok4 {
+		return w3i.IVec4{}, false
+	}
+	return w3i.IVec4{A: l, B: r, C: b, D: t}, true
+}
+
+// packFourCCToInt32 packs the first 4 bytes of s into a little-endian int32,
+// matching HiveWE's `*reinterpret_cast<int*>(name.data())` trick for the
+// weather_id field. Empty / short strings zero-pad on the right; values
+// longer than 4 chars are truncated.
+func packFourCCToInt32(s string) int32 {
+	var b [4]byte
+	for i := 0; i < 4 && i < len(s); i++ {
+		b[i] = s[i]
+	}
+	return int32(uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24)
+}
+
+// Int32ToFourCC is the inverse of packFourCCToInt32 — exported so the Wails
+// surface can expose the WeatherID as a human-readable FourCC. Trailing nulls
+// (the "no weather" case where the field is zero) are trimmed so the JS side
+// gets "" rather than four NUL bytes.
+func Int32ToFourCC(v int32) string {
+	if v == 0 {
+		return ""
+	}
+	u := uint32(v)
+	b := []byte{byte(u), byte(u >> 8), byte(u >> 16), byte(u >> 24)}
+	// Trim trailing nulls in case the wire value was short.
+	end := len(b)
+	for end > 0 && b[end-1] == 0 {
+		end--
+	}
+	return string(b[:end])
 }
 
 // unitsListResponse mirrors the C++ fork's shape: each entity is rendered with
