@@ -53,6 +53,15 @@ func registerTriggerHandlers(reg func(method string, h bridge.Handler)) {
 	reg("triggers.set_description", handleTriggersSetDescription)
 	reg("triggers.set_variable", handleTriggersSetVariable)
 	reg("triggers.set_map_header_script", handleTriggersSetMapHeaderScript)
+	// Phase 2b1 — ECA-list mutation. add_eca/delete_eca/move_eca operate on the
+	// per-trigger ECA tree; set_param_value writes one Parameter slot inside an
+	// existing ECA. All return the standard triggerMutationResponse with the
+	// updated trigger's detail so the frontend can repaint without a 2nd fetch.
+	reg("triggers.add_eca", handleTriggersAddECA)
+	reg("triggers.delete_eca", handleTriggersDeleteECA)
+	reg("triggers.move_eca", handleTriggersMoveECA)
+	reg("triggers.set_eca_enabled", handleTriggersSetECAEnabled)
+	reg("triggers.set_param_value", handleTriggersSetParamValue)
 }
 
 // TriggerTreeNode is the one-shot tree-shape DTO. The frontend stitches
@@ -265,6 +274,27 @@ type TriggerFunctionMeta struct {
 	Hint               string   `json:"hint,omitempty"`
 }
 
+// TriggerPresetMeta is one row from [TriggerParams]. Mirrors wtg.Preset
+// but lives in handlers_triggers.go so the wire payload stays insulated
+// from upstream struct changes.
+type TriggerPresetMeta struct {
+	Name        string `json:"name"`         // the key (e.g. "Player00")
+	Type        string `json:"type"`         // the type this preset is a value FOR
+	Value       string `json:"value"`        // JASS literal
+	DisplayName string `json:"display_name"` // editor label (often WESTRING_*)
+}
+
+// TriggerTypeMeta is one row from [TriggerTypes]. BaseType is the alias root
+// (empty for atomic types); CanBeGlobal / CanCompare are the per-type
+// constraints HiveWE honors when populating dropdowns.
+type TriggerTypeMeta struct {
+	Name        string `json:"name"`
+	BaseType    string `json:"base_type,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	CanBeGlobal bool   `json:"can_be_global,omitempty"`
+	CanCompare  bool   `json:"can_compare,omitempty"`
+}
+
 // TriggerFunctionsMetaResponse is the triggers.functions_meta payload —
 // every function-shaped entry in TriggerData.txt, plus the type/category
 // dictionaries the UI needs to render labels (resolve preset values, look
@@ -278,8 +308,13 @@ type TriggerFunctionsMetaResponse struct {
 	// would happen if we had that wired — for 1a we expose the raw label).
 	Categories map[string]string `json:"categories,omitempty"`
 	// Types maps trigger-variable-type name ("integer", "unit", "abilcode")
-	// → the type's display label.
+	// → the type's display label. Kept for backward compatibility with the
+	// Phase 1a payload; TypeMeta carries the richer info Phase 2b1 needs.
 	Types map[string]string `json:"types,omitempty"`
+	// Phase 2b1 additions — picker/param-editor data so the frontend can
+	// build dropdowns without a second round-trip per click.
+	Presets  []TriggerPresetMeta `json:"presets,omitempty"`
+	TypeMeta []TriggerTypeMeta   `json:"type_meta,omitempty"`
 }
 
 // handleTriggersFunctionsMeta returns the full TriggerData.txt vocabulary,
@@ -385,7 +420,17 @@ func triggerFunctionsMetaCached() *TriggerFunctionsMetaResponse {
 		}
 	}
 	// Types ([TriggerTypes]) — name → display string (col 3 per the txt
-	// comment block).
+	// comment block). Populates both the legacy `Types` map and the richer
+	// `TypeMeta` array.
+	for _, tt := range td.TriggerTypes() {
+		resp.TypeMeta = append(resp.TypeMeta, TriggerTypeMeta{
+			Name:        tt.Name,
+			BaseType:    tt.BaseType,
+			DisplayName: tt.DisplayName,
+			CanBeGlobal: tt.CanBeGlobal,
+			CanCompare:  tt.CanCompare,
+		})
+	}
 	if rows, ok := td.Sections["TriggerTypes"]; ok {
 		for key, tokens := range rows {
 			if len(key) > 0 && key[0] == '_' {
@@ -397,6 +442,27 @@ func triggerFunctionsMetaCached() *TriggerFunctionsMetaResponse {
 			} else if len(tokens) > 0 {
 				resp.Types[key] = tokens[0]
 			}
+		}
+	}
+	// Presets ([TriggerParams]) — every row, untyped at the wire level. The
+	// frontend filters by Type at render time. Keeps the payload one large
+	// transferable rather than N per-type requests.
+	if rows, ok := td.Sections["TriggerParams"]; ok {
+		for key, toks := range rows {
+			if len(key) > 0 && key[0] == '_' {
+				continue
+			}
+			if len(toks) < 2 {
+				continue
+			}
+			pm := TriggerPresetMeta{Name: key, Type: toks[1]}
+			if len(toks) >= 3 {
+				pm.Value = toks[2]
+			}
+			if len(toks) >= 4 {
+				pm.DisplayName = toks[3]
+			}
+			resp.Presets = append(resp.Presets, pm)
 		}
 	}
 	triggerFunctionsMetaResp = resp
@@ -704,4 +770,101 @@ func handleTriggersSetMapHeaderScript(params json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return buildMutationResponse(0), nil
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2b1 — ECA / param mutation handlers. Each maps directly onto a
+// Session mutator. eca_path is a JSON array of integer child indices so
+// 2b2 can address nested ECAs without breaking the wire shape.
+// ---------------------------------------------------------------------------
+
+type triggersAddECAParams struct {
+	TriggerID int32  `json:"trigger_id"`
+	ECAType   int    `json:"eca_type"` // wtg.ECAType (0=event, 1=condition, 2=action, 3=call)
+	Name      string `json:"name"`
+	Position  *int   `json:"position,omitempty"` // nil → append
+}
+
+func handleTriggersAddECA(params json.RawMessage) (any, error) {
+	var p triggersAddECAParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	pos := -1
+	if p.Position != nil {
+		pos = *p.Position
+	}
+	if _, err := Current.AddECA(p.TriggerID, wtg.ECAType(p.ECAType), p.Name, pos); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.TriggerID), nil
+}
+
+type triggersECAPathParams struct {
+	TriggerID int32 `json:"trigger_id"`
+	ECAPath   []int `json:"eca_path"`
+}
+
+func handleTriggersDeleteECA(params json.RawMessage) (any, error) {
+	var p triggersECAPathParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.DeleteECA(p.TriggerID, p.ECAPath); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.TriggerID), nil
+}
+
+type triggersMoveECAParams struct {
+	TriggerID   int32 `json:"trigger_id"`
+	ECAPath     []int `json:"eca_path"`
+	NewPosition int   `json:"new_position"`
+}
+
+func handleTriggersMoveECA(params json.RawMessage) (any, error) {
+	var p triggersMoveECAParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.MoveECA(p.TriggerID, p.ECAPath, p.NewPosition); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.TriggerID), nil
+}
+
+type triggersSetECAEnabledParams struct {
+	TriggerID int32 `json:"trigger_id"`
+	ECAPath   []int `json:"eca_path"`
+	Enabled   bool  `json:"enabled"`
+}
+
+func handleTriggersSetECAEnabled(params json.RawMessage) (any, error) {
+	var p triggersSetECAEnabledParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SetECAEnabled(p.TriggerID, p.ECAPath, p.Enabled); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.TriggerID), nil
+}
+
+type triggersSetParamValueParams struct {
+	TriggerID  int32  `json:"trigger_id"`
+	ECAPath    []int  `json:"eca_path"`
+	ParamIndex int    `json:"param_index"`
+	Value      string `json:"value"`
+	ParamType  int    `json:"param_type"` // wtg.ParamType (0=preset, 1=variable, 3=string)
+}
+
+func handleTriggersSetParamValue(params json.RawMessage) (any, error) {
+	var p triggersSetParamValueParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SetParamValue(p.TriggerID, p.ECAPath, p.ParamIndex, p.Value, wtg.ParamType(p.ParamType)); err != nil {
+		return nil, err
+	}
+	return buildMutationResponse(p.TriggerID), nil
 }

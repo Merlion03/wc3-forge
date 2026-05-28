@@ -147,12 +147,34 @@ type TriggerFunctionMetaDTO struct {
 	Hint               string   `json:"hint,omitempty"`
 }
 
+// TriggerPresetMetaDTO mirrors forge.TriggerPresetMeta — one [TriggerParams]
+// row exposed to the frontend's ParamEditor for preset/enum dropdowns.
+type TriggerPresetMetaDTO struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Value       string `json:"value"`
+	DisplayName string `json:"display_name"`
+}
+
+// TriggerTypeMetaDTO mirrors forge.TriggerTypeMeta — one [TriggerTypes] row
+// with the BaseType alias chain + per-type capability flags the frontend
+// uses to decide which editor variant to show for a param.
+type TriggerTypeMetaDTO struct {
+	Name        string `json:"name"`
+	BaseType    string `json:"base_type,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	CanBeGlobal bool   `json:"can_be_global,omitempty"`
+	CanCompare  bool   `json:"can_compare,omitempty"`
+}
+
 // TriggerFunctionsMetaDTO is the full TriggerData.txt vocabulary the frontend
 // needs to render labels client-side. Cached for the process lifetime.
 type TriggerFunctionsMetaDTO struct {
 	Functions  []TriggerFunctionMetaDTO `json:"functions"`
 	Categories map[string]string        `json:"categories,omitempty"`
 	Types      map[string]string        `json:"types,omitempty"`
+	Presets    []TriggerPresetMetaDTO   `json:"presets,omitempty"`
+	TypeMeta   []TriggerTypeMetaDTO     `json:"type_meta,omitempty"`
 }
 
 // GetTriggerFunctionsMeta returns the cached TriggerData.txt vocabulary.
@@ -181,6 +203,20 @@ func (a *App) GetTriggerFunctionsMeta() *TriggerFunctionsMetaDTO {
 			Category:           f.Category,
 			ScriptName:         f.ScriptName,
 			Hint:               f.Hint,
+		})
+	}
+	for _, p := range resp.Presets {
+		out.Presets = append(out.Presets, TriggerPresetMetaDTO{
+			Name: p.Name, Type: p.Type, Value: p.Value, DisplayName: p.DisplayName,
+		})
+	}
+	for _, tm := range resp.TypeMeta {
+		out.TypeMeta = append(out.TypeMeta, TriggerTypeMetaDTO{
+			Name:        tm.Name,
+			BaseType:    tm.BaseType,
+			DisplayName: tm.DisplayName,
+			CanBeGlobal: tm.CanBeGlobal,
+			CanCompare:  tm.CanCompare,
 		})
 	}
 	return out
@@ -391,4 +427,57 @@ func (a *App) SetMapHeaderScript(content string) (TriggerMutationResultDTO, erro
 		return TriggerMutationResultDTO{}, err
 	}
 	return a.buildTriggerMutationResult(0), nil
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2b1 — ECA / param mutation Wails wrappers. The picker / param-editor
+// frontend components call these; each is a thin dispatch into a Session
+// mutator and returns the standard mutation-result DTO so the dialog can
+// repaint without a follow-up fetch.
+// ---------------------------------------------------------------------------
+
+// AddTriggerECA appends or inserts a new ECA. ecaType is an int because Wails
+// doesn't preserve type-aliased uint32s cleanly across the JS boundary; the
+// frontend uses 0/1/2/3 for event/condition/action/call. position < 0 means
+// "append".
+func (a *App) AddTriggerECA(triggerID int32, ecaType int, name string, position int) (TriggerMutationResultDTO, error) {
+	if _, err := forge.Current.AddECA(triggerID, wtg.ECAType(ecaType), name, position); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(triggerID), nil
+}
+
+// DeleteTriggerECA removes the ECA at ecaPath (length-1 for top-level).
+func (a *App) DeleteTriggerECA(triggerID int32, ecaPath []int) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.DeleteECA(triggerID, ecaPath); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(triggerID), nil
+}
+
+// MoveTriggerECA reorders the ECA at ecaPath within its parent slice to
+// newPosition (post-removal target index).
+func (a *App) MoveTriggerECA(triggerID int32, ecaPath []int, newPosition int) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.MoveECA(triggerID, ecaPath, newPosition); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(triggerID), nil
+}
+
+// SetTriggerECAEnabled toggles the per-ECA Enabled flag.
+func (a *App) SetTriggerECAEnabled(triggerID int32, ecaPath []int, enabled bool) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetECAEnabled(triggerID, ecaPath, enabled); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(triggerID), nil
+}
+
+// SetTriggerParamValue writes one Parameter slot of an existing ECA. paramType
+// is an int (0=preset, 1=variable, 3=string) — the frontend's ParamEditor
+// branches on the slot's declared type before deciding which paramType to pass.
+func (a *App) SetTriggerParamValue(triggerID int32, ecaPath []int, paramIndex int, value string, paramType int) (TriggerMutationResultDTO, error) {
+	if err := forge.Current.SetParamValue(triggerID, ecaPath, paramIndex, value, wtg.ParamType(paramType)); err != nil {
+		return TriggerMutationResultDTO{}, err
+	}
+	return a.buildTriggerMutationResult(triggerID), nil
 }
