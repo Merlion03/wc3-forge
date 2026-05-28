@@ -250,9 +250,9 @@
   }
   .osp-panel {
     width: min(720px, 90vw);
-    background: rgb(var(--popover));
-    color: rgb(var(--popover-foreground));
-    border: 1px solid rgb(var(--border));
+    background: var(--popover);
+    color: var(--popover-foreground);
+    border: 1px solid var(--border);
     border-radius: 6px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
     display: flex;
@@ -268,18 +268,18 @@
     color: inherit;
     font-size: 0.9rem;
     outline: none;
-    border-bottom: 1px solid rgb(var(--border));
+    border-bottom: 1px solid var(--border);
   }
   .osp-status {
     padding: 12px;
-    color: rgb(var(--muted-foreground));
+    color: var(--muted-foreground);
     font-size: 0.85rem;
   }
   .osp-meta {
     padding: 6px 12px;
     font-size: 0.7rem;
-    color: rgb(var(--muted-foreground));
-    border-bottom: 1px solid rgb(var(--border));
+    color: var(--muted-foreground);
+    border-bottom: 1px solid var(--border);
   }
   .osp-list {
     margin: 0;
@@ -300,10 +300,10 @@
     text-align: left;
     color: inherit;
     font-size: 0.8rem;
-    border-bottom: 1px solid rgb(var(--border) / 0.3);
+    border-bottom: 1px solid color-mix(in oklch, var(--border) 30%, transparent);
   }
   .osp-row-active {
-    background: rgb(var(--accent));
+    background: var(--accent);
   }
   .osp-kind {
     display: inline-flex;
@@ -311,19 +311,19 @@
     justify-content: center;
     width: 22px;
     height: 22px;
-    background: rgb(var(--primary) / 0.18);
-    color: rgb(var(--primary-foreground));
+    background: color-mix(in oklch, var(--primary) 18%, transparent);
+    color: var(--primary-foreground);
     font-family: var(--font-mono, monospace);
     font-size: 0.7rem;
     border-radius: 3px;
   }
   .osp-id {
     font-size: 0.7rem;
-    color: rgb(var(--muted-foreground));
+    color: var(--muted-foreground);
   }
   .osp-cat {
     font-size: 0.7rem;
-    color: rgb(var(--muted-foreground));
+    color: var(--muted-foreground);
     max-width: 160px;
   }
   .osp-badge {

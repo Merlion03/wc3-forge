@@ -183,9 +183,9 @@
   }
   .tsp-panel {
     width: min(820px, 92vw);
-    background: rgb(var(--popover, 24 24 27));
-    color: rgb(var(--popover-foreground, 244 244 245));
-    border: 1px solid rgb(var(--border, 63 63 70));
+    background: var(--popover);
+    color: var(--popover-foreground);
+    border: 1px solid var(--border);
     border-radius: 6px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
     display: flex;
@@ -201,18 +201,18 @@
     color: inherit;
     font-size: 0.9rem;
     outline: none;
-    border-bottom: 1px solid rgb(var(--border, 63 63 70));
+    border-bottom: 1px solid var(--border);
   }
   .tsp-status {
     padding: 12px;
-    color: rgb(var(--muted-foreground, 161 161 170));
+    color: var(--muted-foreground);
     font-size: 0.85rem;
   }
   .tsp-meta {
     padding: 6px 12px;
     font-size: 0.7rem;
-    color: rgb(var(--muted-foreground, 161 161 170));
-    border-bottom: 1px solid rgb(var(--border, 63 63 70));
+    color: var(--muted-foreground);
+    border-bottom: 1px solid var(--border);
   }
   .tsp-list {
     margin: 0;
@@ -233,10 +233,10 @@
     text-align: left;
     color: inherit;
     font-size: 0.8rem;
-    border-bottom: 1px solid rgb(var(--border, 63 63 70) / 0.3);
+    border-bottom: 1px solid color-mix(in oklch, var(--border) 30%, transparent);
   }
   .tsp-row-active {
-    background: rgb(var(--accent, 63 63 70));
+    background: var(--accent);
   }
   .tsp-kind {
     display: inline-flex;
@@ -244,8 +244,8 @@
     justify-content: center;
     width: 22px;
     height: 22px;
-    background: rgb(var(--primary, 24 24 27) / 0.25);
-    color: rgb(var(--primary-foreground, 244 244 245));
+    background: color-mix(in oklch, var(--primary) 25%, transparent);
+    color: var(--primary-foreground);
     font-family: var(--font-mono, monospace);
     font-size: 0.7rem;
     border-radius: 3px;
@@ -253,11 +253,11 @@
   .tsp-snippet {
     font-family: var(--font-mono, monospace);
     font-size: 0.72rem;
-    color: rgb(var(--muted-foreground, 161 161 170));
+    color: var(--muted-foreground);
   }
   .tsp-cat {
     font-size: 0.7rem;
-    color: rgb(var(--muted-foreground, 161 161 170));
+    color: var(--muted-foreground);
     max-width: 160px;
   }
   .truncate {
