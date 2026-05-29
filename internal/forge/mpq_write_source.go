@@ -77,6 +77,20 @@ func (m *mpqSource) flushLocked() error {
 		return fmt.Errorf("%w: mpq source has no open archive to repack", ErrMPQWriteNotImplemented)
 	}
 
+	// DO-NO-HARM GUARD: this repack rebuilds the archive from NAMED files only
+	// (m.a.List() — the standard WC3 set plus any internal (listfile)). MPQ hash
+	// tables don't store filenames, so files that physically exist but aren't
+	// named — most custom imports: models, textures, sounds, war3mapImported/* —
+	// cannot be carried over and would be SILENTLY DROPPED, corrupting the map.
+	// (Observed: a 240-file custom .w3x repacked down to 14 files.) Refuse to
+	// write a lossy archive rather than destroy the map. (listfile)/(attributes)/
+	// (signature) are present-but-unnamed by design, so allow a small slack.
+	// A folder-backed save has no such ambiguity (every file is on disk by name).
+	if present := m.a.PresentFileCount(); present > len(m.a.List())+3 {
+		return fmt.Errorf("%w: this .w3x holds %d files but only %d are resolvable by name; repacking would drop %d unlisted custom/imported file(s) (models, textures, sounds). Extract the map to a folder to edit it safely",
+			ErrMPQWriteNotImplemented, present, len(m.a.List()), present-len(m.a.List()))
+	}
+
 	// Assemble the full file set, keyed by the normalised name so an edited
 	// file (pending) replaces its archive copy exactly once.
 	type fileBuf struct {
