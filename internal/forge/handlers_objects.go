@@ -232,6 +232,10 @@ type objectsUnitsField struct {
 	// field. Empty when Value is empty.
 	DisplayRaw string `json:"display_raw"`
 	Overridden bool   `json:"overridden"`   // true if this came from the per-map shadow
+	// Levels carries per-level override values for leveled (opt-format) kinds:
+	// level (1-based) → raw value. Empty/omitted for non-leveled fields and for
+	// fields with no per-level overrides. The base/level-0 value stays in Value.
+	Levels map[uint32]string `json:"levels,omitempty"`
 }
 
 type objectsUnitsGetResult struct {
@@ -252,6 +256,10 @@ type objectsUnitsSetFieldParams struct {
 	ID     string `json:"id"`
 	Column string `json:"column"`
 	Value  string `json:"value"`
+	// Level is the optional 1-based level (abilities/upgrades) or variation
+	// index (doodads) the edit targets. Omitted / 0 == the base slot, which
+	// preserves the prior non-leveled behavior for every existing caller.
+	Level int `json:"level,omitempty"`
 }
 
 type objectsUnitsCreateCustomParams struct {
@@ -369,6 +377,13 @@ func getObject(cfg *KindConfig, id string) (*objectsUnitsGetResult, error) {
 		if !has {
 			val = ""
 		}
+		var levels map[uint32]string
+		if lf := u.LevelFields[col]; len(lf) > 0 {
+			levels = make(map[uint32]string, len(lf))
+			for lvl, v := range lf {
+				levels[lvl] = v
+			}
+		}
 		rows = append(rows, objectsUnitsField{
 			ID:          f.ID,
 			Field:       col,
@@ -378,7 +393,8 @@ func getObject(cfg *KindConfig, id string) (*objectsUnitsGetResult, error) {
 			Value:       val,
 			Display:     resolveDisplay(val, mapStrings),
 			DisplayRaw:  resolveDisplayKeepColors(val, mapStrings),
-			Overridden:  u.Overridden[col],
+			Overridden:  u.Overridden[col] || levels != nil,
+			Levels:      levels,
 		})
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
@@ -495,7 +511,10 @@ func makeSetFieldHandler(cfg *KindConfig) bridge.Handler {
 		if p.Column == "" {
 			return nil, errors.New("column is required")
 		}
-		if err := Current.SetObjectField(cfg, p.ID, p.Column, p.Value); err != nil {
+		if p.Level < 0 {
+			return nil, errors.New("level must be >= 0")
+		}
+		if err := Current.SetObjectFieldLevel(cfg, p.ID, p.Column, uint32(p.Level), p.Value); err != nil {
 			return nil, err
 		}
 		return getObject(cfg, p.ID)

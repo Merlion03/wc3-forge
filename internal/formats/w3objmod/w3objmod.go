@@ -47,19 +47,42 @@ import (
 
 // Overrides is the per-row column → value map (lowercase column names,
 // matching the SLK Mapped convention).
+//
+// Overrides carries ONLY the base/level-0 slot for each field
+// (level_variation==0 && data_pointer==0 on the wire). Per-level values for
+// leveled fields (w3a abilities, w3q upgrades, w3d doodad variations) live in
+// the ordered Levels list so two distinct values for the same field at
+// different levels don't collapse into one map entry. Keeping Overrides a flat
+// map preserves every existing consumer (the merge layer, convert, set_field
+// without a level) byte-for-byte.
 type Overrides map[string]string
+
+// LevelOverride is one per-level (or per-variation) modification entry on a
+// leveled object. opt-format files (w3a/w3d/w3q) carry a level_variation and
+// data_pointer slot per modification; an entry with a non-zero level or
+// data_pointer is a leveled value and lands here rather than in the flat
+// Overrides map. The list is ordered: Parse appends in wire order and Encode
+// emits in slice order, so Parse→Encode→Parse is stable.
+type LevelOverride struct {
+	FourCC      string // 4-char modification ID, OR the column-name when a FieldMap is supplied to Parse
+	Level       uint32 // level_variation slot (1-based level for abilities/upgrades; variation index for doodads)
+	DataPointer uint32 // data_pointer slot — preserved verbatim; meaningful only for a handful of multi-field abilities
+	Value       string // the cell value, decoded the same way Overrides values are
+}
 
 // CustomObject is a new derived type defined in the map.
 type CustomObject struct {
-	ID        string    // 4-char FourCC of the new object (e.g. "D006")
-	BaseID    string    // FourCC of the stock type it inherits from
-	Overrides Overrides // explicitly-overridden columns
+	ID        string          // 4-char FourCC of the new object (e.g. "D006")
+	BaseID    string          // FourCC of the stock type it inherits from
+	Overrides Overrides       // explicitly-overridden columns (base/level-0 slot)
+	Levels    []LevelOverride `json:",omitempty"` // per-level/per-variation overrides (opt-format only)
 }
 
 // OriginalEdit is an edit applied to a stock type's row.
 type OriginalEdit struct {
-	BaseID    string    // FourCC of the stock type being edited
+	BaseID    string // FourCC of the stock type being edited
 	Overrides Overrides
+	Levels    []LevelOverride `json:",omitempty"` // per-level/per-variation overrides (opt-format only)
 }
 
 // File is the parsed object-modification table.
@@ -134,6 +157,7 @@ func readTable(r *reader, out *File, opt bool, fields FieldMap, custom bool) err
 			return err
 		}
 		ov := Overrides{}
+		var levels []LevelOverride
 		for j := uint32(0); j < modCount; j++ {
 			modID, err := r.fourCC()
 			if err != nil {
@@ -143,16 +167,14 @@ func readTable(r *reader, out *File, opt bool, fields FieldMap, custom bool) err
 			if err := r.u32(&typ); err != nil {
 				return err
 			}
+			var lv, dp uint32
 			if opt {
-				var lv, dp uint32
 				if err := r.u32(&lv); err != nil {
 					return err
 				}
 				if err := r.u32(&dp); err != nil {
 					return err
 				}
-				_ = lv
-				_ = dp
 			}
 			val, err := readValue(r, typ)
 			if err != nil {
@@ -169,15 +191,24 @@ func readTable(r *reader, out *File, opt bool, fields FieldMap, custom bool) err
 					col = c
 				}
 			}
-			ov[col] = val
+			if opt && (lv != 0 || dp != 0) {
+				// Leveled / variation entry: keep it ordered + level-tagged so
+				// distinct per-level values for the same field don't collapse
+				// into the single flat Overrides slot.
+				levels = append(levels, LevelOverride{
+					FourCC: col, Level: lv, DataPointer: dp, Value: val,
+				})
+			} else {
+				ov[col] = val
+			}
 		}
 		if custom {
 			out.Customs = append(out.Customs, CustomObject{
-				ID: mod, BaseID: orig, Overrides: ov,
+				ID: mod, BaseID: orig, Overrides: ov, Levels: levels,
 			})
 		} else {
 			out.OriginalEdits = append(out.OriginalEdits, OriginalEdit{
-				BaseID: orig, Overrides: ov,
+				BaseID: orig, Overrides: ov, Levels: levels,
 			})
 		}
 	}
@@ -266,7 +297,7 @@ func Encode(f *File, opt bool, fields FieldMap) ([]byte, error) {
 	w.u32(origCount)
 	if f != nil {
 		for _, e := range f.OriginalEdits {
-			if err := writeObject(w, e.BaseID, "\x00\x00\x00\x00", e.Overrides, version, opt, fields, rev); err != nil {
+			if err := writeObject(w, e.BaseID, "\x00\x00\x00\x00", e.Overrides, e.Levels, version, opt, fields, rev); err != nil {
 				return nil, fmt.Errorf("encode original edit %q: %w", e.BaseID, err)
 			}
 		}
@@ -280,7 +311,7 @@ func Encode(f *File, opt bool, fields FieldMap) ([]byte, error) {
 	w.u32(customCount)
 	if f != nil {
 		for _, c := range f.Customs {
-			if err := writeObject(w, c.BaseID, c.ID, c.Overrides, version, opt, fields, rev); err != nil {
+			if err := writeObject(w, c.BaseID, c.ID, c.Overrides, c.Levels, version, opt, fields, rev); err != nil {
 				return nil, fmt.Errorf("encode custom %q (base=%q): %w", c.ID, c.BaseID, err)
 			}
 		}
@@ -291,7 +322,13 @@ func Encode(f *File, opt bool, fields FieldMap) ([]byte, error) {
 // writeObject emits one object row (header + modifications) into w.
 // modifiedID should be 4 zero bytes for original-edits, the new FourCC for
 // customs. Caller is responsible for the table-count prefix.
-func writeObject(w *writer, origID, modifiedID string, ov Overrides, version uint32, opt bool, fields FieldMap, rev map[string]string) error {
+//
+// levels carries the per-level/per-variation modifications (opt-format only);
+// they are emitted after the flat base-slot overrides, in slice order, each
+// with its real level_variation + data_pointer. For non-opt files levels is
+// ignored on the wire (there are no level slots to emit) but is still counted
+// — callers should not populate Levels on a non-opt File.
+func writeObject(w *writer, origID, modifiedID string, ov Overrides, levels []LevelOverride, version uint32, opt bool, fields FieldMap, rev map[string]string) error {
 	if len(origID) != 4 {
 		return fmt.Errorf("original_id %q is not 4 chars", origID)
 	}
@@ -308,15 +345,22 @@ func writeObject(w *writer, origID, modifiedID string, ov Overrides, version uin
 		w.u32(1)
 		w.u32(0)
 	}
-	// Sort keys for deterministic output — the wire format permits any
-	// order, but stable output makes Parse→Encode→Parse byte-equal in
+	// Sort base-slot keys for deterministic output — the wire format permits
+	// any order, but stable output makes Parse→Encode→Parse byte-equal in
 	// the common case (and round-trip tests cleaner).
 	keys := make([]string, 0, len(ov))
 	for k := range ov {
 		keys = append(keys, k)
 	}
 	sortStrings(keys)
-	w.u32(uint32(len(keys)))
+	// Leveled entries (opt-format) only carry on the wire when opt is set;
+	// for a non-opt file there is no level slot to write, so they collapse to
+	// nothing (and shouldn't be present). Count them only when opt.
+	levelCount := 0
+	if opt {
+		levelCount = len(levels)
+	}
+	w.u32(uint32(len(keys) + levelCount))
 	for _, key := range keys {
 		modID := resolveModID(key, fields, rev)
 		if len(modID) != 4 {
@@ -327,11 +371,7 @@ func writeObject(w *writer, origID, modifiedID string, ov Overrides, version uin
 		w.bytes([]byte(modID))
 		w.u32(typ)
 		if opt {
-			// level/variation + dataPointer slots. We don't carry these on
-			// the File struct today, so emit zeros. HiveWE does the same
-			// for simple overrides (the non-zero values are only meaningful
-			// for level-stratified ability fields, which the editor's
-			// units path doesn't touch).
+			// Base/level-0 slot: level_variation = 0, data_pointer = 0.
 			w.u32(0)
 			w.u32(0)
 		}
@@ -341,6 +381,26 @@ func writeObject(w *writer, origID, modifiedID string, ov Overrides, version uin
 		// end_marker — Blizzard writes zero; readers ignore the value but
 		// expect 4 bytes of padding before the next modification.
 		w.u32(0)
+	}
+	if opt {
+		for _, lo := range levels {
+			modID := resolveModID(lo.FourCC, fields, rev)
+			if len(modID) != 4 {
+				return fmt.Errorf("level override key %q has no 4-char modification ID (rev map miss)", lo.FourCC)
+			}
+			typ := inferType(lo.Value)
+			w.bytes([]byte(modID))
+			w.u32(typ)
+			// Real level_variation + data_pointer — this is the fix for the
+			// leveled-field collapse: emit the per-level slot we preserved on
+			// Parse instead of hardcoding zero.
+			w.u32(lo.Level)
+			w.u32(lo.DataPointer)
+			if err := writeValue(w, typ, lo.Value); err != nil {
+				return fmt.Errorf("write level value %q (key=%q, level=%d, type=%d): %w", lo.Value, lo.FourCC, lo.Level, typ, err)
+			}
+			w.u32(0) // end_marker
+		}
 	}
 	return nil
 }

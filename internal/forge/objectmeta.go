@@ -123,6 +123,32 @@ func ParseObjectMetadata(data []byte) (*ObjectMetadata, error) {
 		Fields: make([]ObjectFieldMeta, 0, len(m.Rows)),
 		ByID:   make(map[string]*ObjectFieldMeta, len(m.Rows)),
 	}
+
+	// Reforged's per-kind metadata SLKs DON'T all carry every applicability
+	// column. AbilityMetaData.slk has no `useAbility`; UpgradeMetaData.slk,
+	// AbilityBuffMetaData.slk, DestructableMetaData.slk and DoodadMetaData.slk
+	// carry no use* columns at all. The whole SLK IS the field set for that
+	// kind in those cases, so gating on a column that doesn't exist filtered
+	// out EVERY field (proven live: objects.abilities.fields_meta=0, even
+	// `name`/anam hidden). Detect whether each gating column is present
+	// anywhere in the table; when it's absent we treat the dimension as
+	// "applies to all" rather than over-filtering to nothing.
+	hasCol := func(names ...string) bool {
+		for _, row := range m.Rows {
+			for _, n := range names {
+				if _, ok := row[strings.ToLower(n)]; ok {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	hasAbility := hasCol("useability")
+	hasUpgrade := hasCol("useupgrade", "useupgr")
+	hasBuff := hasCol("usespecific", "usebuff")
+	hasDestructable := hasCol("usedestructable", "usedest")
+	hasDoodad := hasCol("usedoodad", "usedood")
+
 	for key, row := range m.Rows {
 		// Some SLK rows carry only an `id` column (no `field`) — skip those
 		// as they can't be merged into a base table.
@@ -133,25 +159,29 @@ func ParseObjectMetadata(data []byte) (*ObjectMetadata, error) {
 		idx, _ := strconv.Atoi(strings.TrimSpace(row.String("index")))
 		data, _ := strconv.Atoi(strings.TrimSpace(row.String("data")))
 		out.Fields = append(out.Fields, ObjectFieldMeta{
-			ID:              key,
-			Field:           field,
-			SLK:             row.String("slk"),
-			Index:           idx,
-			Category:        row.String("category"),
-			DisplayName:     row.String("displayname"),
-			Type:            row.String("type"),
-			Data:            data,
-			MinVal:          row.String("minval"),
-			MaxVal:          row.String("maxval"),
-			UseUnit:         row.String("useunit") == "1",
-			UseHero:         row.String("usehero") == "1",
-			UseBuilding:     row.String("usebuilding") == "1",
-			UseItem:         row.String("useitem") == "1",
-			UseAbility:      row.String("useability") == "1",
-			UseBuff:         row.String("usespecific") == "1" || row.String("usebuff") == "1",
-			UseDestructable: row.String("usedestructable") == "1" || row.String("usedest") == "1",
-			UseDoodad:       row.String("usedoodad") == "1" || row.String("usedood") == "1",
-			UseUpgrade:      row.String("useupgrade") == "1" || row.String("useupgr") == "1",
+			ID:          key,
+			Field:       field,
+			SLK:         row.String("slk"),
+			Index:       idx,
+			Category:    row.String("category"),
+			DisplayName: row.String("displayname"),
+			Type:        row.String("type"),
+			Data:        data,
+			MinVal:      row.String("minval"),
+			MaxVal:      row.String("maxval"),
+			UseUnit:     row.String("useunit") == "1",
+			UseHero:     row.String("usehero") == "1",
+			UseBuilding: row.String("usebuilding") == "1",
+			UseItem:     row.String("useitem") == "1",
+			// When the gating column is absent table-wide, the whole metadata
+			// SLK is the field set for that kind — every row applies (relax
+			// rather than over-filter to nothing). When the column IS present,
+			// gate on it as before.
+			UseAbility:      !hasAbility || row.String("useability") == "1",
+			UseBuff:         !hasBuff || row.String("usespecific") == "1" || row.String("usebuff") == "1",
+			UseDestructable: !hasDestructable || row.String("usedestructable") == "1" || row.String("usedest") == "1",
+			UseDoodad:       !hasDoodad || row.String("usedoodad") == "1" || row.String("usedood") == "1",
+			UseUpgrade:      !hasUpgrade || row.String("useupgrade") == "1" || row.String("useupgr") == "1",
 		})
 	}
 	// Build the FourCC → *ObjectFieldMeta index. Pointers into the slice are

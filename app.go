@@ -1531,6 +1531,11 @@ type UnitObjectField struct {
 	// inline-colored display while keeping Display as the stripped fallback.
 	DisplayRaw string `json:"display_raw"`
 	Overridden bool   `json:"overridden"`
+	// Levels carries per-level override values for leveled (opt-format) kinds:
+	// level (1-based) → raw value. Empty/omitted for non-leveled fields. Must
+	// mirror objectsUnitsField so the struct conversion in toUnitObjectDetail
+	// stays valid.
+	Levels map[uint32]string `json:"levels,omitempty"`
 }
 
 // UnitObjectDetail mirrors handlers_objects.go's objectsUnitsGetResult.
