@@ -310,6 +310,18 @@ export function OpenMapDialog() {
   return window['go']['main']['App']['OpenMapDialog']();
 }
 
+export function BrowseForWC3Install() {
+  return window['go']['main']['App']['BrowseForWC3Install']();
+}
+
+export function SetWC3InstallPath(arg1) {
+  return window['go']['main']['App']['SetWC3InstallPath'](arg1);
+}
+
+export function WC3InstallStatus() {
+  return window['go']['main']['App']['WC3InstallStatus']();
+}
+
 export function OpenMapFileDialog() {
   return window['go']['main']['App']['OpenMapFileDialog']();
 }

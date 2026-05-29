@@ -3,13 +3,13 @@ package main
 import (
 	"log"
 	"net/http"
-	"os"
 	"path"
 	"strings"
 	"sync"
 
 	"github.com/StephenSHorton/wc3-forge/internal/casc"
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
+	"github.com/StephenSHorton/wc3-forge/internal/wc3path"
 )
 
 // assetHandler serves /asset/<path> requests from Go-side asset sources.
@@ -27,34 +27,58 @@ func newAssetHandler() http.Handler {
 	return &assetHandler{}
 }
 
-// Lazy-init the WC3 CASC storage. We don't fail wc3-forge to start if
-// CASC isn't available — folder-based maps still work, and the user may
-// not have WC3 installed at the expected path.
+// Lazy-init the WC3 CASC storage. We don't fail wc3-forge to start if CASC
+// isn't available — folder-based maps still work, and the user may not have
+// WC3 installed yet (the GUI prompts them to locate it). reopenCASC lets the
+// user point at a new install without restarting.
 var (
+	cascMu      sync.Mutex
 	cascStorage *casc.Storage
-	cascOnce    sync.Once
 	cascErr     error
+	cascLoaded  bool
 )
 
+// wc3InstallPath is the install root CASC mounts. Delegates to the shared
+// resolver (env override -> user-saved path -> OS default) so it stays in
+// lockstep with the Test-Map launcher.
 func wc3InstallPath() string {
-	if p := os.Getenv("WC3FORGE_WC3_PATH"); p != "" {
-		return p
-	}
-	return `C:\Program Files (x86)\Warcraft III`
+	return wc3path.Resolve()
 }
 
 func getCASC() (*casc.Storage, error) {
-	cascOnce.Do(func() {
-		path := wc3InstallPath()
-		log.Printf("CASC: opening storage at %q", path)
-		cascStorage, cascErr = casc.Open(path)
-		if cascErr != nil {
-			log.Printf("CASC: open failed: %v", cascErr)
-		} else {
-			log.Printf("CASC: storage open")
-		}
-	})
+	cascMu.Lock()
+	defer cascMu.Unlock()
+	if !cascLoaded {
+		openCASCLocked()
+	}
 	return cascStorage, cascErr
+}
+
+// reopenCASC closes any open storage and re-opens at the currently-resolved
+// install path. Called after the user picks a new WC3 install so stock assets
+// resolve immediately, without a restart.
+func reopenCASC() (*casc.Storage, error) {
+	cascMu.Lock()
+	defer cascMu.Unlock()
+	if cascStorage != nil {
+		_ = cascStorage.Close()
+		cascStorage = nil
+	}
+	openCASCLocked()
+	return cascStorage, cascErr
+}
+
+// openCASCLocked (re)opens the storage at the resolved path. Caller holds cascMu.
+func openCASCLocked() {
+	p := wc3InstallPath()
+	log.Printf("CASC: opening storage at %q", p)
+	cascStorage, cascErr = casc.Open(p)
+	cascLoaded = true
+	if cascErr != nil {
+		log.Printf("CASC: open failed: %v", cascErr)
+	} else {
+		log.Printf("CASC: storage open")
+	}
 }
 
 func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

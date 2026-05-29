@@ -160,6 +160,12 @@ export function OpenMap(arg1:string):Promise<main.MapStatus>;
 
 export function OpenMapDialog():Promise<string>;
 
+export function BrowseForWC3Install():Promise<string>;
+
+export function SetWC3InstallPath(arg1:string):Promise<main.WC3InstallStatusDTO>;
+
+export function WC3InstallStatus():Promise<main.WC3InstallStatusDTO>;
+
 export function OpenMapFileDialog():Promise<string>;
 
 export function OpenMapInNewWindow(arg1:string):Promise<void>;
