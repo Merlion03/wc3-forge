@@ -128,41 +128,97 @@ var condElseifRe = regexp.MustCompile(`^\s*//!\s*elseif\b`)
 // `//! endif` — closes the conditional block.
 var condEndifRe = regexp.MustCompile(`^\s*//!\s*endif\s*$`)
 
-// Block-comment regex for `/* … */` stripping. We use a multi-line, lazy
-// match. Strings + line comments are NOT honored here — the regex isn't a
-// lexer — but real-world maps never put `/*` inside a string literal that
-// also has a matching `*/`, so the false-positive surface is negligible.
-//
-// IMPORTANT: this MUST run BEFORE the tokenizer is fed source, since the
-// JASS lexer would choke on `/*` as an unknown character.
-var blockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
-
 // paramSubRe captures `$ident$` tokens inside a macro body for arg substitution.
 // We intentionally restrict to identifier-shaped names — `$1$` literal
 // (used in some old macros as a dummy) would NOT match and is left as-is.
 var paramSubRe = regexp.MustCompile(`\$([A-Za-z_][A-Za-z0-9_]*)\$`)
 
-// StripBlockComments removes C-style `/* … */` block comments from src. This
-// runs FIRST in the preprocessing pipeline because the JASS lexer doesn't
-// recognize `/*` and would error on it. Multi-line block comments are
-// supported.
+// StripBlockComments removes C-style block comments from src. This runs FIRST
+// in the preprocessing pipeline because the JASS lexer doesn't recognize the
+// /* opener and would error on it. Multi-line block comments are supported.
 //
 // We replace each block with a single newline-preserving spacer so downstream
 // line-number diagnostics stay roughly aligned. (Inside a single-line block,
 // the spacer is just empty; for multi-line blocks we preserve the newline
 // count.)
+//
+// B3 fix: this used to be a naive (?s)/*.*?*/ regex (slashes escaped) that was
+// neither line-comment- nor string-aware. JASS banner comments are full of
+// asterisks (//***************), and //* contains the substring /*, so the
+// regex treated a // line comment as the START of a block comment and swallowed
+// everything up to the next */ (often dozens of lines away). That left a stray
+// / at the start of the banner line, which the lexer then read as a / operator
+// -- producing a cascade of "unexpected token /" parse errors. A /* inside a
+// string literal had the same failure mode. The scanner below honors // line
+// comments and "..." string literals so a /* inside either is left untouched.
 func StripBlockComments(src string) string {
 	if !strings.Contains(src, "/*") {
 		return src
 	}
-	return blockCommentRe.ReplaceAllStringFunc(src, func(m string) string {
-		// Preserve newline count so downstream line numbers stay close.
-		n := strings.Count(m, "\n")
-		if n == 0 {
-			return " "
+	var b strings.Builder
+	b.Grow(len(src))
+	i := 0
+	n := len(src)
+	for i < n {
+		c := src[i]
+		// String literal: copy verbatim until the closing quote (honoring escape
+		// sequences) so a /* inside a string is never treated as a block opener.
+		if c == '"' {
+			b.WriteByte(c)
+			i++
+			for i < n {
+				ch := src[i]
+				b.WriteByte(ch)
+				i++
+				if ch == '\\' && i < n {
+					// Escaped char: copy the next byte too so an escaped quote
+					// doesn't end the string early.
+					b.WriteByte(src[i])
+					i++
+					continue
+				}
+				if ch == '"' || ch == '\n' {
+					// Closing quote or unterminated-at-EOL: stop string scan.
+					break
+				}
+			}
+			continue
 		}
-		return strings.Repeat("\n", n)
-	})
+		// Line comment // ... : copy verbatim until EOL. This is what stops a
+		// //***** banner from being mistaken for a block-comment opener.
+		if c == '/' && i+1 < n && src[i+1] == '/' {
+			for i < n && src[i] != '\n' {
+				b.WriteByte(src[i])
+				i++
+			}
+			continue
+		}
+		// Block comment /* ... */ : replace with a newline-preserving spacer.
+		if c == '/' && i+1 < n && src[i+1] == '*' {
+			j := i + 2
+			nl := 0
+			for j < n {
+				if src[j] == '\n' {
+					nl++
+				}
+				if src[j] == '*' && j+1 < n && src[j+1] == '/' {
+					j += 2
+					break
+				}
+				j++
+			}
+			if nl == 0 {
+				b.WriteByte(' ')
+			} else {
+				b.WriteString(strings.Repeat("\n", nl))
+			}
+			i = j
+			continue
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return b.String()
 }
 
 // Preprocess parses the JASS source for textmacro definitions + call sites

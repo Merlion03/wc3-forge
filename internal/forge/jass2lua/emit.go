@@ -434,10 +434,35 @@ func (e *emitter) emitFile(f *File) {
 			e.writeLine(fmt.Sprintf("-- type %s extends %s (no Lua equivalent; declared for parity)", n.Name, n.Extends))
 		case *RawStmt:
 			e.emitRaw(n)
+		case *StrayBlock:
+			e.emitStrayBlock(n)
 		default:
 			e.writeLine(fmt.Sprintf("-- jass2lua: unhandled top-level node %T", item))
 		}
 	}
+}
+
+// emitStrayBlock writes a recovered run of file-scope statements (B1). The run
+// is wrapped in a Lua `do ... end` so the emitted statements stay syntactically
+// valid at chunk scope, prefixed by a single diagnostic comment. The body
+// statements transpile through the normal emitStmt path, so well-formed
+// statements produce correct Lua even though the run as a whole was a recovery.
+//
+// A fresh localTypes scope is used while emitting the body so the
+// integer-division/array-default fixes can classify locals declared inside the
+// injected run (these statements have no enclosing function header to seed it).
+func (e *emitter) emitStrayBlock(sb *StrayBlock) {
+	e.writeLine("-- [[ jass2lua: " + sb.Reason + " ]]")
+	e.writeLine("do")
+	e.indent++
+	saved := e.localTypes
+	e.localTypes = map[string]string{}
+	for _, s := range sb.Body {
+		e.emitStmt(s)
+	}
+	e.localTypes = saved
+	e.indent--
+	e.writeLine("end")
 }
 
 // collectGlobalTypes records every globals-block declaration's name -> JASS type
