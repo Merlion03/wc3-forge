@@ -261,7 +261,8 @@ func (a *App) OpenMapDialog() (string, error) {
 
 // OpenMapFileDialog presents an OS file picker for packaged WC3 maps
 // (.w3x / .w3m / .mpq) and returns the selected file, or "" if cancelled.
-// MPQ-backed sessions are read-only — Save returns ErrMPQWriteNotImplemented.
+// MPQ-backed sessions save in place; Save only returns ErrMPQRepackFailed
+// (wrapped) on the rare genuinely-unpreservable archive.
 func (a *App) OpenMapFileDialog() (string, error) {
 	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select a Warcraft III map file",
@@ -1411,9 +1412,9 @@ func (a *App) ForceQuit() {
 }
 
 // SaveMap flushes all pending edits back through the source's write path.
-// Returns ErrMPQWriteNotImplemented (wrapped) when the loaded map is backed
-// by an MPQ archive — the UI should surface that as a friendly toast and
-// suggest extracting to a folder.
+// MPQ-backed maps save in place via the pure-Go writer; on the rare archive
+// that can't be repacked, Save returns ErrMPQRepackFailed (wrapped) and the UI
+// surfaces a friendly toast suggesting the folder-extraction workaround.
 func (a *App) SaveMap() error {
 	return forge.Current.Save()
 }

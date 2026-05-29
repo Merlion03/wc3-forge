@@ -14,7 +14,7 @@
 
 wc3-forge is a native Warcraft III map editor (Go + TypeScript, single [Wails](https://wails.io) binary) with an embedded MCP server. The GUI and Claude Code talk to the same editor session — every edit you make by hand can also be made by an agent, and vice versa, and they share one undo stack.
 
-**Status:** pre-alpha. Read-only viewer is solid; editing surfaces (position / rotation / scale, map info, selection, view, camera, history) are wired through both the GUI and MCP. Object Editor is read-only.
+**Status:** alpha. Read+write across most surfaces, wired through both the GUI and MCP: placed units and doodads (move / rotate / scale, plus create + delete), terrain (tile + height), a full Object Editor for all 7 definition kinds (units, items, abilities, buffs, destructables, doodads, upgrades — read + write custom and stock objects), and a complete Trigger Editor (GUI tree + Monaco code view + WC3 IntelliSense + GUI→Lua codegen + Convert-Map-to-Lua + Test Map). Maps save in place, including packaged `.w3x` / MPQ archives. Some rough edges remain.
 
 ## Get started with Claude Code
 
@@ -84,13 +84,15 @@ The **Agent Console** (Ctrl+\` in the editor) streams every bridge call live —
 |---|---|
 | Map lifecycle | `map_open`, `map_close`, `map_status`, `map_save` |
 | Map info | `map_info_get`, `map_info_set` (name, author, description, suggested players, lua flag) |
-| Placed units | `units_list`, `units_get`, `units_move`, `units_rotate`, `units_scale` |
-| Placed doodads | `doodads_list`, `doodads_get`, `doodads_move`, `doodads_rotate`, `doodads_scale` |
+| Placed units | `units_list`, `units_get`, `units_move`, `units_rotate`, `units_scale`, `units_create`, `units_delete` |
+| Placed doodads | `doodads_list`, `doodads_get`, `doodads_move`, `doodads_rotate`, `doodads_scale`, `doodads_create`, `doodads_delete` |
+| Terrain | `terrain_get_tile`, `terrain_set_tile`, `terrain_set_height` |
+| Object definitions (read + write, all 7 kinds) | `objects_<kind>_list`, `objects_<kind>_get`, `objects_<kind>_set_field`, `objects_<kind>_create_custom`, `objects_<kind>_delete_custom`, `objects_<kind>_fields_meta` for `<kind>` in units / items / abilities / buffs / destructables / doodads / upgrades, plus `objects_convert` |
+| Triggers | `triggers_tree`, `triggers_get`, `triggers_add_gui`, `triggers_generate_script`, `triggers_convert_to_lua`, `triggers_test_map` (full GUI tree + Monaco editor + GUI→Lua codegen + Convert-Map-to-Lua + Test Map) |
 | Selection | `selection_get`, `selection_set`, `selection_clear` |
 | View + camera | `view_set_mode`, `view_set_doodad_category_visible`, `camera_set_view` |
 | Window | `window_set_title` (label your instance so parallel agents are distinguishable) |
 | History | `history_undo`, `history_redo`, `history_list`, `history_begin_group`, `history_end_group` |
-| Unit definitions | `objects_units_list`, `objects_units_get`, `objects_units_fields_meta` (read-only) |
 | Multi-instance | `sessions_list`, `session_select` (point Claude at one of several running wc3-forges) |
 
 All entity tools speak **game coordinates** (origin at map center, units = WC3 world units). All mutations flow through the same history stack the GUI uses, so `Ctrl+Z` in the editor undoes Claude's edits and vice versa.

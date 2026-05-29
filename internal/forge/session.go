@@ -58,12 +58,14 @@ type fileSource interface {
 	close() error
 }
 
-// ErrMPQWriteNotImplemented was the historical sentinel returned by MPQ-backed
-// writes before the pure-Go MPQ writer landed (see internal/formats/mpq's
-// write.go). It is retained for the unusual fallback path where a repack fails
-// for a reason the writer can't recover from, and so external errors.Is checks
-// keep compiling. The common path now WRITES the archive.
-var ErrMPQWriteNotImplemented = errors.New("MPQ archive writing is not yet implemented — extract the map to a folder first")
+// ErrMPQRepackFailed is the sentinel wrapping the unusual fallback path where
+// an MPQ-backed source cannot repack the archive for a reason the pure-Go MPQ
+// writer (see internal/formats/mpq's write.go) can't recover from — e.g. no
+// path, no open archive, or a BuildLossless failure. The common path WRITES
+// the archive successfully; this only fires on a genuine repack failure, and
+// the wrapped message describes the specific cause. external errors.Is checks
+// rely on this sentinel.
+var ErrMPQRepackFailed = errors.New("MPQ archive repack failed")
 
 type folderSource struct{ root string }
 

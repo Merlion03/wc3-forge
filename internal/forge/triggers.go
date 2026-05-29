@@ -328,9 +328,9 @@ func (s *Session) GenerateTriggerScript() (string, error) {
 // in the session's source. Honors the preserve marker (same as
 // GenerateTriggerScript). Returns the written byte count on success.
 //
-// MPQ-backed sessions short-circuit through the source.write path which
-// returns ErrMPQWriteNotImplemented today; folder-backed sessions write
-// straight to disk.
+// MPQ-backed sessions write through the source.write path (which repacks the
+// archive in place, returning ErrMPQRepackFailed only on an unpreservable
+// archive); folder-backed sessions write straight to disk.
 func (s *Session) SaveTriggerScript() (int, error) {
 	text, err := s.GenerateTriggerScript()
 	if err != nil {

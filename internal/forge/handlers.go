@@ -1002,14 +1002,15 @@ func handleDoodadsScale(params json.RawMessage) (any, error) {
 	}, nil
 }
 
-// handleMapSave flushes pending edits to disk via the session's source. For
-// MPQ-backed sessions, returns a user-visible message instructing the caller
-// to extract the map to a folder first; programmatic clients can also check
-// the wrapped sentinel through the standard JSON-RPC error structure.
+// handleMapSave flushes pending edits to disk via the session's source. The
+// common path WRITES the .w3x/MPQ archive in place. On the rare genuinely
+// unpreservable archive, Save returns a wrapped ErrMPQRepackFailed; the handler
+// surfaces an accurate message with a folder-extraction workaround. All other
+// errors propagate verbatim so real save failures stay visible.
 func handleMapSave(_ json.RawMessage) (any, error) {
 	if err := Current.Save(); err != nil {
-		if errors.Is(err, ErrMPQWriteNotImplemented) {
-			return nil, errors.New("MPQ archive saving is not yet implemented — extract the map to a folder first.")
+		if errors.Is(err, ErrMPQRepackFailed) {
+			return nil, errors.New("Saving this map failed during MPQ repack. As a workaround, extract the map to a folder and save that.")
 		}
 		return nil, err
 	}
