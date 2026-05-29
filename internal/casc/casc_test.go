@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"unsafe"
 )
 
 // wc3InstallDefault is the canonical install root for the current OS. The
@@ -51,33 +50,24 @@ func TestEnumerate(t *testing.T) {
 	}
 	defer s.Close()
 
-	// Enumeration uses the package-level Find* funcs, which Open already
-	// bound cross-platform (Open -> loadLib -> bindCASCLib). Using them
-	// directly — instead of re-binding through a dlopen handle — keeps this
-	// test working on Windows, where there's no purego.Dlopen.
+	// Enumeration goes through the platform raw-op helpers (rawFindFirstFile
+	// /NextFile/Close), which Open already bound cross-platform (Open ->
+	// loadLib -> bindCASCLib). Using them — instead of re-binding through a
+	// dlopen handle — keeps this test working on Windows, where the call
+	// layer is syscall.LazyProc.Call rather than purego.
 	//
-	// CASC_FIND_DATA from CascLib.h — 0x1108 bytes (4360). Most of that
-	// is szFileName[MAX_PATH=0x400] which we read as our result.
-	var data [0x1108]byte
-	mask := append([]byte("*"), 0)
-	listfileName := append([]byte(""), 0)
-
-	hFind := cascFindFirstFile(
-		s.handle,
-		unsafe.Pointer(&mask[0]),
-		unsafe.Pointer(&data[0]),
-		unsafe.Pointer(&listfileName[0]),
-	)
+	// CASC_FIND_DATA from CascLib.h — findDataSize bytes. Most of that is
+	// szFileName (findDataNameOff..+findDataNameLen) which we read as result.
+	var data [findDataSize]byte
+	hFind := rawFindFirstFile(s.handle, "*", &data)
 	if hFind == 0 || hFind == ^uintptr(0) {
 		t.Fatalf("CascFindFirstFile failed (handle=%x)", hFind)
 	}
-	defer cascFindClose(hFind)
+	defer rawFindClose(hFind)
 
 	count := 0
 	for {
-		// szFileName starts at offset 0x18 (24) in CASC_FIND_DATA.
-		// Width is 0x400 (1024) bytes.
-		name := readCString(data[0x18 : 0x18+0x400])
+		name := readCString(data[findDataNameOff : findDataNameOff+findDataNameLen])
 		lname := strings.ToLower(name)
 		if strings.Contains(lname, "footman.mdx") || strings.Contains(lname, "miscdata.txt") || strings.Contains(lname, "units.slk") || strings.Contains(lname, "teamcolor00.blp") {
 			t.Logf("[%d] %s", count, name)
@@ -87,7 +77,7 @@ func TestEnumerate(t *testing.T) {
 			t.Logf("... (capped at %d entries)", count)
 			break
 		}
-		if !cascFindNextFile(hFind, unsafe.Pointer(&data[0])) {
+		if !rawFindNextFile(hFind, &data) {
 			break
 		}
 	}

@@ -7,12 +7,22 @@
 // Zezula's battle-tested CascLib (same library HiveWE's scripts use for
 // StormLib).
 //
-// We load via purego, not cgo: no toolchain needed at build time, and the
-// same code works on Windows (CascLib.dll) and macOS (libcasc.dylib). The
-// library must sit next to the executable, or anywhere on the OS's
-// dynamic loader search path. The project's scripts/casclib/ holds the
-// vendored Windows binaries; the macOS .dylib is built on demand by
-// scripts/build-casclib-macos.sh and is .gitignored.
+// We bind CascLib at runtime, not via cgo: no toolchain needed at build
+// time, and the same high-level logic works on Windows (CascLib.dll) and
+// macOS (libcasc.dylib). The library must sit next to the executable, or
+// anywhere on the OS's dynamic loader search path. The project's
+// scripts/casclib/ holds the vendored Windows binaries; the macOS .dylib is
+// built on demand by scripts/build-casclib-macos.sh and is .gitignored.
+//
+// The FFI layer is platform-split (see casc_windows.go / casc_unix.go):
+// macOS calls through purego, Windows calls through syscall.LazyProc.Call
+// exactly as pre-PR main did. They are NOT unified — routing CascOpenFile /
+// CascReadFile through purego's Windows SyscallN dispatch regressed every
+// per-file open to a GetLastError==0 failure (pure-white, texture-less
+// models). syscall.LazyProc.Call is //go:uintptrescapes, so it is
+// memory-safe AND the path that demonstrably worked on Windows. The shared
+// code below calls into platform raw-op helpers (rawOpenStorage, rawOpenFile,
+// rawReadFile, rawFind*, …) rather than a common set of foreign func vars.
 //
 // Thread-safety: a single Storage's operations are serialised by a mutex.
 // CascLib's storage handle is shared across reads internally; we keep
@@ -25,7 +35,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"unsafe"
 )
 
 // Tiny indirection so locateLib stays readable without importing
@@ -43,40 +52,25 @@ var (
 // CascLib.dll on Windows, libcasc.dylib on macOS.
 var DLLPath string
 
-// CascLib symbols are loaded once at process startup via purego. Function
-// vars are assigned by RegisterLibFunc in loadLib; subsequent calls dispatch
-// through them. All path arguments are uintptr — the caller does the
-// platform-appropriate string conversion (UTF-16 on Windows, NUL-terminated
-// UTF-8/ASCII on macOS) before passing the pointer in.
+// CascLib is loaded once at process startup. bindCASCLib (platform-specific)
+// loads the shared library at `path` and binds every CascLib entry point;
+// subsequent FFI goes through the platform raw-op helpers, not a shared set
+// of foreign func vars. libErr captures a load/bind failure for Open and
+// ListByPrefix to surface.
 var (
 	libOnce sync.Once
 	libErr  error
+)
 
-	// IMPORTANT: every parameter through which CascLib writes back into Go
-	// memory (handles, sizes, byte counts, the read buffer, the find-data
-	// struct) MUST be a typed pointer (*T / unsafe.Pointer), NOT uintptr.
-	// purego only keeps pointer-kind args alive across the foreign call
-	// (func.go addValue stores v.Pointer() in the live args slice); a
-	// `uintptr(unsafe.Pointer(&x))` arg is treated as a plain integer, so the
-	// compiler may keep `x` in a register and never reload CascLib's
-	// write-back — yielding garbage handles/sizes that fail flakily depending
-	// on optimization + GC timing. (This was the macOS "storage closed"/
-	// "CascGetFileSize64 failed" flake and the Windows empty-texture
-	// regression.) Opaque handles we only pass IN (hStorage/hFile/hFind) stay
-	// uintptr.
-	cascOpenStorage  func(szParams uintptr, dwLocaleMask uint32, phStorage *uintptr) bool
-	cascCloseStorage func(hStorage uintptr) bool
-	cascOpenFile     func(hStorage uintptr, pvFileName unsafe.Pointer, dwLocaleFlags uint32, dwOpenFlags uint32, phFile *uintptr) bool
-	cascCloseFile    func(hFile uintptr) bool
-	cascReadFile     func(hFile uintptr, lpBuffer unsafe.Pointer, dwToRead uint32, pdwRead *uint32) bool
-	cascGetFileSize  func(hFile uintptr, pSize *uint64) bool
-
-	// CASC enumeration (CascFindFirstFile/NextFile/Close), backing
-	// ListByPrefix. Returns an opaque find HANDLE; pFindData is an out-param
-	// CASC_FIND_DATA struct CascLib fills, so it's unsafe.Pointer (pinned).
-	cascFindFirstFile func(hStorage uintptr, szMask unsafe.Pointer, pFindData unsafe.Pointer, szListFile unsafe.Pointer) uintptr
-	cascFindNextFile  func(hFind uintptr, pFindData unsafe.Pointer) bool
-	cascFindClose     func(hFind uintptr) bool
+// CASC_FIND_DATA is a fixed-layout struct CascLib fills during enumeration
+// (CascFindFirstFile/NextFile). findDataSize is its total size from
+// CascLib.h; szFileName begins at findDataNameOff and is findDataNameLen
+// (MAX_PATH) bytes wide. ListByPrefix reads the name straight out of that
+// offset rather than mapping the whole struct.
+const (
+	findDataSize    = 0x1108
+	findDataNameOff = 0x18
+	findDataNameLen = 0x400
 )
 
 func loadLib() {
@@ -84,40 +78,7 @@ func loadLib() {
 	if path == "" {
 		path = locateLib()
 	}
-	// The actual load + symbol binding is platform-specific: macOS/Linux use
-	// purego.Dlopen + RegisterLibFunc, but purego v0.10.0 exposes no Dlopen
-	// on Windows (no dlfcn_windows.go), so Windows loads via
-	// syscall.NewLazyDLL and binds each symbol by address with
-	// purego.RegisterFunc. Either way the shared func vars above end up bound
-	// to the same purego dispatch, so the typed-pointer pinning rules hold on
-	// both platforms. See bindCASCLib in casc_unix.go / casc_windows.go.
 	libErr = bindCASCLib(path)
-}
-
-// cascSymbols is the fixed list of CascLib entry points the platform binders
-// resolve, in registration order. Both binders iterate it so the symbol set
-// lives in one place. Names are CascLib's exported symbols — undecorated even
-// on the _UNICODE Windows build (main's prior syscall loader used these exact
-// names); CascGetFileSize64 is the 64-bit size variant (the legacy 32-bit
-// CascGetFileSize returns INVALID_FILE_SIZE for valid files).
-func cascSymbols() []struct {
-	fptr any
-	name string
-} {
-	return []struct {
-		fptr any
-		name string
-	}{
-		{&cascOpenStorage, "CascOpenStorage"},
-		{&cascCloseStorage, "CascCloseStorage"},
-		{&cascOpenFile, "CascOpenFile"},
-		{&cascCloseFile, "CascCloseFile"},
-		{&cascReadFile, "CascReadFile"},
-		{&cascGetFileSize, "CascGetFileSize64"},
-		{&cascFindFirstFile, "CascFindFirstFile"},
-		{&cascFindNextFile, "CascFindNextFile"},
-		{&cascFindClose, "CascFindClose"},
-	}
 }
 
 // locateLib searches a few standard places for the CASC shared library.
@@ -200,18 +161,15 @@ func Open(installPath string) (*Storage, error) {
 	// platform-native separator so the path looks natural to the user
 	// in error messages.
 	fullPath := installPath + string(filepath.Separator) + ":w3"
-	pathPtr, free, err := encodeLibPath(fullPath)
-	if err != nil {
-		return nil, fmt.Errorf("convert path: %w", err)
-	}
-	defer free()
 
-	var handle uintptr
 	// IMPORTANT: dwLocaleMask = 0 means "NO locales accessible"; storage
 	// opens fine but every file read returns 0 bytes. CASC_LOCALE_ALL
 	// (0xFFFFFFFF) opens every locale. HiveWE's casc.ixx uses the same.
+	// rawOpenStorage does the platform-appropriate path encoding (UTF-16 on
+	// Windows, UTF-8 on macOS) and keeps the buffer alive across the call.
 	const cascLocaleAll uint32 = 0xFFFFFFFF
-	if !cascOpenStorage(pathPtr, cascLocaleAll, &handle) {
+	handle, ok := rawOpenStorage(fullPath, cascLocaleAll)
+	if !ok {
 		// CascLib reports the cause through GetLastError (Windows) or
 		// errno (POSIX). We surface whichever the platform-specific
 		// lastError() returns plus the path so the caller can diagnose.
@@ -227,7 +185,7 @@ func (s *Storage) Close() error {
 	if s.handle == 0 {
 		return nil
 	}
-	ok := cascCloseStorage(s.handle)
+	ok := rawCloseStorage(s.handle)
 	s.handle = 0
 	if !ok {
 		return fmt.Errorf("CascCloseStorage failed (err=%d)", lastError())
@@ -311,48 +269,37 @@ func (s *Storage) ListByPrefix(prefix string) ([]string, error) {
 	if libErr != nil {
 		return nil, fmt.Errorf("load CASC library: %w", libErr)
 	}
-	if cascFindFirstFile == nil || cascFindNextFile == nil || cascFindClose == nil {
-		return nil, fmt.Errorf("CASC enumeration symbols unavailable on this CascLib build")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.handle == 0 {
 		return nil, fmt.Errorf("storage closed")
 	}
 
-	// CASC_FIND_DATA layout from CascLib.h: 0x1108 bytes total. szFileName
-	// is at offset 0x18, MAX_PATH = 0x400 bytes wide. CascLib writes into
-	// this buffer, so it's passed as unsafe.Pointer (purego keeps it pinned;
-	// see the binding comment above).
-	var data [0x1108]byte
-	mask := append([]byte("*"), 0)
-	listfileName := append([]byte(""), 0)
-	hFind := cascFindFirstFile(
-		s.handle,
-		unsafe.Pointer(&mask[0]),
-		unsafe.Pointer(&data[0]),
-		unsafe.Pointer(&listfileName[0]),
-	)
+	// rawFindFirstFile/NextFile do the platform FFI and fill `data` (a
+	// CASC_FIND_DATA; see findData* consts). We read the szFileName field
+	// back out of the fixed offset here.
+	var data [findDataSize]byte
+	hFind := rawFindFirstFile(s.handle, "*", &data)
 	if hFind == 0 || hFind == ^uintptr(0) {
 		// Empty storage or no listfile entries — treat as "no matches" rather
 		// than an error. CascLib doesn't distinguish these.
 		return nil, nil
 	}
-	defer cascFindClose(hFind)
+	defer rawFindClose(hFind)
 
 	prefixLC := strings.ToLower(prefix)
 	out := make([]string, 0, 256)
 	// Hard cap to avoid runaway loops on a corrupt storage. Real CASC
 	// installs have ~200k entries; we'll never legitimately need more.
 	for n := 0; n < 500_000; n++ {
-		name := readCStringFromBuf(data[0x18 : 0x18+0x400])
+		name := readCStringFromBuf(data[findDataNameOff : findDataNameOff+findDataNameLen])
 		// CASC stores paths with backslashes; normalize before the prefix
 		// check.
 		lname := strings.ToLower(strings.ReplaceAll(name, `\`, "/"))
 		if strings.HasPrefix(lname, prefixLC) {
 			out = append(out, lname)
 		}
-		if !cascFindNextFile(hFind, unsafe.Pointer(&data[0])) {
+		if !rawFindNextFile(hFind, &data) {
 			break
 		}
 	}
@@ -374,11 +321,10 @@ func readCStringFromBuf(b []byte) string {
 // openOne does the raw open-read-close for a single fully-qualified
 // CASC path. Caller assembles the path.
 //
-// pvFileName is `const void *` in CascLib's signature; for string lookups
-// it's a null-terminated ASCII (or UTF-8) C-string regardless of OS —
-// even on Windows where the storage path uses TCHAR, file names are
-// narrow. So we always pass a UTF-8 byte slice here, not the platform-
-// specific encoded form.
+// The file name is `const void *` in CascLib's signature; for string
+// lookups it's a null-terminated ASCII (or UTF-8) C-string regardless of OS
+// — even on Windows where the storage path uses TCHAR, file names are
+// narrow. rawOpenFile passes the UTF-8 bytes directly on both platforms.
 func (s *Storage) openOne(name string) ([]byte, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -386,16 +332,7 @@ func (s *Storage) openOne(name string) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("storage closed")
 	}
 
-	nameBytes := append([]byte(name), 0)
-
-	var fileHandle uintptr
-	ok := cascOpenFile(
-		s.handle,
-		unsafe.Pointer(&nameBytes[0]),
-		0, // dwLocaleFlags
-		0, // dwOpenFlags
-		&fileHandle,
-	)
+	fileHandle, ok := rawOpenFile(s.handle, name)
 	if !ok {
 		// ERROR_FILE_NOT_FOUND (2) and ERROR_PATH_NOT_FOUND (3) are the
 		// common "not in CASC" cases on Windows; ENOENT (2) on POSIX
@@ -407,11 +344,9 @@ func (s *Storage) openOne(name string) ([]byte, bool, error) {
 		}
 		return nil, false, fmt.Errorf("CascOpenFile(%q) failed (err=%d)", name, errno)
 	}
-	defer cascCloseFile(fileHandle)
+	defer rawCloseFile(fileHandle)
 
-	// CascGetFileSize64 takes an out-param uint64*. Bool return.
-	var size64 uint64
-	ok = cascGetFileSize(fileHandle, &size64)
+	size64, ok := rawGetFileSize(fileHandle)
 	if !ok {
 		return nil, false, fmt.Errorf("CascGetFileSize64 failed for %q (err=%d)", name, lastError())
 	}
@@ -424,18 +359,11 @@ func (s *Storage) openOne(name string) ([]byte, bool, error) {
 		// anyway so we don't truncate silently.
 		return nil, false, fmt.Errorf("CASC file %q too large (%d bytes)", name, size64)
 	}
-	size := uint32(size64)
 
-	buf := make([]byte, size)
-	var bytesRead uint32
-	ok = cascReadFile(
-		fileHandle,
-		unsafe.Pointer(&buf[0]),
-		size,
-		&bytesRead,
-	)
+	buf := make([]byte, uint32(size64))
+	n, ok := rawReadFile(fileHandle, buf)
 	if !ok {
 		return nil, false, fmt.Errorf("CascReadFile(%q) failed (err=%d)", name, lastError())
 	}
-	return buf[:bytesRead], true, nil
+	return buf[:n], true, nil
 }
