@@ -16,6 +16,16 @@ var fixturePathV16 = filepath.Join("testdata", "wc3_survival_v1_6.doo")
 // more of the per-entity code paths than the survival fixture.
 var fixturePathEnfo = filepath.Join("testdata", "enfo_ffb_v2_64f.doo")
 
+// Fixture 3: Green Circle TD Very Hard V10.0's war3mapUnits.doo (1015 bytes).
+// version 8, subversion 11, 9 entities — all "sloc" start locations. The
+// SUBVERSION-11 SKIN_ID COUNTER-EXAMPLE: despite subversion 11 (which normally
+// guarantees a skin_id chunk), this map omits skin_id on every entity. Parsing
+// it with skin_id assumed-present drifts the offset and misreads entity 1's
+// random_type (0x44DE0000 — a misread float). This fixture guards the
+// peek-and-validate skin_id resolution that makes the parser robust to that
+// ambiguity. See feedback_doo_subver11_no_skinid in MEMORY.
+var fixturePathGreenCircle = filepath.Join("testdata", "green_circle_td_v10.doo")
+
 func TestParse_v1_6(t *testing.T) {
 	data, err := os.ReadFile(fixturePathV16)
 	if err != nil {
@@ -83,7 +93,7 @@ func TestParse_v1_6(t *testing.T) {
 // real-world fixtures. This is the contract that lets Session.Save write the
 // file back through a folder source without corrupting unmodified entities.
 func TestRoundTrip(t *testing.T) {
-	cases := []string{fixturePathV16, fixturePathEnfo}
+	cases := []string{fixturePathV16, fixturePathEnfo, fixturePathGreenCircle}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			orig, err := os.ReadFile(path)
@@ -349,6 +359,108 @@ func TestMutateSloc_ScaleRoundTrip(t *testing.T) {
 	got := f2.Entities[slocIdx].Scale
 	if got != newScale {
 		t.Errorf("sloc Scale round-trip: got %v, want %v", got, newScale)
+	}
+}
+
+// TestParse_GreenCircle_Subver11NoSkinID is the regression test for the
+// subversion-11/no-skin_id drift. Before the peek-and-validate fix, Parse
+// assumed skin_id present (because subversion == 11) and misread entity 1's
+// random_type as 0x44DE0000. The fix decides skin_id presence per-file by
+// trial and full-file-consumption validation, so this map parses as 9 "sloc"
+// start locations with random_type 0 and NO skin_id.
+func TestParse_GreenCircle_Subver11NoSkinID(t *testing.T) {
+	data, err := os.ReadFile(fixturePathGreenCircle)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	f, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v (the subver-11 no-skin_id drift regressed)", err)
+	}
+	if got, want := string(f.Format[:]), "W3do"; got != want {
+		t.Errorf("Format = %q, want %q", got, want)
+	}
+	if f.Version != 8 {
+		t.Errorf("Version = %d, want 8", f.Version)
+	}
+	if f.SubVersion != 11 {
+		t.Errorf("SubVersion = %d, want 11", f.SubVersion)
+	}
+	if len(f.Entities) != 9 {
+		t.Fatalf("len(Entities) = %d, want 9", len(f.Entities))
+	}
+
+	// Every entity is a start location with NO skin_id and a valid random_type.
+	for i, e := range f.Entities {
+		if e.TypeID != "sloc" {
+			t.Errorf("entity[%d].TypeID = %q, want %q", i, e.TypeID, "sloc")
+		}
+		if e.SkinID != "" {
+			t.Errorf("entity[%d].SkinID = %q, want empty (this map omits skin_id)", i, e.SkinID)
+		}
+		if e.skinIDPresent {
+			t.Errorf("entity[%d].skinIDPresent = true, want false (skin_id absent on disk)", i)
+		}
+		if e.RandomType > 2 {
+			t.Errorf("entity[%d].RandomType = %d, want one of {0,1,2}", i, e.RandomType)
+		}
+	}
+
+	// Player slots from the trace: 0..7 then 11.
+	wantPlayers := []uint32{0, 1, 2, 3, 4, 5, 6, 7, 11}
+	for i, e := range f.Entities {
+		if e.Player != wantPlayers[i] {
+			t.Errorf("entity[%d].Player = %d, want %d", i, e.Player, wantPlayers[i])
+		}
+	}
+}
+
+// TestRealWorldMaps_NoRegression parses war3mapUnits.doo straight out of real
+// maps on disk (when present) and asserts each one (a) parses without error and
+// (b) is byte-stable through Encode. These files are NOT committed fixtures —
+// they live in the user's WC3 / project directories — so the test skips
+// gracefully when a file is missing (e.g. CI). Its purpose is to catch a
+// regression where the new skin_id trial logic breaks a currently-parsing map.
+func TestRealWorldMaps_NoRegression(t *testing.T) {
+	// Plain war3mapUnits.doo files extracted next to a map (no MPQ needed).
+	doos := []string{
+		`C:/Users/4step/projects/HiveWE/data/test map/war3mapUnits.doo`,
+		`C:/Users/4step/projects/wc3-survival-game/map/extracted/war3mapUnits.doo`,
+	}
+	for _, path := range doos {
+		t.Run(filepath.Base(filepath.Dir(path))+"/"+filepath.Base(path), func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Skipf("fixture not available: %v", err)
+			}
+			assertParseAndRoundTrip(t, data)
+		})
+	}
+}
+
+// assertParseAndRoundTrip parses data, asserts no error, asserts every entity
+// has a valid random_type, and asserts Encode(Parse(data)) == data.
+func assertParseAndRoundTrip(t *testing.T, data []byte) {
+	t.Helper()
+	f, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for i, e := range f.Entities {
+		if e.RandomType > 2 {
+			t.Errorf("entity[%d].RandomType = %d, want one of {0,1,2}", i, e.RandomType)
+		}
+		if len(e.TypeID) != 4 {
+			t.Errorf("entity[%d].TypeID = %q (len %d), want 4 bytes", i, e.TypeID, len(e.TypeID))
+		}
+	}
+	out, err := Encode(f)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !bytes.Equal(data, out) {
+		t.Fatalf("Encode output != original (sizes orig=%d encoded=%d, first diff at offset %d)",
+			len(data), len(out), firstDiff(data, out))
 	}
 }
 

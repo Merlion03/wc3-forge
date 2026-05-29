@@ -112,11 +112,24 @@ type Entity struct {
 	// prefers scaleRaw when non-zero, otherwise emits Scale * 128.
 	scaleRaw [3]float32
 	// skinIDPresent records whether the on-disk entity carried a skin_id chunk.
-	// At subversion >= 11 this is always true. At subversion 9 the parser uses
-	// a peek heuristic; the result drives whether Encode emits a skin_id chunk
-	// for that entity. (Newly-constructed Entity values default to false at
-	// sub-9 — set SkinID via Parse output if you need it preserved.)
+	// skin_id presence is NOT reliably keyed on the .doo subversion: most
+	// subversion>=11 maps carry it, but some (e.g. Green Circle TD) are
+	// subversion 11 yet omit it on every entity, and some subversion-9 maps
+	// (Reforged re-saves) carry it. Parse therefore decides presence per FILE
+	// by trial — see chooseSkinIDPresence — and records the decision here so
+	// Encode reproduces the original layout byte-for-byte.
+	//
+	// For PARSED entities (parsed == true), Encode emits a skin_id chunk iff
+	// this flag is set. For hand-constructed entities (parsed == false), this
+	// flag is ignored and Encode falls back to the subversion rule
+	// (>= 11 emits, < 11 omits) — see writeEntity.
 	skinIDPresent bool
+	// parsed marks entities produced by Parse (as opposed to hand-constructed
+	// via CreateUnit etc.). It lets Encode trust the per-entity skinIDPresent
+	// decision for round-tripped data while preserving the subversion-driven
+	// default for freshly-constructed units. Snapshotted/restored verbatim by
+	// the session delete/undo path along with the other preservation fields.
+	parsed bool
 	// itemDropSetSizes preserves the per-set entry counts so the encoder can
 	// reconstruct the (set_count, [items_in_set_i]*) prefix structure the file
 	// uses. Sum equals len(ItemDrops). If left nil/empty when ItemDrops is
@@ -188,21 +201,96 @@ func Parse(data []byte) (*File, error) {
 		return nil, fmt.Errorf("entity count %d exceeds sanity cap %d (possible corrupted/protected map)", count, maxEntities)
 	}
 
-	f.Entities = make([]Entity, 0, count)
+	// Decide whether on-disk entities carry a skin_id chunk. This is NOT a
+	// reliable function of the subversion (see Entity.skinIDPresent doc), so we
+	// resolve it per-file by trial: parse all entities under each candidate
+	// policy and keep the interpretation that consumes the record stream
+	// exactly and yields only valid random_types. The body of the loop is the
+	// same parse for every policy; only the skin_id read differs.
+	entityStart := r.pos
+	for _, withSkin := range chooseSkinIDPresence(f.SubVersion) {
+		r.pos = entityStart
+		entities, perr := parseEntities(r, f.SubVersion, count, withSkin)
+		if perr != nil {
+			continue
+		}
+		// A correct interpretation consumes the record stream exactly: every
+		// entity parsed, no trailing bytes left over. Trailing bytes mean we
+		// under-read (wrong, smaller interpretation); a parse error means we
+		// over-read (wrong, larger interpretation). Either way, try the next
+		// candidate before giving up.
+		if r.pos != len(r.buf) {
+			continue
+		}
+		f.Entities = entities
+		return f, nil
+	}
+
+	// No candidate produced a clean full-file parse. Re-run the
+	// subversion-implied default once more so the caller gets the most
+	// informative error (matching prior behavior for genuinely malformed
+	// files), rather than a generic "no interpretation worked".
+	r.pos = entityStart
+	def := f.SubVersion >= 11
+	if entities, perr := parseEntities(r, f.SubVersion, count, def); perr != nil {
+		return nil, perr
+	} else {
+		f.Entities = entities
+		return f, nil
+	}
+}
+
+// chooseSkinIDPresence returns the ordered list of skin_id presence policies to
+// try for a file at the given subversion, most-likely first.
+//
+//   - subversion >= 11: the format normally carries skin_id, so try present
+//     first, then absent (covers maps like Green Circle TD that omit it).
+//   - subversion < 11: legacy maps normally omit skin_id, but Reforged re-saves
+//     may insert it. Try absent first (the historical default), then present.
+//     This subsumes the old per-entity peek heuristic: instead of guessing per
+//     entity, we validate each whole-file interpretation and keep the one that
+//     consumes the record stream exactly.
+//
+// Trying both and validating full-file consumption is what makes the parser
+// robust to the documented subversion/skin_id ambiguity (X_Hero_Reborn_1.3 and
+// Green Circle TD are the two counter-examples on record).
+func chooseSkinIDPresence(subversion uint32) []bool {
+	if subversion >= 11 {
+		return []bool{true, false}
+	}
+	return []bool{false, true}
+}
+
+// parseEntities reads exactly count entities from r using the given skin_id
+// presence policy. withSkin == true reads a 4-byte skin_id chunk on every
+// entity; withSkin == false reads none. The policy is uniform across the file —
+// the per-entity peek heuristic the parser used to apply at subversion 9 is
+// replaced by Parse trying both policies and validating full-file consumption,
+// which is strictly more robust (it can't drift mid-file). parseEntities
+// returns the parsed entities or the first error encountered; the caller
+// decides which policy "wins" by checking that r consumed the whole buffer.
+func parseEntities(r *reader, subversion uint32, count uint32, withSkin bool) ([]Entity, error) {
+	entities := make([]Entity, 0, count)
 	for i := uint32(0); i < count; i++ {
-		e, err := readEntity(r, f.SubVersion)
+		e, err := readEntity(r, subversion, withSkin)
 		if err != nil {
 			return nil, fmt.Errorf("entity %d: %w", i, err)
 		}
-		f.Entities = append(f.Entities, e)
+		entities = append(entities, e)
 	}
-
-	return f, nil
+	return entities, nil
 }
 
-func readEntity(r *reader, subversion uint32) (Entity, error) {
+// readEntity reads one entity from r. readSkinID is the per-FILE skin_id
+// presence decision made by Parse (via chooseSkinIDPresence + full-file
+// validation); when true the entity carries a 4-byte skin_id chunk after the
+// scale vector, when false it does not. The decision is uniform across a file —
+// Parse picks whichever policy makes every entity parse and consumes the record
+// stream exactly.
+func readEntity(r *reader, subversion uint32, readSkinID bool) (Entity, error) {
 	var e Entity
 	var err error
+	e.parsed = true
 
 	if e.TypeID, err = r.readFourCC(); err != nil {
 		return e, fmt.Errorf("type_id: %w", err)
@@ -255,24 +343,11 @@ func readEntity(r *reader, subversion uint32) (Entity, error) {
 		}
 	}
 
-	// skin_id — the ambiguous Reforged field.
-	//
-	// At subversion >= 11: always present, always read.
-	// At subversion == 9: MAY be present (Reforged re-saved map) or MAY be
-	//   absent (untouched pre-Reforged map). Peek 4 bytes; if they look like
-	//   a printable FourCC (each byte in 0x20-0x7E), consume as skin_id.
-	//   Otherwise leave them for the next field (Flags + Player + …).
-	//
-	// This heuristic is ported verbatim from HiveWE src/base/units.ixx
-	// lines ~149-159 and is required to handle protector maps that deliberately
-	// exploit the ambiguity (see HiveWE docs/protector-tricks.md Trick 2).
-	readSkinID := subversion >= 11
-	if !readSkinID {
-		peek := r.peek(4)
-		if len(peek) == 4 && isPrintableFourCC(peek) {
-			readSkinID = true
-		}
-	}
+	// skin_id — the ambiguous Reforged field. Whether it is present is a
+	// per-file property decided by Parse (chooseSkinIDPresence + full-file
+	// validation), NOT a function of the subversion: subversion-11 maps usually
+	// carry it but some (Green Circle TD) omit it, and some subversion-9 maps
+	// (Reforged re-saves) carry it. readSkinID is that resolved decision.
 	if readSkinID {
 		if e.SkinID, err = r.readFourCC(); err != nil {
 			return e, fmt.Errorf("skin_id: %w", err)
@@ -489,25 +564,10 @@ func SetScaleRaw(e *Entity, raw [3]float32) {
 	e.scaleRaw = raw
 }
 
-// isPrintableFourCC reports whether all 4 bytes are in the printable ASCII range
-// 0x20..0x7E. This is the same criterion HiveWE uses for its skin_id peek
-// heuristic (`std::all_of(..., c >= 0x20 && c <= 0x7E)`).
-func isPrintableFourCC(b []byte) bool {
-	if len(b) != 4 {
-		return false
-	}
-	for _, c := range b {
-		if c < 0x20 || c > 0x7E {
-			return false
-		}
-	}
-	return true
-}
-
 // --- reader ----------------------------------------------------------------
 
-// reader is a minimal little-endian cursor over a byte slice with a non-consuming
-// peek. Mirrors the surface of HiveWE's BinaryReader so the port reads 1:1.
+// reader is a minimal little-endian cursor over a byte slice. Mirrors the
+// surface of HiveWE's BinaryReader so the port reads 1:1.
 type reader struct {
 	buf []byte
 	pos int
@@ -524,13 +584,6 @@ func (r *reader) readBytes(n int) ([]byte, error) {
 	copy(out, r.buf[r.pos:r.pos+n])
 	r.pos += n
 	return out, nil
-}
-
-func (r *reader) peek(n int) []byte {
-	if r.pos+n > len(r.buf) {
-		return nil
-	}
-	return r.buf[r.pos : r.pos+n]
 }
 
 func (r *reader) readU8() (uint8, error) {
