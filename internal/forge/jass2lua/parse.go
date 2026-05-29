@@ -142,6 +142,22 @@ type RawStmt struct {
 	Snippet string // the source bytes we skipped
 }
 
+// StrayBlock collects a run of statement-level constructs that appeared at
+// FILE scope (i.e. outside any function), recovered as a single unit by
+// Parse's block-aware error recovery (B1). This is the shape produced by
+// JassHelper's `//! inject main` / `//! endinject` directive — after the
+// vJASS preprocessor rewrites the `//!` to a plain `//` comment, the injected
+// statements are left bare at top level. Rather than reporting one
+// "unexpected token" per statement (a cascade of thousands), we parse the run
+// into proper statements and surface ONE diagnostic.
+//
+// The emitter wraps these in `do ... end` so the recovered Lua is valid and
+// the surrounding well-formed declarations keep transpiling cleanly.
+type StrayBlock struct {
+	Reason string // the single diagnostic for the whole run
+	Body   []Stmt // the recovered statements (may themselves contain RawStmt)
+}
+
 // BinaryExpr is `L op R`.
 type BinaryExpr struct {
 	Op string
@@ -233,6 +249,7 @@ func (*MemberCallStmt) node() {}
 func (*ReturnStmt) node()   {}
 func (*LocalStmt) node()    {}
 func (*RawStmt) node()      {}
+func (*StrayBlock) node()     {}
 func (*BinaryExpr) node()   {}
 func (*UnaryExpr) node()    {}
 func (*CallExpr) node()     {}
@@ -310,6 +327,21 @@ func Parse(toks []Token) *File {
 		startPos := p.pos
 		item, err := p.parseTopLevel()
 		if err != nil {
+			// B1 — block-aware recovery. A statement-level keyword
+			// (local/set/call/if/loop/exitwhen/return/debug) at FILE scope is
+			// almost always a run of injected statements (JassHelper's
+			// `//! inject main`/`//! endinject`, whose `//!` the preprocessor
+			// already rewrote to `//`). Per-line recovery would emit one
+			// "unexpected token" per statement — thousands of them. Instead,
+			// recover the whole run as ONE StrayBlock: parse its statements so
+			// the well-formed ones still transpile, and surface a single
+			// diagnostic.
+			if isStmtStartKeyword(p.peek()) {
+				sb := p.recoverStrayBlock(err.Error())
+				f.Errors = append(f.Errors, sb.Reason)
+				f.Items = append(f.Items, sb)
+				continue
+			}
 			f.Errors = append(f.Errors, err.Error())
 			// Skip to next EOL to recover and avoid infinite loops.
 			snippet := p.snippetFrom(startPos)
@@ -365,6 +397,87 @@ func (p *parser) skipToEOL() {
 	}
 	if p.peek().Kind == TokEOL {
 		p.advance()
+	}
+}
+
+// isStmtStartKeyword reports whether tok begins a statement (as opposed to a
+// top-level declaration). Used by Parse's block-aware recovery to decide
+// whether an unexpected top-level token is a stray injected-statement run
+// (recover as one StrayBlock) or genuine junk (recover per-line).
+func isStmtStartKeyword(tok Token) bool {
+	if tok.Kind != TokKeyword {
+		return false
+	}
+	switch tok.Value {
+	case "local", "set", "call", "if", "loop", "exitwhen", "return", "debug":
+		return true
+	}
+	return false
+}
+
+// isTopLevelDeclKeyword reports whether tok begins a top-level declaration
+// (function/globals/native/type/constant). recoverStrayBlock stops at these so
+// a stray-statement run never swallows a following well-formed declaration.
+func isTopLevelDeclKeyword(tok Token) bool {
+	if tok.Kind != TokKeyword {
+		return false
+	}
+	switch tok.Value {
+	case "function", "globals", "native", "type", "constant":
+		return true
+	}
+	return false
+}
+
+// recoverStrayBlock consumes a contiguous run of statement-level constructs
+// found at file scope and folds them into a single StrayBlock. It parses each
+// statement (so the well-formed ones transpile correctly) and stops at the
+// first top-level declaration keyword, a stray block terminator
+// (endfunction/endglobals — leftovers of a malformed enclosing block), or EOF.
+//
+// This is the heart of B1: instead of one diagnostic per injected statement
+// (the 2,239-error cascade), the caller records exactly one diagnostic for the
+// whole run while keeping the parseable statements.
+func (p *parser) recoverStrayBlock(firstErr string) *StrayBlock {
+	sb := &StrayBlock{Reason: "stray top-level statements (likely //! inject body); recovered as a block — " + firstErr}
+	for {
+		// Skip blank lines.
+		if p.peek().Kind == TokEOL {
+			p.advance()
+			continue
+		}
+		t := p.peek()
+		if t.Kind == TokEOF {
+			return sb
+		}
+		// Stop before a real top-level declaration so we don't swallow it.
+		if isTopLevelDeclKeyword(t) {
+			return sb
+		}
+		// A leftover block terminator means the original enclosing block was
+		// malformed; consume it and stop so the file-scope loop resumes cleanly.
+		if t.Kind == TokKeyword && (t.Value == "endfunction" || t.Value == "endglobals") {
+			p.advance()
+			p.skipToEOL()
+			return sb
+		}
+		// Comments inside the run are preserved.
+		if t.Kind == TokComment {
+			sb.Body = append(sb.Body, &CommentStmt{Text: p.advance().Value})
+			continue
+		}
+		startPos := p.pos
+		s, err := p.parseStmt()
+		if err != nil {
+			// One bad statement inside the run: record a RawStmt for it but DON'T
+			// add another File.Error (we already surfaced one for the whole run);
+			// recover per-line and keep going.
+			snippet := p.snippetFrom(startPos)
+			sb.Body = append(sb.Body, &RawStmt{Reason: err.Error(), Snippet: snippet})
+			p.skipToEOL()
+			continue
+		}
+		sb.Body = append(sb.Body, s)
 	}
 }
 

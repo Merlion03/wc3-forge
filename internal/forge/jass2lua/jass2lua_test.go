@@ -349,29 +349,39 @@ endfunction
 }
 
 // TestTranspileScriptWithErrors_SurfacesParseErrors is the P0#1 regression at
-// the transpiler level: a script with multiple unparseable top-level
-// statements recovers each into a RawStmt/error() marker AND reports each one
-// in the returned parseErrors slice. Previously TranspileScript discarded
-// File.Errors, so callers under-reported the failure count to 0.
+// the transpiler level: a script with unparseable top-level statements must
+// still REPORT the failure (a non-zero parseErrors slice) rather than
+// under-reporting to 0 the way the old TranspileScript did by discarding
+// File.Errors.
+//
+// B1 update: bare statements at file scope are now recovered as a single
+// block-aware StrayBlock (one diagnostic for the whole run) instead of one
+// error() marker per line. The well-formed statements transpile cleanly into a
+// `do ... end` block. The P0#1 contract still holds: parseErrors is non-zero,
+// so the section failure is honestly surfaced.
 func TestTranspileScriptWithErrors_SurfacesParseErrors(t *testing.T) {
-	// Three bare statements at top level — the top-level parser rejects each
-	// (`call`/`set`/`if` aren't valid file-scope decls), recovering each into
-	// an error() marker.
+	// Bare statements at top level — the top-level parser rejects the first
+	// (`call` is not a valid file-scope decl) and block-aware recovery folds the
+	// whole run into one StrayBlock with one diagnostic.
 	jass := "call DoNothing()\nset x = 1\nif y then\nendif\n"
 	lua, parseErrs, lexErr := TranspileScriptWithErrors(jass)
 	if lexErr != nil {
 		t.Fatalf("unexpected lex error: %v", lexErr)
 	}
-	inlineCount := strings.Count(lua, "error(")
-	if inlineCount == 0 {
-		t.Fatalf("expected inline error() markers in output, got none:\n%s", lua)
-	}
 	if len(parseErrs) == 0 {
 		t.Fatalf("expected non-zero parseErrors, got 0 (under-reporting bug)")
 	}
-	if len(parseErrs) != inlineCount {
-		t.Errorf("parseErrors count (%d) should match inline error() count (%d)\nlua:\n%s\nerrs: %v",
-			len(parseErrs), inlineCount, lua, parseErrs)
+	// The stray run collapses to ONE diagnostic, not one-per-statement.
+	if len(parseErrs) != 1 {
+		t.Errorf("expected exactly 1 block-level diagnostic, got %d: %v", len(parseErrs), parseErrs)
+	}
+	if !strings.Contains(parseErrs[0], "stray top-level statements") {
+		t.Errorf("expected stray-block diagnostic, got: %v", parseErrs)
+	}
+	// The well-formed statements still transpile (no error() placeholder for a
+	// statement the parser could read).
+	if !strings.Contains(lua, "DoNothing()") {
+		t.Errorf("expected the recovered statements to transpile, got:\n%s", lua)
 	}
 }
 
