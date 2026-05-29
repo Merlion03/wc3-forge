@@ -225,12 +225,24 @@ const (
 	typeReal    = "real"
 )
 
+// typeString is the third classification, added for the string-concat fix
+// (P2#9 C1). It is NOT a numeric type -- numericType() still maps it to "" so
+// the integer-division path is completely unaffected. inferExprType returns it
+// for string literals, string-typed vars/params/globals, and string-returning
+// known natives, which lets a literal-free `strA + strB` emit `..` instead of
+// the wrong Lua `+`.
+const typeString = "string"
+
 // knownNativeReturns maps a small, safe set of stock WC3 natives/BJs to their
 // return type so expressions like `R2I(x) / n` or `GetUnitState(...) / 2` can
 // be classified. Intentionally tiny and high-confidence: an unlisted function
 // yields an unknown type, which keeps its enclosing division as float. Adding
 // a name here can only ever turn a float `/` into a (correct) integer `/` when
 // BOTH operands are provably integer -- never the other way.
+//
+// String-returning entries (P2#9 C1) are likewise high-confidence stock
+// converters/getters. They feed ONLY the `+` -> `..` concat decision; an
+// unlisted function stays unknown, so a `+` involving it keeps `+`.
 var knownNativeReturns = map[string]string{
 	// Integer-returning natives/BJs.
 	"R2I":                 typeInteger,
@@ -243,6 +255,7 @@ var knownNativeReturns = map[string]string{
 	"ModuloInteger":       typeInteger,
 	"GetHeroLevel":        typeInteger,
 	"GetUnitLevel":        typeInteger,
+	"S2I":                 typeInteger,
 	// Real-returning natives/BJs.
 	"I2R":           typeReal,
 	"GetRandomReal": typeReal,
@@ -254,6 +267,18 @@ var knownNativeReturns = map[string]string{
 	"Sin":           typeReal,
 	"Cos":           typeReal,
 	"Tan":           typeReal,
+	"S2R":           typeReal,
+	// String-returning natives/BJs (P2#9 C1). Only used to route `+` -> `..`.
+	"I2S":                      typeString,
+	"R2S":                      typeString,
+	"R2SW":                     typeString,
+	"GetUnitName":              typeString,
+	"GetHeroProperName":        typeString,
+	"GetPlayerName":            typeString,
+	"GetObjectName":            typeString,
+	"GetLocalizedString":       typeString,
+	"SubString":                typeString,
+	"GetEventPlayerChatString": typeString,
 }
 
 // lookupVarType resolves an identifier's JASS type from the local table first
@@ -287,16 +312,18 @@ func (e *emitter) inferExprType(x Expr) string {
 		// A JASS rawcode ('hpea') is an integer; emitted as FourCC("..."),
 		// whose WC3-Lua return is an integer.
 		return typeInteger
-	case *StringLit, *BoolLit, *NullLit:
-		return "" // non-numeric
+	case *StringLit:
+		return typeString
+	case *BoolLit, *NullLit:
+		return "" // non-numeric, non-string
 	case *Ident:
-		return numericType(e.lookupVarType(n.Name))
+		return classifyType(e.lookupVarType(n.Name))
 	case *CallExpr:
-		return numericType(knownNativeReturns[n.Func])
+		return classifyType(knownNativeReturns[n.Func])
 	case *IndexExpr:
 		// Array element type == the array variable's declared element type.
 		if base, ok := n.Base.(*Ident); ok {
-			return numericType(e.lookupVarType(base.Name))
+			return classifyType(e.lookupVarType(base.Name))
 		}
 		return ""
 	case *UnaryExpr:
@@ -333,7 +360,16 @@ func (e *emitter) inferBinaryType(n *BinaryExpr) string {
 	lt := e.inferExprType(n.L)
 	rt := e.inferExprType(n.R)
 	switch n.Op {
-	case "+", "-", "*", "/", "%", "|", "&", "^", "<<", ">>":
+	case "+":
+		// `+` is overloaded in JASS: numeric add OR string concat. If EITHER
+		// operand is provably string the whole expression is a string (so a
+		// chain `a + b + c` of string parts classifies as string and routes
+		// through `..`). Otherwise fall through to the numeric rules below.
+		if lt == typeString || rt == typeString {
+			return typeString
+		}
+		fallthrough
+	case "-", "*", "/", "%", "|", "&", "^", "<<", ">>":
 		if lt == typeInteger && rt == typeInteger {
 			return typeInteger
 		}
@@ -347,7 +383,9 @@ func (e *emitter) inferBinaryType(n *BinaryExpr) string {
 
 // numericType normalizes a JASS type name to "integer" / "real" / "". Only the
 // two numeric primitives matter for the division fix; every other type (string,
-// boolean, handle subtypes, code, unknown) is non-numeric -> "".
+// boolean, handle subtypes, code, unknown) is non-numeric -> "". This is the
+// classifier the integer-division path uses, so it MUST keep treating string as
+// "" -- otherwise a `/` could misfire on a string-typed operand.
 func numericType(t string) string {
 	switch t {
 	case typeInteger:
@@ -356,6 +394,19 @@ func numericType(t string) string {
 		return typeReal
 	}
 	return ""
+}
+
+// classifyType normalizes a JASS type name to one of "integer" / "real" /
+// "string" / "" (unknown / other). It is the superset classifier used by
+// inferExprType for var/native lookups: it adds the string case on top of
+// numericType so the concat fix can route `+` -> `..`. Every non-numeric,
+// non-string type (boolean, handle subtypes, code, user structs, unknown)
+// stays "" -- conservative, so an ambiguous `+` keeps Lua `+`.
+func classifyType(t string) string {
+	if t == typeString {
+		return typeString
+	}
+	return numericType(t)
 }
 
 func (e *emitter) writeIndent() {
@@ -701,12 +752,21 @@ func (e *emitter) emitExpr(x Expr) string {
 		// supports both with identical spelling.
 		return op + e.emitExprWithParens(n.X)
 	case *BinaryExpr:
-		// String concat heuristic: `+` on string literals becomes `..`. We
-		// only have a literal-side hint to go on (no type system), so:
-		// if either side is a StringLit, emit `..`. Otherwise, emit `+`
-		// and let Lua surface the mismatch at runtime if needed.
+		// String concat (P2#9 C1): JASS overloads `+` for numeric add AND
+		// string concat; Lua needs `..` for the latter. Emit `..` when EITHER
+		// operand is provably a string. Two independent signals:
+		//   1. Literal hint (isStringExpr) -- a StringLit anywhere in the
+		//      operand subtree. Preserved verbatim from the original heuristic
+		//      so one-string-literal concats emit EXACTLY as before.
+		//   2. Type inference -- an operand whose inferred type is `string`
+		//      (string-typed var/param/global, or a string-returning known
+		//      native like I2S/GetUnitName). This is what catches the
+		//      literal-free `strA + strB` that previously emitted a wrong `+`.
+		// Conservative: an operand of unknown type contributes neither signal,
+		// so an ambiguous `+` still emits `+`.
 		op := n.Op
-		if op == "+" && (isStringExpr(n.L) || isStringExpr(n.R)) {
+		if op == "+" && (isStringExpr(n.L) || isStringExpr(n.R) ||
+			e.inferExprType(n.L) == typeString || e.inferExprType(n.R) == typeString) {
 			op = ".."
 		} else if op == "/" && e.inferExprType(n.L) == typeInteger && e.inferExprType(n.R) == typeInteger {
 			// Integer division (P1#3): JASS `/` between two integers truncates
@@ -723,16 +783,44 @@ func (e *emitter) emitExpr(x Expr) string {
 		}
 		return e.emitExprWithParens(n.L) + " " + op + " " + e.emitExprWithParens(n.R)
 	case *TernaryExpr:
-		// Lua has no native ternary; lower to `(cond and then) or else`.
-		// Documented caveat: if `then` evaluates to `false` or `nil` the
-		// idiom returns `else` instead of `then`. JASS has no nil but a
-		// boolean `then` is the risky case — append an inline comment when
-		// `then` looks like a boolean expression.
-		out := "((" + e.emitExpr(n.Cond) + ") and (" + e.emitExpr(n.Then) + ") or (" + e.emitExpr(n.Else) + "))"
-		if isLikelyBoolExpr(n.Then) {
-			out += " --[[ ternary: `else` fallback unreliable if `then` is false ]]"
+		// Lua has no native ternary. The classic lowering
+		// `(cond and then) or else` has a well-known bug: when `then`
+		// evaluates to `false` or `nil` (both falsy in Lua) the `and` yields
+		// the falsy value and `or` then returns `else` -- the wrong branch.
+		//
+		// P2#9 C2 fixes this with a two-form strategy that does NO HARM to the
+		// already-correct cases:
+		//
+		//   - SAFE form (provably-truthy `then`): keep the exact
+		//     `((cond) and (then) or (else))` idiom. A `then` arm whose value
+		//     can never be `false`/`nil` (integer/real/string literal or
+		//     typed expr, FourCC, a non-bool unary/arith result, etc.) selects
+		//     correctly, so its emitted text is byte-for-byte unchanged.
+		//
+		//   - CORRECT form (`then` could be false/nil): wrap both arms in a
+		//     1-element table and index `[1]`:
+		//        ((cond) and {then} or {else})[1]
+		//     A table is ALWAYS truthy, so `and` never short-circuits on a
+		//     falsy `then` and the correct branch's table is always chosen;
+		//     `[1]` then unwraps the real value (false/nil included). This is
+		//     self-contained -- no runtime/prelude helper needed, consistent
+		//     with how the rest of the emitter avoids new runtime deps.
+		//
+		// Short-circuit / side-effect note: Lua's `and`/`or` still pick which
+		// TABLE to construct, so only the taken arm's constructor expression is
+		// actually evaluated at runtime -- matching JASS ternary semantics (the
+		// non-taken arm does not run). The two-form split also means the common,
+		// already-correct ternaries keep their exact prior text (do-no-harm).
+		cond := e.emitExpr(n.Cond)
+		then := e.emitExpr(n.Then)
+		els := e.emitExpr(n.Else)
+		if ternaryThenMayBeFalsy(n.Then, e.inferExprType) {
+			// Correct table-wrap form. No caveat comment needed -- this form
+			// returns `then` faithfully even when `then` is false/nil.
+			return "((" + cond + ") and {" + then + "} or {" + els + "})[1]"
 		}
-		return out
+		// Safe form -- provably-truthy `then`, emitted exactly as before.
+		return "((" + cond + ") and (" + then + ") or (" + els + "))"
 	}
 	return "--[[expr?]]"
 }
@@ -748,22 +836,56 @@ func (e *emitter) emitExprWithParens(x Expr) string {
 	return e.emitExpr(x)
 }
 
-// isLikelyBoolExpr is a cheap heuristic the ternary lowering uses to decide
-// whether to append the "false-then" caveat comment. Conservative: only known-
-// boolean-shaped subtrees flag it.
-func isLikelyBoolExpr(x Expr) bool {
+// ternaryThenMayBeFalsy reports whether a ternary's `then` arm could evaluate
+// to Lua `false` or `nil` -- the two values that break the bare
+// `(cond and then) or else` idiom. It returns:
+//
+//   - false  => `then` is PROVABLY truthy, so the cheap `and/or` idiom is
+//     correct and we emit it unchanged (do-no-harm: byte-identical output for
+//     the cases that were already right -- numeric/string/handle-create arms).
+//   - true   => `then` might be false/nil (a boolean expr, a null, or anything
+//     of unknown type, e.g. a function whose return we can't classify), so we
+//     fall back to the correct table-wrap form.
+//
+// Conservative by construction: anything not provably truthy returns true.
+func ternaryThenMayBeFalsy(x Expr, infer func(Expr) string) bool {
 	switch n := x.(type) {
+	case *IntLit, *RealLit, *RawLit, *StringLit:
+		// Numeric/string/rawcode literals are always truthy in Lua (even 0 and
+		// "" are truthy -- only false/nil are falsy).
+		return false
 	case *BoolLit:
+		// `true` is truthy; `false` is the canonical broken case.
+		return !n.Value
+	case *NullLit:
+		// -> Lua nil, falsy.
 		return true
 	case *UnaryExpr:
-		return n.Op == "not"
+		switch n.Op {
+		case "-", "~":
+			// Arithmetic / bitwise unary -> number, always truthy.
+			return false
+		}
+		// `not x` -> boolean, may be false.
+		return true
 	case *BinaryExpr:
 		switch n.Op {
 		case "==", "!=", "<", "<=", ">", ">=", "and", "or":
+			// Comparison / logical -> boolean, may be false.
 			return true
 		}
+		// Arithmetic / concat -> number or string, always truthy.
+		return false
 	}
-	return false
+	// Ident / CallExpr / IndexExpr / MemberExpr / nested ternary: rely on the
+	// type lattice. A provably integer/real/string value is truthy; anything
+	// unknown (could be a boolean native, a null handle, etc.) is treated as
+	// possibly-falsy so we pick the correct form.
+	switch infer(x) {
+	case typeInteger, typeReal, typeString:
+		return false
+	}
+	return true
 }
 
 // isStringExpr is the heuristic for the `+` → `..` concat rewrite. Recursive
