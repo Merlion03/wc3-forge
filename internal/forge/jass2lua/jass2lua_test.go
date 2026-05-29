@@ -348,6 +348,100 @@ endfunction
 	}
 }
 
+// TestTranspileScriptWithErrors_SurfacesParseErrors is the P0#1 regression at
+// the transpiler level: a script with multiple unparseable top-level
+// statements recovers each into a RawStmt/error() marker AND reports each one
+// in the returned parseErrors slice. Previously TranspileScript discarded
+// File.Errors, so callers under-reported the failure count to 0.
+func TestTranspileScriptWithErrors_SurfacesParseErrors(t *testing.T) {
+	// Three bare statements at top level — the top-level parser rejects each
+	// (`call`/`set`/`if` aren't valid file-scope decls), recovering each into
+	// an error() marker.
+	jass := "call DoNothing()\nset x = 1\nif y then\nendif\n"
+	lua, parseErrs, lexErr := TranspileScriptWithErrors(jass)
+	if lexErr != nil {
+		t.Fatalf("unexpected lex error: %v", lexErr)
+	}
+	inlineCount := strings.Count(lua, "error(")
+	if inlineCount == 0 {
+		t.Fatalf("expected inline error() markers in output, got none:\n%s", lua)
+	}
+	if len(parseErrs) == 0 {
+		t.Fatalf("expected non-zero parseErrors, got 0 (under-reporting bug)")
+	}
+	if len(parseErrs) != inlineCount {
+		t.Errorf("parseErrors count (%d) should match inline error() count (%d)\nlua:\n%s\nerrs: %v",
+			len(parseErrs), inlineCount, lua, parseErrs)
+	}
+}
+
+// TestTranspileScriptWithErrors_CleanScriptZeroErrors confirms a well-formed
+// script reports zero errors (no false positives).
+func TestTranspileScriptWithErrors_CleanScriptZeroErrors(t *testing.T) {
+	jass := "function F takes nothing returns nothing\n    call DoNothing()\nendfunction\n"
+	lua, parseErrs, lexErr := TranspileScriptWithErrors(jass)
+	if lexErr != nil {
+		t.Fatalf("unexpected lex error: %v", lexErr)
+	}
+	if len(parseErrs) != 0 {
+		t.Errorf("expected zero parseErrors for clean script, got %d: %v", len(parseErrs), parseErrs)
+	}
+	if strings.Contains(lua, "error(") {
+		t.Errorf("clean script should have no inline error() markers, got:\n%s", lua)
+	}
+}
+
+// TestTranspileFunctionWithErrors_BareStatementBodyClean is the P0#2 regression:
+// a bare-statement body (top-level if/call/set, no `function`/`globals`) must
+// route through the body-fragment parser and transpile to CLEAN Lua with ZERO
+// errors. Previously, if such a body reached the top-level parser it produced
+// a wall of error() (one per line).
+func TestTranspileFunctionWithErrors_BareStatementBodyClean(t *testing.T) {
+	jass := "if x then\n    call F()\n    set y = 1\nendif\n"
+	lua, parseErrs, lexErr := TranspileFunctionWithErrors("Trig", jass)
+	if lexErr != nil {
+		t.Fatalf("unexpected lex error: %v", lexErr)
+	}
+	if len(parseErrs) != 0 {
+		t.Fatalf("expected zero parse errors for bare-statement body, got %d: %v\nlua:\n%s", len(parseErrs), parseErrs, lua)
+	}
+	if strings.Contains(lua, "error(") {
+		t.Errorf("bare-statement body should transpile clean (no error() markers), got:\n%s", lua)
+	}
+	for _, want := range []string{"function Trig()", "if x then", "F()", "y = 1", "end"} {
+		if !strings.Contains(lua, want) {
+			t.Errorf("expected %q in transpiled Lua, got:\n%s", want, lua)
+		}
+	}
+}
+
+// TestHasTopLevelDecl confirms the routing predicate the convert orchestrator
+// uses to distinguish full scripts from bare-statement bodies.
+func TestHasTopLevelDecl(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"bare statements", "if x then\ncall F()\nendif\n", false},
+		{"bare call", "call DoNothing()\n", false},
+		{"function decl", "function F takes nothing returns nothing\nendfunction\n", true},
+		{"globals block", "globals\n    integer x = 0\nendglobals\n", true},
+		{"native decl", "native Foo takes nothing returns nothing\n", true},
+		// hasTopLevelFunction trims leading whitespace per line, so an indented
+		// `function` still counts (intentional — JASS files don't indent decls).
+		{"indented function still counts", "    function F takes nothing returns nothing\nendfunction\n", true},
+		{"keyword as substring not matched", "callback()\nsetters = 1\n", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := HasTopLevelDecl(c.src); got != c.want {
+				t.Errorf("HasTopLevelDecl(%q) = %v, want %v", c.src, got, c.want)
+			}
+		})
+	}
+}
+
 // TestFindVJASSKeyword exercises the vJASS detector against representative
 // inputs. After Phase 4 the keyword list is empty — every known vJASS
 // construct has a preprocessor pass and no source-level keyword should trip

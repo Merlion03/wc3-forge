@@ -563,6 +563,144 @@ func TestTranspilePreview_Smoke(t *testing.T) {
 	}
 }
 
+// TestTranspilePreview_SurfacesInlineErrorCount is the P0#1 regression: a
+// section whose body contains unparseable statements must surface a NON-ZERO
+// error count on section.Errors, matching the number of inline error()/RawStmt
+// markers the emitter wrote. Previously the dialog under-reported these to 0
+// because TranspileScript discarded the recovered File.Errors.
+func TestTranspilePreview_SurfacesInlineErrorCount(t *testing.T) {
+	// A script trigger with three unparseable top-level statements. After the
+	// full preprocessor pipeline these stay as garbage statements; the parser
+	// recovers each into a RawStmt → error() marker.
+	tr := guiOnlyTriggers()
+	tr.Triggers = append(tr.Triggers, wtg.Trigger{
+		Classifier: wtg.ClassifierScript, ID: 11, ParentID: 1,
+		Name: "Broken", IsEnabled: true, InitiallyOn: true, IsScript: true,
+		CustomText: "garbage one two\nmore junk here\nstill broken tokens\n",
+	})
+	tr.Elements = append(tr.Elements, wtg.ElementRef{Kind: wtg.ElementKindTrigger, Index: 1})
+	dir := writeConvertFixture(t, tr)
+	s := &Session{}
+	if err := s.Open(dir); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	preview, err := s.TranspilePreview()
+	if err != nil {
+		t.Fatalf("TranspilePreview: %v", err)
+	}
+	var broken *TranspileSection
+	for i := range preview.Sections {
+		if preview.Sections[i].ID == 11 {
+			broken = &preview.Sections[i]
+			break
+		}
+	}
+	if broken == nil {
+		t.Fatalf("missing section for trigger 11; got %+v", preview.Sections)
+	}
+	inlineCount := strings.Count(broken.Transpiled, "error(")
+	if inlineCount == 0 {
+		t.Fatalf("expected inline error() markers in transpiled output, got none:\n%s", broken.Transpiled)
+	}
+	if len(broken.Errors) == 0 {
+		t.Fatalf("P0#1 regression: section reported 0 errors but produced %d inline error() markers", inlineCount)
+	}
+	if len(broken.Errors) != inlineCount {
+		t.Errorf("section.Errors count (%d) should match inline error() count (%d)\nerrors: %v\nlua:\n%s",
+			len(broken.Errors), inlineCount, broken.Errors, broken.Transpiled)
+	}
+}
+
+// TestTranspilePreview_BareStatementScriptRoutesClean is the P0#2 regression:
+// a script-classified trigger whose body is a bare statement list (no
+// top-level function/globals) must route through the body-fragment parser and
+// transpile to CLEAN Lua with ZERO surfaced errors. Previously such a body
+// hit the top-level parser and produced a wall of error() (one per line).
+func TestTranspilePreview_BareStatementScriptRoutesClean(t *testing.T) {
+	tr := guiOnlyTriggers()
+	tr.Triggers = append(tr.Triggers, wtg.Trigger{
+		Classifier: wtg.ClassifierScript, ID: 11, ParentID: 1,
+		Name: "BareBody", IsEnabled: true, InitiallyOn: true, IsScript: true,
+		CustomText: "if x then\n    call F()\n    set y = 1\nendif\n",
+	})
+	tr.Elements = append(tr.Elements, wtg.ElementRef{Kind: wtg.ElementKindTrigger, Index: 1})
+	dir := writeConvertFixture(t, tr)
+	s := &Session{}
+	if err := s.Open(dir); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	preview, err := s.TranspilePreview()
+	if err != nil {
+		t.Fatalf("TranspilePreview: %v", err)
+	}
+	var sec *TranspileSection
+	for i := range preview.Sections {
+		if preview.Sections[i].ID == 11 {
+			sec = &preview.Sections[i]
+			break
+		}
+	}
+	if sec == nil {
+		t.Fatalf("missing section for trigger 11; got %+v", preview.Sections)
+	}
+	if len(sec.Errors) != 0 {
+		t.Fatalf("P0#2 regression: bare-statement script reported %d errors (should be 0): %v\nlua:\n%s",
+			len(sec.Errors), sec.Errors, sec.Transpiled)
+	}
+	if strings.Contains(sec.Transpiled, "error(") {
+		t.Errorf("bare-statement script should transpile clean (no error() markers), got:\n%s", sec.Transpiled)
+	}
+	for _, want := range []string{"if x then", "F()", "y = 1"} {
+		if !strings.Contains(sec.Transpiled, want) {
+			t.Errorf("expected %q in transpiled Lua, got:\n%s", want, sec.Transpiled)
+		}
+	}
+}
+
+// TestTranspilePreview_FullScriptStillUsesScriptParser confirms P0#2 did not
+// regress true full-script bodies: a body with a top-level `function Foo
+// takes ...` still goes through TranspileScript (emits the function decl
+// verbatim, NOT wrapped in a synthetic shim) and transpiles cleanly.
+func TestTranspilePreview_FullScriptStillUsesScriptParser(t *testing.T) {
+	tr := guiOnlyTriggers()
+	tr.Triggers = append(tr.Triggers, wtg.Trigger{
+		Classifier: wtg.ClassifierScript, ID: 11, ParentID: 1,
+		Name: "FullScript", IsEnabled: true, InitiallyOn: true, IsScript: true,
+		CustomText: "function Foo takes nothing returns nothing\n    call DoNothing()\nendfunction\n",
+	})
+	tr.Elements = append(tr.Elements, wtg.ElementRef{Kind: wtg.ElementKindTrigger, Index: 1})
+	dir := writeConvertFixture(t, tr)
+	s := &Session{}
+	if err := s.Open(dir); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	preview, err := s.TranspilePreview()
+	if err != nil {
+		t.Fatalf("TranspilePreview: %v", err)
+	}
+	var sec *TranspileSection
+	for i := range preview.Sections {
+		if preview.Sections[i].ID == 11 {
+			sec = &preview.Sections[i]
+			break
+		}
+	}
+	if sec == nil {
+		t.Fatalf("missing section for trigger 11; got %+v", preview.Sections)
+	}
+	if len(sec.Errors) != 0 {
+		t.Fatalf("full-script body reported %d errors (should be 0): %v\nlua:\n%s", len(sec.Errors), sec.Errors, sec.Transpiled)
+	}
+	if !strings.Contains(sec.Transpiled, "function Foo()") {
+		t.Errorf("expected verbatim function decl `function Foo()`, got:\n%s", sec.Transpiled)
+	}
+	// The bare-statement shim would wrap in a section-named function; the
+	// full-script path must NOT do that.
+	if strings.Contains(sec.Transpiled, "function FullScript()") || strings.Contains(sec.Transpiled, "function Custom_Script__FullScript()") {
+		t.Errorf("full-script body must not be wrapped in a synthetic shim, got:\n%s", sec.Transpiled)
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
