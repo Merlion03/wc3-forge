@@ -174,7 +174,7 @@ export function registerTools(server: McpServer): void {
   );
   server.tool(
     "map_info_set",
-    "Partial-update map_info. Currently supported keys: name, author, description, suggestedPlayers (strings), lua (bool). Wire shape: { updates: { …keys } }; returns { changed_fields: N }.",
+    "Partial-update map_info. Currently supported keys: name, author, description, suggestedPlayers (strings), lua (bool). Wire shape: { updates: { …keys } }; returns { changed_fields: N }. Recorded on the undo history — reversible via history_undo.",
     {
       updates: z
         .record(z.unknown())
@@ -289,8 +289,16 @@ export function registerTools(server: McpServer): void {
   );
   server.tool(
     "selection_set",
-    "Replace the current selection. Last item in the list becomes the primary selection.",
-    { items: z.array(SELECTION_ITEM) },
+    "Replace the current selection. By default the last item in the list becomes the primary selection; pass 'primary' to override — either an index into items, or a 'kind:id' / bare-'id' selector string.",
+    {
+      items: z.array(SELECTION_ITEM),
+      primary: z
+        .union([z.number().int(), z.string()])
+        .optional()
+        .describe(
+          "Optional primary selection: an index into items, or a 'kind:id' (e.g. 'unit:42') / bare 'id' selector. Defaults to the last item."
+        ),
+    },
     wrap("selection.set")
   );
   server.tool(
@@ -303,9 +311,15 @@ export function registerTools(server: McpServer): void {
   // --- view + camera ------------------------------------------------------
   server.tool(
     "view_set_mode",
-    "Toggle the viewport's editing mode. Accepts 'terrain' or 'doodad' (the underlying handler toggles state — call once per change).",
+    "Toggle the viewport's editing mode. Accepts 'terrain' or 'doodad' (the underlying handler toggles state — call once per change). Records the requested mode on the session; read it back with view_get_mode.",
     { mode: z.enum(["terrain", "doodad"]).optional() },
     wrap("view.set_mode")
+  );
+  server.tool(
+    "view_get_mode",
+    "Read the session's record of the viewport editing mode ('terrain' | 'doodad'). Tracks the last view_set_mode request (defaults to 'doodad'); the live renderer toggle is owned by the frontend, so this reflects the last request rather than a user's manual toolbar click.",
+    {},
+    wrap("view.get_mode")
   );
   server.tool(
     "view_set_doodad_category_visible",
