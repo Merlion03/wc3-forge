@@ -82,6 +82,14 @@ func RegisterAll(b *bridge.Bridge) {
 	// Free-form short string; the App layer composes it into the OS title as
 	// "[*] <map> — <label> — PID <n>".
 	reg("window.set_title", handleWindowSetTitle)
+	// Terrain brushes — minimal per-corner editing of war3map.w3e. set_tile +
+	// set_height are undo-aware mutators that flip dirtyTerrain and fire the
+	// terrain entity-changed event (frontend re-renders terrain); get_tile is a
+	// pure read-back so agents can verify edits live. Handlers live in
+	// handlers_terrain.go; mutators in terrain_mutate.go.
+	reg("terrain.set_tile", handleTerrainSetTile)
+	reg("terrain.set_height", handleTerrainSetHeight)
+	reg("terrain.get_tile", handleTerrainGetTile)
 	// Undo/redo + transactional grouping. AI clients can drive these the same
 	// way the UI does (Ctrl+Z is just a hotkey wrapper around history.undo);
 	// agents that batch multi-step edits should bracket them with
