@@ -368,23 +368,571 @@ export function registerTools(server: McpServer): void {
     wrap("history.end_group")
   );
 
-  // --- object data (unit definitions only — w3u shadow is read-only today)
+  // --- object data (definitions) — all 7 kinds via the objects.<kind>.* wire
+  // namespace. registerObjectKind stamps out the six standard handlers per
+  // kind, matching registerObjectKind in handlers_objects.go exactly.
+  // NOTE: objects.units.* (list/get/fields_meta) used to be hand-registered
+  // here under objects_units_* names; those are now produced by the loop
+  // below so the full set (set_field/create_custom/delete_custom) is reachable
+  // and every kind is symmetric.
+  for (const kind of OBJECT_KINDS) {
+    registerObjectKind(server, kind);
+  }
+  // Cross-kind conversion (doodad↔destructable today). Symmetric wire shape:
+  // caller names src/dst kinds in params.
   server.tool(
-    "objects_units_list",
-    "List all unit definitions (stock SLK rows + per-map w3u overrides). Returns id, name, race, kind (unit/hero/building/special), category, is_custom, is_edited, base_id.",
+    "objects_convert",
+    "Convert one object definition to another kind, creating a new custom in the destination kind. Today only doodads↔destructables is accepted. Returns { id, detail } for the newly-created custom.",
+    {
+      src_kind: z
+        .enum(OBJECT_KINDS)
+        .describe("source kind, e.g. 'doodads'"),
+      src_id: z.string().describe("4-char rawcode of the source object"),
+      dst_kind: z
+        .enum(OBJECT_KINDS)
+        .describe("destination kind, e.g. 'destructables'"),
+    },
+    wrap("objects.convert")
+  );
+
+  // --- triggers (Trigger Editor) -----------------------------------------
+  registerTriggerTools(server);
+
+  // --- entity create/delete + terrain (NEW contract methods) -------------
+  // These mirror the WIRE-METHOD CONTRACT shared with the entity + terrain
+  // agents. Some may not be on the currently-built binary yet; the tool will
+  // simply error at call time until the matching Go handler ships.
+  registerContractTools(server);
+}
+
+// ===========================================================================
+// Object Editor — per-kind tool factory.
+// ===========================================================================
+
+// OBJECT_KINDS is the exact set of KindConfig.Kind wire tags from
+// internal/forge/objects.go. Order matches handlers.go's RegisterAll calls.
+// 'destructables' is spelled the WC3-native way (not 'destructibles') to match
+// the wire — do not "correct" it.
+const OBJECT_KINDS = [
+  "units",
+  "items",
+  "abilities",
+  "buffs",
+  "destructables",
+  "doodads",
+  "upgrades",
+] as const;
+
+type ObjectKind = (typeof OBJECT_KINDS)[number];
+
+// registerObjectKind stamps out the six standard object-definition tools for a
+// single kind, mirroring registerObjectKind(reg, cfg) in handlers_objects.go:
+//   objects.<kind>.list / .get / .fields_meta
+//   objects.<kind>.set_field / .create_custom / .delete_custom
+function registerObjectKind(server: McpServer, kind: ObjectKind): void {
+  const rc = "4-char rawcode";
+  server.tool(
+    `objects_${kind}_list`,
+    `List all ${kind} definitions (stock SLK rows + per-map object-data overrides). Returns id, name, race, kind, category, is_custom, is_edited, base_id, icon_art — flat rows the UI groups into a tree client-side.`,
     {},
-    wrap("objects.units.list")
+    wrap(`objects.${kind}.list`)
   );
   server.tool(
-    "objects_units_get",
-    "Return the full field map for a unit definition by id (4-char rawcode). Includes raw values, display-resolved values, and category metadata.",
-    { id: z.string().describe("4-char unit rawcode, e.g. 'hfoo' or a custom id") },
-    wrap("objects.units.get")
+    `objects_${kind}_get`,
+    `Return the full field map for one ${kind} definition by id (${rc}). Includes raw values, display-resolved values (with and without WC3 color codes), per-field category/type metadata, and the model/icon paths.`,
+    { id: z.string().describe(`${rc} of the ${kind} object`) },
+    wrap(`objects.${kind}.get`)
   );
   server.tool(
-    "objects_units_fields_meta",
-    "Return UnitMetaData — the schema for unit-definition fields (id, field, display_name, category, type). Used to drive a dynamic editor UI.",
+    `objects_${kind}_fields_meta`,
+    `Return the field schema (MetaData) for ${kind} definitions: id, field (SLK column), display_name, category, type, min_val, max_val. Drives a dynamic editor UI.`,
     {},
-    wrap("objects.units.fields_meta")
+    wrap(`objects.${kind}.fields_meta`)
+  );
+  server.tool(
+    `objects_${kind}_set_field`,
+    `Set one field on a ${kind} definition (writes the per-map object-data shadow; undo-aware). Re-emits the post-mutation get payload. Pass an optional 'level' for leveled fields (e.g. ability levels); omit for non-leveled fields.`,
+    {
+      id: z.string().describe(`${rc} of the ${kind} object to edit`),
+      column: z.string().describe("SLK column name (lowercased), e.g. 'name', 'hp'"),
+      value: z.string().describe("raw cell value to write (stringified)"),
+      level: z
+        .number()
+        .int()
+        .optional()
+        .describe("optional 1-based level for leveled fields (ability/upgrade); omit for flat fields"),
+    },
+    wrap(`objects.${kind}.set_field`)
+  );
+  server.tool(
+    `objects_${kind}_create_custom`,
+    `Create a new custom ${kind} definition cloned from a base object. Returns { id, detail } where id is the new custom's rawcode. Undo-aware.`,
+    {
+      base_id: z.string().describe(`${rc} of the base object to clone from`),
+      id: z
+        .string()
+        .optional()
+        .describe(`optional explicit ${rc} for the new custom; auto-assigned when omitted`),
+    },
+    wrap(`objects.${kind}.create_custom`)
+  );
+  server.tool(
+    `objects_${kind}_delete_custom`,
+    `Delete a custom ${kind} definition by id (${rc}). Only custom objects can be deleted; stock rows error. Undo-aware. Returns { ok: true }.`,
+    { id: z.string().describe(`${rc} of the custom ${kind} object to delete`) },
+    wrap(`objects.${kind}.delete_custom`)
+  );
+}
+
+// ===========================================================================
+// Trigger Editor — all 38 triggers.* methods.
+// ===========================================================================
+
+// ID + parent shapes shared across many trigger tools.
+const ECA_TYPE = z
+  .number()
+  .int()
+  .describe("wtg.ECAType: 0=event, 1=condition, 2=action, 3=call");
+const PARAM_TYPE = z
+  .number()
+  .int()
+  .describe("wtg.ParamType: 0=preset, 1=variable, 2=function, 3=string");
+
+function registerTriggerTools(server: McpServer): void {
+  // --- read ---------------------------------------------------------------
+  server.tool(
+    "triggers_tree",
+    "Return the full trigger tree (categories + triggers + variables) for the loaded map in one shot — a flat node array the UI stitches into a hierarchy via parent_id. Empty (non-error) when no map / no triggers.",
+    {},
+    wrap("triggers.tree")
+  );
+  server.tool(
+    "triggers_get",
+    "Return one trigger node's full detail by id: category, trigger (with nested ECAs + sub-parameters + custom_text), or variable. Exactly one is populated; 'kind' disambiguates.",
+    { id: z.number().int().describe("node id from triggers_tree") },
+    wrap("triggers.get")
+  );
+  server.tool(
+    "triggers_functions_meta",
+    "Return the TriggerData.txt vocabulary: every event/condition/action/call function, plus category labels, type metadata, and presets. Large, static payload used to render GUI labels client-side.",
+    {},
+    wrap("triggers.functions_meta")
+  );
+  server.tool(
+    "triggers_search",
+    "Fuzzy substring search across all triggers. Empty query returns the first N triggers by name. Returns { hits, truncated }.",
+    {
+      query: z.string().describe("substring to match (empty = first N by name)"),
+      limit: z.number().int().optional().describe("max hits (default 50)"),
+    },
+    wrap("triggers.search")
+  );
+
+  // --- structural adds ----------------------------------------------------
+  server.tool(
+    "triggers_add_category",
+    "Add a trigger category (folder). Returns the refreshed tree + the new node's detail.",
+    {
+      name: z.string().describe("category display name"),
+      parent_id: z.number().int().describe("parent node id (0 / map-root for top level)"),
+    },
+    wrap("triggers.add_category")
+  );
+  server.tool(
+    "triggers_add_gui",
+    "Add a normal GUI trigger (holds ECAs). Returns the refreshed tree + the new trigger's detail.",
+    {
+      name: z.string().describe("trigger name"),
+      parent_id: z.number().int().describe("parent category id"),
+    },
+    wrap("triggers.add_gui")
+  );
+  server.tool(
+    "triggers_add_script",
+    "Add a custom-script (JASS/Lua) trigger. Returns the refreshed tree + the new trigger's detail.",
+    {
+      name: z.string().describe("trigger name"),
+      parent_id: z.number().int().describe("parent category id"),
+    },
+    wrap("triggers.add_script")
+  );
+  server.tool(
+    "triggers_add_comment",
+    "Add a comment trigger node. Returns the refreshed tree + the new node's detail.",
+    {
+      name: z.string().describe("comment text / name"),
+      parent_id: z.number().int().describe("parent category id"),
+    },
+    wrap("triggers.add_comment")
+  );
+  server.tool(
+    "triggers_add_variable",
+    "Add a global trigger variable (udg_*). Returns the refreshed tree + the new variable's detail.",
+    {
+      name: z.string().describe("variable name (without udg_ prefix)"),
+      type: z.string().describe("WC3 variable type, e.g. 'integer', 'unit', 'real'"),
+      is_array: z.boolean().describe("true for an array variable"),
+      array_size: z.number().int().describe("array size when is_array (else 0)"),
+      initial_value: z.string().describe("initial value literal ('' for none)"),
+    },
+    wrap("triggers.add_variable")
+  );
+
+  // --- node-level edits ---------------------------------------------------
+  server.tool(
+    "triggers_delete",
+    "Delete a trigger node (category / trigger / variable) by id. Returns the refreshed tree.",
+    { id: z.number().int().describe("node id to delete") },
+    wrap("triggers.delete")
+  );
+  server.tool(
+    "triggers_rename",
+    "Rename a trigger node by id. Returns the refreshed tree + the node's detail.",
+    {
+      id: z.number().int().describe("node id"),
+      name: z.string().describe("new name"),
+    },
+    wrap("triggers.rename")
+  );
+  server.tool(
+    "triggers_move",
+    "Re-parent a trigger node under a new parent. Returns the refreshed tree + the node's detail.",
+    {
+      id: z.number().int().describe("node id to move"),
+      new_parent_id: z.number().int().describe("destination parent node id"),
+    },
+    wrap("triggers.move")
+  );
+  server.tool(
+    "triggers_set_enabled",
+    "Toggle a trigger's enabled flag. Returns the refreshed tree + the node's detail.",
+    {
+      id: z.number().int().describe("trigger id"),
+      value: z.boolean().describe("true = enabled"),
+    },
+    wrap("triggers.set_enabled")
+  );
+  server.tool(
+    "triggers_set_initially_on",
+    "Toggle a trigger's 'initially on' flag. Returns the refreshed tree + the node's detail.",
+    {
+      id: z.number().int().describe("trigger id"),
+      value: z.boolean().describe("true = initially on"),
+    },
+    wrap("triggers.set_initially_on")
+  );
+  server.tool(
+    "triggers_set_run_on_init",
+    "Toggle a trigger's 'run on map initialization' flag. Returns the refreshed tree + the node's detail.",
+    {
+      id: z.number().int().describe("trigger id"),
+      value: z.boolean().describe("true = run on initialization"),
+    },
+    wrap("triggers.set_run_on_init")
+  );
+  server.tool(
+    "triggers_set_description",
+    "Set a trigger's description text. Returns the refreshed tree + the node's detail.",
+    {
+      id: z.number().int().describe("trigger id"),
+      text: z.string().describe("description text"),
+    },
+    wrap("triggers.set_description")
+  );
+  server.tool(
+    "triggers_set_custom_text",
+    "Set a custom-script trigger's raw script text. Returns the refreshed tree + the node's detail.",
+    {
+      id: z.number().int().describe("trigger id (a script trigger)"),
+      text: z.string().describe("JASS/Lua source text"),
+    },
+    wrap("triggers.set_custom_text")
+  );
+  server.tool(
+    "triggers_set_variable",
+    "Edit an existing trigger variable's name/type/array/initial-value. Returns the refreshed tree + the variable's detail.",
+    {
+      id: z.number().int().describe("variable node id"),
+      name: z.string().describe("variable name"),
+      type: z.string().describe("WC3 variable type"),
+      is_array: z.boolean(),
+      array_size: z.number().int(),
+      initial_value: z.string(),
+    },
+    wrap("triggers.set_variable")
+  );
+  server.tool(
+    "triggers_set_map_header_script",
+    "Set the map-header custom script (the global JASS/Lua block at the top of the map's script). Returns the refreshed tree.",
+    { content: z.string().describe("header script source text") },
+    wrap("triggers.set_map_header_script")
+  );
+
+  // --- ECA-list mutation --------------------------------------------------
+  server.tool(
+    "triggers_add_eca",
+    "Add a top-level ECA (event/condition/action/call) to a trigger. Returns the refreshed tree + the trigger's detail.",
+    {
+      trigger_id: z.number().int().describe("target trigger id"),
+      eca_type: ECA_TYPE,
+      name: z.string().describe("function name from triggers_functions_meta"),
+      position: z
+        .number()
+        .int()
+        .optional()
+        .describe("insert index within the ECA group; omit to append"),
+    },
+    wrap("triggers.add_eca")
+  );
+  server.tool(
+    "triggers_add_nested_eca",
+    "Add an ECA nested inside a magic/container ECA (IfThenElse Then-branch, ForLoop body, etc.). Returns the refreshed tree + the trigger's detail.",
+    {
+      trigger_id: z.number().int().describe("target trigger id"),
+      parent_path: z
+        .array(z.number().int())
+        .describe("ECA path to the container ECA (array of child indices)"),
+      eca_type: ECA_TYPE,
+      name: z.string().describe("function name"),
+      group_id: z
+        .number()
+        .int()
+        .describe("magic-ECA child group id (selects which branch/body)"),
+    },
+    wrap("triggers.add_nested_eca")
+  );
+  server.tool(
+    "triggers_move_eca",
+    "Move an ECA within its sibling group to a new position. Returns the refreshed tree + the trigger's detail.",
+    {
+      trigger_id: z.number().int().describe("target trigger id"),
+      eca_path: z
+        .array(z.number().int())
+        .describe("ECA path (array of child indices) addressing the ECA to move"),
+      new_position: z.number().int().describe("new index within the sibling group"),
+    },
+    wrap("triggers.move_eca")
+  );
+  server.tool(
+    "triggers_delete_eca",
+    "Delete an ECA (and its nested children) by path. Returns the refreshed tree + the trigger's detail.",
+    {
+      trigger_id: z.number().int().describe("target trigger id"),
+      eca_path: z
+        .array(z.number().int())
+        .describe("ECA path (array of child indices)"),
+    },
+    wrap("triggers.delete_eca")
+  );
+  server.tool(
+    "triggers_set_eca_enabled",
+    "Toggle an ECA's enabled flag. Returns the refreshed tree + the trigger's detail.",
+    {
+      trigger_id: z.number().int().describe("target trigger id"),
+      eca_path: z.array(z.number().int()).describe("ECA path (array of child indices)"),
+      enabled: z.boolean(),
+    },
+    wrap("triggers.set_eca_enabled")
+  );
+
+  // --- parameter mutation -------------------------------------------------
+  server.tool(
+    "triggers_set_param_value",
+    "Set one parameter slot's value inside an ECA. Use param_path (array, addresses sub-parameter chains) OR the legacy param_index (single int). Returns the refreshed tree + the trigger's detail.",
+    {
+      trigger_id: z.number().int().describe("target trigger id"),
+      eca_path: z.array(z.number().int()).describe("ECA path (array of child indices)"),
+      param_path: z
+        .array(z.number().int())
+        .optional()
+        .describe("2b2 shape: addresses sub-parameter chains; wins over param_index"),
+      param_index: z
+        .number()
+        .int()
+        .optional()
+        .describe("legacy single-index shape; used when param_path omitted"),
+      value: z.string().describe("the value literal / variable name / preset key / function name"),
+      param_type: PARAM_TYPE,
+    },
+    wrap("triggers.set_param_value")
+  );
+  server.tool(
+    "triggers_set_param_sub_function",
+    "Attach a sub-function (nested call) to a parameter slot. Returns the refreshed tree + the trigger's detail.",
+    {
+      trigger_id: z.number().int().describe("target trigger id"),
+      eca_path: z.array(z.number().int()).describe("ECA path (array of child indices)"),
+      param_path: z.array(z.number().int()).describe("parameter path (sub-parameter chain)"),
+      sub_name: z.string().describe("sub-function name from triggers_functions_meta"),
+    },
+    wrap("triggers.set_param_sub_function")
+  );
+  server.tool(
+    "triggers_clear_param_sub_function",
+    "Remove a sub-function from a parameter slot, reverting it to a plain value. Returns the refreshed tree + the trigger's detail.",
+    {
+      trigger_id: z.number().int().describe("target trigger id"),
+      eca_path: z.array(z.number().int()).describe("ECA path (array of child indices)"),
+      param_path: z.array(z.number().int()).describe("parameter path (sub-parameter chain)"),
+    },
+    wrap("triggers.clear_param_sub_function")
+  );
+  server.tool(
+    "triggers_set_param_array",
+    "Toggle a parameter slot's array-index flag (so it reads var[index] vs var). Returns the refreshed tree + the trigger's detail.",
+    {
+      trigger_id: z.number().int().describe("target trigger id"),
+      eca_path: z.array(z.number().int()).describe("ECA path (array of child indices)"),
+      param_path: z.array(z.number().int()).describe("parameter path (sub-parameter chain)"),
+      is_array: z.boolean(),
+    },
+    wrap("triggers.set_param_array")
+  );
+
+  // --- entity instance pickers (read-only) -------------------------------
+  server.tool(
+    "triggers_list_regions",
+    "List the map's regions (war3map.w3r) with their gg_rct_* codegen names — for region-typed parameter pickers.",
+    {},
+    wrap("triggers.list_regions")
+  );
+  server.tool(
+    "triggers_list_cameras",
+    "List the map's camera presets (war3map.w3c) with their gg_cam_* codegen names — for camera-typed parameter pickers.",
+    {},
+    wrap("triggers.list_cameras")
+  );
+  server.tool(
+    "triggers_list_unit_instances",
+    "List placed unit instances with their gg_unit_* codegen names — for unit-typed parameter pickers.",
+    {},
+    wrap("triggers.list_unit_instances")
+  );
+  server.tool(
+    "triggers_list_destructable_instances",
+    "List placed destructable instances with their gg_dest_* codegen names — for destructable-typed parameter pickers.",
+    {},
+    wrap("triggers.list_destructable_instances")
+  );
+
+  // --- codegen / convert / test ------------------------------------------
+  server.tool(
+    "triggers_generate_script",
+    "Generate the war3map.lua script text from the current triggers WITHOUT writing it. Returns { text, bytes }.",
+    {},
+    wrap("triggers.generate_script")
+  );
+  server.tool(
+    "triggers_save_script",
+    "Generate + write war3map.lua to the map source. Returns { bytes }. Errors for MPQ-backed maps (extract to a folder first).",
+    {},
+    wrap("triggers.save_script")
+  );
+  server.tool(
+    "triggers_test_map",
+    "Full Test Map pipeline: save pending edits, regenerate + write war3map.lua, then launch WC3 with the map preloaded. Returns { ok: true }.",
+    {},
+    wrap("triggers.test_map")
+  );
+  server.tool(
+    "triggers_transpile_preview",
+    "Return the read-only Convert-to-Lua diff preview (vJASS → Lua) without writing anything.",
+    {},
+    wrap("triggers.transpile_preview")
+  );
+  server.tool(
+    "triggers_check_convert_to_lua",
+    "Read-only blocker scan for the Convert-Map-to-Lua flow. Always returns a result payload (blockers may be empty); never mutates.",
+    {},
+    wrap("triggers.check_convert_to_lua")
+  );
+  server.tool(
+    "triggers_convert_to_lua",
+    "Run the full Convert-Map-to-Lua conversion. When blockers exist, returns a { blockers: [...] } payload (NOT an error) so the UI can render them. Other failures error. Accepts optional { backup } (default true).",
+    {
+      backup: z
+        .boolean()
+        .optional()
+        .describe("write a backup of the original script before converting (default true)"),
+    },
+    wrap("triggers.convert_to_lua")
+  );
+}
+
+// ===========================================================================
+// NEW contract methods — entity create/delete + terrain. Exposed per the
+// shared WIRE-METHOD CONTRACT; the matching Go handlers ship from the entity
+// and terrain agents. Until then these tools error cleanly at call time.
+// ===========================================================================
+
+function registerContractTools(server: McpServer): void {
+  server.tool(
+    "units_create",
+    "Create a new placed unit in war3mapUnits.doo. x/y are WC3 world units (origin = map center). Returns { creation_number }. Undo-aware; emits the standard change events.",
+    {
+      type_id: z.string().describe("4-char unit rawcode, e.g. 'hfoo'"),
+      player: z.number().int().describe("owning player slot (0-based; 27 = neutral hostile)"),
+      x: z.number().describe("world X (origin = map center)"),
+      y: z.number().describe("world Y (origin = map center)"),
+      z: z.number().optional().describe("world Z (default 0 / terrain height)"),
+      rotation: z.number().optional().describe("facing angle in radians (Z-axis); default 0"),
+      scale: z.number().optional().describe("uniform scale (default 1.0)"),
+    },
+    wrap("units.create")
+  );
+  server.tool(
+    "units_delete",
+    "Delete a placed unit by creation_number. Returns { ok: true }. Undo-aware; emits the standard change events.",
+    { creation_number: z.number().int().describe("creation_number from units_list") },
+    wrap("units.delete")
+  );
+  server.tool(
+    "doodads_create",
+    "Create a new placed doodad/destructable in war3map.doo. x/y are WC3 world units (origin = map center). Returns { creation_number }. Undo-aware; emits the standard change events.",
+    {
+      type_id: z.string().describe("4-char doodad/destructable rawcode"),
+      x: z.number().describe("world X (origin = map center)"),
+      y: z.number().describe("world Y (origin = map center)"),
+      z: z.number().optional().describe("world Z (default 0 / terrain height)"),
+      rotation: z.number().optional().describe("facing angle in radians; default 0"),
+      scale: z.number().optional().describe("uniform scale (default 1.0)"),
+      variation: z.number().int().optional().describe("doodad variation index (default 0)"),
+    },
+    wrap("doodads.create")
+  );
+  server.tool(
+    "doodads_delete",
+    "Delete a placed doodad/destructable by creation_number. Returns { ok: true }. Undo-aware; emits the standard change events.",
+    { creation_number: z.number().int().describe("creation_number from doodads_list") },
+    wrap("doodads.delete")
+  );
+  server.tool(
+    "terrain_set_tile",
+    "Set the ground texture (tile) at a terrain corner. col/row are 0-based corner grid indices. ground_tile_id is a 4-char FourCC that must be in the map's ground tile palette. Returns { ok: true }. Undo-aware.",
+    {
+      col: z.number().int().describe("0-based terrain corner column"),
+      row: z.number().int().describe("0-based terrain corner row"),
+      ground_tile_id: z.string().describe("4-char FourCC in the map ground palette"),
+    },
+    wrap("terrain.set_tile")
+  );
+  server.tool(
+    "terrain_set_height",
+    "Set the height at a terrain corner. col/row are 0-based corner grid indices. Returns { ok: true }. Undo-aware.",
+    {
+      col: z.number().int().describe("0-based terrain corner column"),
+      row: z.number().int().describe("0-based terrain corner row"),
+      height: z.number().describe("terrain height value"),
+    },
+    wrap("terrain.set_height")
+  );
+  server.tool(
+    "terrain_get_tile",
+    "Read back the ground tile + height at a terrain corner (so edits are verifiable). col/row are 0-based corner grid indices. Returns { col, row, ground_tile_id, height }.",
+    {
+      col: z.number().int().describe("0-based terrain corner column"),
+      row: z.number().int().describe("0-based terrain corner row"),
+    },
+    wrap("terrain.get_tile")
   );
 }
