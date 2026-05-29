@@ -366,11 +366,28 @@ func EmitAllStructLua(res StructResult) string {
 // The marker line is replaced WHOLE; surrounding lines are preserved
 // verbatim. This is the splice anchor the marker-comment strategy relies on.
 func SpliceStructLua(lua string, res StructResult) string {
+	out, _ := SpliceStructLuaWithErrors(lua, res)
+	return out
+}
+
+// SpliceStructLuaWithErrors is the error-surfacing variant of SpliceStructLua.
+// It performs the identical splice AND returns the per-statement parse errors
+// recovered while transpiling each spliced struct's method bodies. Each error
+// maps 1:1 to an inline `error("jass2lua failed: ...")` marker the emitter wrote
+// inside a struct method, and is prefixed with the owning struct + method name.
+//
+// This closes the P0#1 gap: struct method-body transpile failures used to be
+// emitted as inline error() markers but were swallowed (emitStructLua returned
+// only a string), so section.Errors under-reported them to 0. Callers that want
+// the section's reported error count to match reality (transpileSectionScript /
+// transpileSectionCustomText) use this variant and append the returned errors.
+func SpliceStructLuaWithErrors(lua string, res StructResult) (string, []string) {
 	if len(res.Structs) == 0 {
-		return lua
+		return lua, nil
 	}
 	var out strings.Builder
 	out.Grow(len(lua) + 1024)
+	var errs []string
 	lines := splitLinesKeepEnd(lua)
 	for _, line := range lines {
 		trim := strings.TrimSpace(strings.TrimRight(line, "\r\n"))
@@ -381,12 +398,12 @@ func SpliceStructLua(lua string, res StructResult) string {
 				out.WriteString(line)
 				continue
 			}
-			emitStructLua(&out, s)
+			emitStructLuaInto(&out, s, &errs)
 			continue
 		}
 		out.WriteString(line)
 	}
-	return out.String()
+	return out.String(), errs
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,6 +1042,15 @@ func rewriteStructRefs(src string, structs map[string]StructDef, knownNames map[
 
 // emitStructLua writes the Lua snippet for one struct into b.
 func emitStructLua(b *strings.Builder, s StructDef) {
+	emitStructLuaInto(b, s, nil)
+}
+
+// emitStructLuaInto is the error-collecting form of emitStructLua. When errs is
+// non-nil, the per-statement parse errors recovered while transpiling each
+// method body are appended to it (via emitStructMethodInto). Passing nil keeps
+// the original emit-only behavior. This is the seam that lets the struct-splice
+// path surface struct-method failures to section.Errors (P0#1 completion).
+func emitStructLuaInto(b *strings.Builder, s StructDef, errs *[]string) {
 	// Header comment + class table init.
 	if s.Extends != "" {
 		fmt.Fprintf(b, "-- struct %s extends %s\n", s.Name, s.Extends)
@@ -1079,7 +1105,7 @@ func emitStructLua(b *strings.Builder, s StructDef) {
 
 	// User-defined methods.
 	for _, m := range s.Methods {
-		emitStructMethod(b, s, m)
+		emitStructMethodInto(b, s, m, errs)
 		// Operator overload (Phase 5): after emitting the named fallback
 		// method, wire up the corresponding Lua metamethod when possible.
 		if m.Operator != "" {
@@ -1187,6 +1213,16 @@ func emitOperatorMetamethod(b *strings.Builder, s StructDef, m StructMethod) {
 // raw body BEFORE transpiling so the body looks like plain JASS to the
 // transpiler.
 func emitStructMethod(b *strings.Builder, s StructDef, m StructMethod) {
+	emitStructMethodInto(b, s, m, nil)
+}
+
+// emitStructMethodInto is the error-collecting form of emitStructMethod. When
+// errs is non-nil, every per-statement parse error the method body produced
+// (each 1:1 with an inline `error(...)` marker in the emitted Lua) is appended,
+// prefixed with the struct + method name so the section's diagnostics list
+// identifies WHICH method failed. Passing nil preserves the original
+// emit-only behavior for callers that don't want diagnostics.
+func emitStructMethodInto(b *strings.Builder, s StructDef, m StructMethod, errs *[]string) {
 	body := rewriteMethodBody(s.Name, m)
 	// Build a JASS function wrapper around the body so the transpiler treats
 	// it as a function decl. Instance methods get `self` as the first param
@@ -1214,7 +1250,16 @@ func emitStructMethod(b *strings.Builder, s StructDef, m StructMethod) {
 	}
 	// Transpile the body. We wrap it as a function so the JASS parser
 	// accepts the statement list, then extract the body lines.
-	lua := transpileMethodBody(body)
+	lua, parseErrs := transpileMethodBodyWithErrors(body)
+	if errs != nil {
+		for _, pe := range parseErrs {
+			pe = strings.TrimSpace(pe)
+			if pe == "" {
+				continue
+			}
+			*errs = append(*errs, fmt.Sprintf("struct %s method %s: %s", s.Name, m.Name, pe))
+		}
+	}
 	// Indent each non-empty line by one tab.
 	for _, line := range splitLinesKeepEnd(lua) {
 		if strings.TrimSpace(line) == "" {
@@ -1313,8 +1358,19 @@ func rewriteMethodBody(structName string, m StructMethod) string {
 // then strip the wrapping `function Wrapped()` and `end` lines off the
 // result.
 func transpileMethodBody(body string) string {
+	lua, _ := transpileMethodBodyWithErrors(body)
+	return lua
+}
+
+// transpileMethodBodyWithErrors is the error-surfacing variant of
+// transpileMethodBody. It returns the stripped Lua body AND the per-statement
+// parse errors the transpiler recovered (each maps 1:1 to an inline
+// `error("jass2lua failed: ...")` marker the emitter wrote inside the method
+// body). The struct-splice path threads these out so section.Errors finally
+// counts struct-method failures instead of swallowing them (P0#1 completion).
+func transpileMethodBodyWithErrors(body string) (string, []string) {
 	wrapped := "function __vjass_struct_method takes nothing returns nothing\n" + body + "\nendfunction\n"
-	lua, _ := TranspileScript(wrapped)
+	lua, parseErrs, _ := TranspileScriptWithErrors(wrapped)
 	// Strip the `function __vjass_struct_method()` opener and matching
 	// `end` closer + the trailing blank line.
 	lines := strings.Split(lua, "\n")
@@ -1340,7 +1396,7 @@ func transpileMethodBody(body string) string {
 	for i, ln := range inner {
 		inner[i] = strings.TrimPrefix(ln, "\t")
 	}
-	return strings.Join(inner, "\n") + "\n"
+	return strings.Join(inner, "\n") + "\n", parseErrs
 }
 
 // defaultForStructField returns the Lua literal to initialize a field. If the

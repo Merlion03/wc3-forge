@@ -611,6 +611,71 @@ func TestTranspilePreview_SurfacesInlineErrorCount(t *testing.T) {
 	}
 }
 
+// TestTranspilePreview_SurfacesStructMethodErrorCount is the P0#1 COMPLETION
+// regression: a script section that defines a vJASS struct whose method body
+// contains an unparseable statement must surface a NON-ZERO section.Errors
+// count. Before this fix the struct-method error() markers were emitted into
+// the spliced Lua but swallowed (SpliceStructLua returned only a string), so
+// the section under-reported these to 0 — the exact gap the verifier found on
+// "Dialog System" (91 inline error() / 0 reported).
+func TestTranspilePreview_SurfacesStructMethodErrorCount(t *testing.T) {
+	tr := guiOnlyTriggers()
+	// A struct with two methods: one clean, one whose body has an unparseable
+	// statement. The struct preprocessor strips the block to a marker; the
+	// splice transpiles each method body and now surfaces the recovered error.
+	body := "struct Widget\n" +
+		"    method ok takes nothing returns nothing\n" +
+		"        call BJDebugMsg(\"hi\")\n" +
+		"    endmethod\n" +
+		"    method bork takes nothing returns nothing\n" +
+		"        garbage tokens here\n" +
+		"    endmethod\n" +
+		"endstruct\n"
+	tr.Triggers = append(tr.Triggers, wtg.Trigger{
+		Classifier: wtg.ClassifierScript, ID: 11, ParentID: 1,
+		Name: "StructBork", IsEnabled: true, InitiallyOn: true, IsScript: true,
+		CustomText: body,
+	})
+	tr.Elements = append(tr.Elements, wtg.ElementRef{Kind: wtg.ElementKindTrigger, Index: 1})
+	dir := writeConvertFixture(t, tr)
+	s := &Session{}
+	if err := s.Open(dir); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	preview, err := s.TranspilePreview()
+	if err != nil {
+		t.Fatalf("TranspilePreview: %v", err)
+	}
+	var sec *TranspileSection
+	for i := range preview.Sections {
+		if preview.Sections[i].ID == 11 {
+			sec = &preview.Sections[i]
+			break
+		}
+	}
+	if sec == nil {
+		t.Fatalf("missing section for trigger 11; got %+v", preview.Sections)
+	}
+	inlineCount := strings.Count(sec.Transpiled, "error(")
+	if inlineCount == 0 {
+		t.Fatalf("expected inline error() markers from the bad struct method, got none:\n%s", sec.Transpiled)
+	}
+	if len(sec.Errors) == 0 {
+		t.Fatalf("P0#1 completion regression: struct-method failure produced %d inline error() markers but section reported 0 errors", inlineCount)
+	}
+	// At least one surfaced error must point at the offending struct method.
+	found := false
+	for _, e := range sec.Errors {
+		if strings.Contains(e, "struct Widget method bork") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a surfaced error naming `struct Widget method bork`, got: %v", sec.Errors)
+	}
+}
+
 // TestTranspilePreview_BareStatementScriptRoutesClean is the P0#2 regression:
 // a script-classified trigger whose body is a bare statement list (no
 // top-level function/globals) must route through the body-fragment parser and

@@ -357,8 +357,15 @@ func transpileSectionScript(id int32, label, kind, src string) TranspileSection 
 	} else {
 		lua, parseErrs, lexErr = jass2lua.TranspileFunctionWithErrors(sectionFuncName(label, id), st.Expanded)
 	}
+	// P0#1 completion: struct method bodies are transpiled DURING the splice
+	// (emitStructLuaInto → transpileMethodBodyWithErrors). Those per-statement
+	// parse errors were previously swallowed (SpliceStructLua returned only a
+	// string), so a section full of struct-method error() markers reported
+	// section.Errors==0. Collect them here and fold them into the section's
+	// errors alongside the top-level body's parse errors.
+	var structErrs []string
 	if lexErr == nil || lua != "" {
-		lua = jass2lua.SpliceStructLua(lua, st)
+		lua, structErrs = jass2lua.SpliceStructLuaWithErrors(lua, st)
 	}
 	sec := TranspileSection{
 		ID:                 id,
@@ -378,6 +385,7 @@ func transpileSectionScript(id int32, label, kind, src string) TranspileSection 
 	// the section's Errors now reflects reality instead of under-reporting to 0.
 	sec.Errors = appendErrorMessage(sec.Errors, lexErr)
 	sec.Errors = appendErrorMessages(sec.Errors, parseErrs)
+	sec.Errors = appendErrorMessages(sec.Errors, structErrs)
 	return sec
 }
 
@@ -406,8 +414,11 @@ func transpileSectionCustomText(id int32, triggerName, src string) TranspileSect
 	known := jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil)
 	st := jass2lua.PreprocessStructs(withoutDefines, mods.Modules, known)
 	lua, parseErrs, lexErr := jass2lua.TranspileFunctionWithErrors(triggerName+"_CustomText", st.Expanded)
+	// P0#1 completion: also surface struct method-body transpile errors produced
+	// during the splice (see transpileSectionScript for the full rationale).
+	var structErrs []string
 	if lexErr == nil || lua != "" {
-		lua = jass2lua.SpliceStructLua(lua, st)
+		lua, structErrs = jass2lua.SpliceStructLuaWithErrors(lua, st)
 	}
 	sec := TranspileSection{
 		ID:                 id,
@@ -426,6 +437,7 @@ func transpileSectionCustomText(id int32, triggerName, src string) TranspileSect
 	// string (or nothing).
 	sec.Errors = appendErrorMessage(sec.Errors, lexErr)
 	sec.Errors = appendErrorMessages(sec.Errors, parseErrs)
+	sec.Errors = appendErrorMessages(sec.Errors, structErrs)
 	return sec
 }
 
