@@ -233,8 +233,28 @@ func StripBlockComments(src string) string {
 // Subsequent matching calls produce an empty expansion + a comment noting
 // the suppression.
 func Preprocess(jass string) PreprocessResult {
+	return PreprocessWithMacros(jass, nil)
+}
+
+// PreprocessWithMacros is the cross-section variant of Preprocess. It seeds the
+// macro table with `extra` BEFORE scanning the section for its own textmacro
+// definitions, so a section that calls `//! runtextmacro Foo(...)` where `Foo`
+// was defined in ANOTHER section still expands cleanly (P2#6: cross-trigger
+// vJASS context — the per-section convert path used to preprocess each WTG
+// section in isolation, so macros defined elsewhere were invisible).
+//
+// Section-local definitions take precedence: extractDefinitions overwrites any
+// seeded entry of the same name, matching JassHelper's last-definition-wins
+// behavior when the global concatenation order would otherwise differ. Passing
+// nil/empty `extra` is identical to Preprocess.
+func PreprocessWithMacros(jass string, extra map[string]Macro) PreprocessResult {
 	res := PreprocessResult{
 		Macros: map[string]Macro{},
+	}
+	// Seed cross-section macros first so a same-named local definition (added
+	// by extractDefinitions below) overrides it.
+	for k, v := range extra {
+		res.Macros[k] = v
 	}
 
 	// Pass 0: process `//! if SOMETHING / //! else / //! endif` conditionals.
