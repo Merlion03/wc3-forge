@@ -268,6 +268,10 @@ type MergedObject struct {
 	IsEdited   bool
 	Fields     map[string]string
 	Overridden map[string]bool
+	// LevelFields holds per-level override values for leveled (opt-format)
+	// kinds: column-name → (level → value). Empty for non-leveled objects.
+	// The base/level-0 value stays in Fields; LevelFields carries level>0.
+	LevelFields map[string]map[uint32]string
 }
 
 // MergedUnit is the legacy alias kept for backward compatibility with code
@@ -318,6 +322,7 @@ func MergedObjects(cfg *KindConfig) (map[string]*MergedObject, *ObjectMetadata, 
 				out[edit.BaseID] = u
 			}
 			applyOverrides(u, edit.Overrides, meta)
+			applyLevelOverrides(u, edit.Levels, meta)
 		}
 		for _, c := range mods.Customs {
 			u := &MergedObject{
@@ -333,6 +338,7 @@ func MergedObjects(cfg *KindConfig) (map[string]*MergedObject, *ObjectMetadata, 
 				}
 			}
 			applyOverrides(u, c.Overrides, meta)
+			applyLevelOverrides(u, c.Levels, meta)
 			out[c.ID] = u
 		}
 	}
@@ -364,6 +370,33 @@ func applyOverrides(u *MergedObject, ov w3objmod.Overrides, meta *ObjectMetadata
 		}
 		u.Fields[col] = val
 		u.Overridden[col] = true
+	}
+}
+
+// applyLevelOverrides folds the shadow's per-level entries into the merged
+// object's LevelFields (column-name → level → value). The base/level-0 slot is
+// handled by applyOverrides; this only carries level>0 entries so the Object
+// Editor can render and round-trip distinct per-level values for the same
+// field. Marks the object edited.
+func applyLevelOverrides(u *MergedObject, levels []w3objmod.LevelOverride, meta *ObjectMetadata) {
+	if len(levels) == 0 {
+		return
+	}
+	u.IsEdited = true
+	if u.LevelFields == nil {
+		u.LevelFields = map[string]map[uint32]string{}
+	}
+	for _, lo := range levels {
+		col := lo.FourCC
+		if m, ok := meta.ByID[lo.FourCC]; ok {
+			col = strings.ToLower(m.Field)
+		} else if !looksLikeFourCC(lo.FourCC) {
+			col = strings.ToLower(lo.FourCC)
+		}
+		if u.LevelFields[col] == nil {
+			u.LevelFields[col] = map[uint32]string{}
+		}
+		u.LevelFields[col][lo.Level] = lo.Value
 	}
 }
 

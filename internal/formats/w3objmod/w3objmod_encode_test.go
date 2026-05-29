@@ -91,6 +91,104 @@ func TestEncode_RoundTrip_Opt(t *testing.T) {
 	}
 }
 
+// TestEncode_RoundTrip_LeveledFields is the regression for the leveled-field
+// collapse bug: a w3a ability with the SAME field FourCC carrying TWO distinct
+// per-level values (level 1 = 100, level 2 = 250) must round-trip through
+// Encode→Parse without collapsing into a single flat value. Before the fix the
+// override model was map[string]string (no level dimension) and Encode
+// hardcoded level_variation=0/data_pointer=0, so the two levels overwrote each
+// other.
+func TestEncode_RoundTrip_LeveledFields(t *testing.T) {
+	fields := FieldMap{
+		"Hbz1": "damage",
+		"aaea": "areaofeffect",
+	}
+	f := &File{
+		Version: 3,
+		Customs: []CustomObject{
+			{
+				ID:     "A001",
+				BaseID: "AHbz",
+				// Base/level-0 slot stays in Overrides.
+				Overrides: Overrides{
+					"areaofeffect": "200",
+				},
+				// Two distinct per-level values for the SAME field FourCC.
+				Levels: []LevelOverride{
+					{FourCC: "damage", Level: 1, Value: "100"},
+					{FourCC: "damage", Level: 2, Value: "250"},
+				},
+			},
+		},
+	}
+	data, err := Encode(f, true, fields)
+	if err != nil {
+		t.Fatalf("Encode (opt, leveled): %v", err)
+	}
+	g, err := Parse(data, true, fields)
+	if err != nil {
+		t.Fatalf("re-Parse (opt, leveled): %v", err)
+	}
+	if len(g.Customs) != 1 {
+		t.Fatalf("custom count = %d, want 1", len(g.Customs))
+	}
+	got := g.Customs[0]
+	if !reflect.DeepEqual(got.Overrides, f.Customs[0].Overrides) {
+		t.Errorf("base overrides mismatch:\n got %+v\nwant %+v", got.Overrides, f.Customs[0].Overrides)
+	}
+	if len(got.Levels) != 2 {
+		t.Fatalf("level count = %d, want 2 (leveled values collapsed?)", len(got.Levels))
+	}
+	// The two per-level values must both survive, each tagged with its level.
+	byLevel := map[uint32]string{}
+	for _, lo := range got.Levels {
+		if lo.FourCC != "damage" {
+			t.Errorf("unexpected level field %q", lo.FourCC)
+		}
+		byLevel[lo.Level] = lo.Value
+	}
+	if byLevel[1] != "100" {
+		t.Errorf("level 1 value = %q, want 100", byLevel[1])
+	}
+	if byLevel[2] != "250" {
+		t.Errorf("level 2 value = %q, want 250 (collapsed to level 1?)", byLevel[2])
+	}
+}
+
+// TestEncode_RoundTrip_DataPointer confirms a non-zero data_pointer on a
+// leveled entry is preserved verbatim through the round-trip (a handful of
+// multi-data abilities use the dp slot to index sub-fields).
+func TestEncode_RoundTrip_DataPointer(t *testing.T) {
+	f := &File{
+		Version: 3,
+		Customs: []CustomObject{
+			{
+				ID:        "A002",
+				BaseID:    "AHfa",
+				Overrides: Overrides{},
+				Levels: []LevelOverride{
+					{FourCC: "Idam", Level: 3, DataPointer: 2, Value: "42"},
+				},
+			},
+		},
+	}
+	data, err := Encode(f, true, nil)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	g, err := Parse(data, true, nil)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(g.Customs) != 1 || len(g.Customs[0].Levels) != 1 {
+		t.Fatalf("unexpected shape: %+v", g.Customs)
+	}
+	lo := g.Customs[0].Levels[0]
+	if lo.FourCC != "Idam" || lo.Level != 3 || lo.DataPointer != 2 || lo.Value != "42" {
+		t.Errorf("level override round-trip mismatch: %+v", lo)
+	}
+}
+
 // TestEncode_EmptyFile encodes a nil/empty File and confirms it parses
 // back as an empty table (no customs, no edits). Guard against new
 // customers passing a nil pointer to a freshly-allocated Session.
