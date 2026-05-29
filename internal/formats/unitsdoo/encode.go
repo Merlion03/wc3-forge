@@ -71,10 +71,25 @@ func writeEntity(w *writer, e *Entity, subversion uint32) error {
 		}
 	}
 
-	// skin_id: present whenever the parser would read it. At subversion >= 11
-	// the format guarantees it. At subversion 9, the parser uses a peek
-	// heuristic that recorded its decision in skinIDPresent.
-	emitSkinID := subversion >= 11 || e.skinIDPresent
+	// skin_id: present whenever the original on-disk record carried it.
+	//
+	// skin_id presence is NOT a reliable function of the subversion (a
+	// subversion-11 map may omit it entirely — e.g. Green Circle TD — and a
+	// subversion-9 Reforged re-save may include it). Parse therefore resolves
+	// presence per-file by trial and records the result in skinIDPresent.
+	//
+	//   - PARSED entities (e.parsed): trust skinIDPresent verbatim so the
+	//     round-trip is byte-faithful regardless of subversion.
+	//   - HAND-CONSTRUCTED entities (CreateUnit etc., e.parsed == false):
+	//     skinIDPresent is meaningless, so fall back to the subversion rule
+	//     (>= 11 emits a chunk, < 11 omits it). CreateUnit defaults SkinID to
+	//     the TypeID, which keeps subversion-11 saves valid.
+	var emitSkinID bool
+	if e.parsed {
+		emitSkinID = e.skinIDPresent
+	} else {
+		emitSkinID = subversion >= 11
+	}
 	if emitSkinID {
 		if len(e.SkinID) != 4 {
 			return fmt.Errorf("skin_id %q must be exactly 4 bytes when emitted", e.SkinID)
