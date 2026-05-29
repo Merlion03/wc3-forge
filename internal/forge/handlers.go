@@ -70,6 +70,12 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("doodads.move", handleDoodadsMove)
 	reg("doodads.rotate", handleDoodadsRotate)
 	reg("doodads.scale", handleDoodadsScale)
+	// Placed-entity create/delete (units + doodads). Undo-aware; emit
+	// entity-changed. See handlers_entities.go + entities_mutate.go.
+	reg("units.create", handleUnitsCreate)
+	reg("units.delete", handleUnitsDelete)
+	reg("doodads.create", handleDoodadsCreate)
+	reg("doodads.delete", handleDoodadsDelete)
 	reg("map.save", handleMapSave)
 	reg("selection.get", handleSelectionGet)
 	reg("selection.set", handleSelectionSet)
