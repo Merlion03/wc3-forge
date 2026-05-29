@@ -1005,9 +1005,9 @@
       try { dirty = await IsDirty() } catch {}
     } catch (e) {
       const msg = String(e)
-      if (/MPQ archive writing is not yet implemented/i.test(msg)) {
+      if (/MPQ repack|extract the map to a folder/i.test(msg)) {
         showToast(
-          'This map was opened from an MPQ archive. Extract it to a folder to enable saving.',
+          'Saving this map failed during MPQ repack. As a workaround, extract it to a folder and save that.',
           'error',
         )
       } else {
