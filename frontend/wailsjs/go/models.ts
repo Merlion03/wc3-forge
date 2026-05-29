@@ -184,6 +184,7 @@ export namespace main {
 	    display: string;
 	    display_raw: string;
 	    overridden: boolean;
+	    levels?: Record<number, string>;
 	
 	    static createFrom(source: any = {}) {
 	        return new UnitObjectField(source);
@@ -200,6 +201,7 @@ export namespace main {
 	        this.display = source["display"];
 	        this.display_raw = source["display_raw"];
 	        this.overridden = source["overridden"];
+	        this.levels = source["levels"];
 	    }
 	}
 	export class UnitObjectDetail {
