@@ -840,3 +840,115 @@ endstruct
 		t.Errorf("expected counter=0 static, got %+v", s.Statics)
 	}
 }
+
+// --- Implicit-this member access (receiver-omitted `.field`) -----------------
+//
+// vJASS struct methods allow `.field` as shorthand for `this.field`. The
+// rewriteMethodBody pass expands a receiver-omitted `.` to `self.` so the
+// downstream parser's member-access grammar handles it. These tests pin the
+// expansion in every syntactic position the real Enfo structs use (the bug
+// that produced 91/72 inline error() stubs on Dialog System / NaturesShadow).
+
+// TestImplicitThis_SetAssign: `set .x = .y` (LHS + RHS implicit-this) becomes
+// `self.x = self.y` and emits ZERO error() stubs.
+func TestImplicitThis_SetAssign(t *testing.T) {
+	src := `struct Foo
+    real x = 0.
+    real y = 0.
+    method move takes nothing returns nothing
+        set .x = .y
+    endmethod
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	lua := EmitStructLua(res.Structs["Foo"])
+	if strings.Contains(lua, "jass2lua failed") {
+		t.Fatalf("expected no error() stub, got:\n%s", lua)
+	}
+	if !strings.Contains(lua, "self.x = self.y") {
+		t.Errorf("expected `self.x = self.y`, got:\n%s", lua)
+	}
+}
+
+// TestImplicitThis_InCondition: `.field` inside an `if` condition expands.
+func TestImplicitThis_InCondition(t *testing.T) {
+	src := `struct Foo
+    integer n = 0
+    method check takes nothing returns nothing
+        if .n == 0 then
+            set .n = 1
+        endif
+    endmethod
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	lua := EmitStructLua(res.Structs["Foo"])
+	if strings.Contains(lua, "jass2lua failed") {
+		t.Fatalf("expected no error() stub, got:\n%s", lua)
+	}
+	if !strings.Contains(lua, "if self.n == 0 then") {
+		t.Errorf("expected `if self.n == 0 then`, got:\n%s", lua)
+	}
+}
+
+// TestImplicitThis_Chained: `.i.rs` (implicit-this head, then a normal nested
+// member) expands ONLY the leading dot: `self.i.rs`. The second dot is
+// preceded by ident `i` (a receiver tail) and is left alone.
+func TestImplicitThis_Chained(t *testing.T) {
+	src := `struct Foo
+    real x = 0.
+    method step takes nothing returns nothing
+        set .x = .x + .i.rs
+    endmethod
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	lua := EmitStructLua(res.Structs["Foo"])
+	if strings.Contains(lua, "jass2lua failed") {
+		t.Fatalf("expected no error() stub, got:\n%s", lua)
+	}
+	if !strings.Contains(lua, "self.x = self.x + self.i.rs") {
+		t.Errorf("expected `self.x = self.x + self.i.rs`, got:\n%s", lua)
+	}
+}
+
+// TestImplicitThis_CallArg: `.field` as a function-call argument expands.
+func TestImplicitThis_CallArg(t *testing.T) {
+	src := `struct Foo
+    unit s = null
+    method pos takes nothing returns nothing
+        set .x = GetUnitX(.s)
+    endmethod
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	lua := EmitStructLua(res.Structs["Foo"])
+	if strings.Contains(lua, "jass2lua failed") {
+		t.Fatalf("expected no error() stub, got:\n%s", lua)
+	}
+	if !strings.Contains(lua, "self.x = GetUnitX(self.s)") {
+		t.Errorf("expected `self.x = GetUnitX(self.s)`, got:\n%s", lua)
+	}
+}
+
+// TestImplicitThis_ExplicitReceiverUntouched: a normal `dat.next` (explicit
+// receiver) must NOT have `self` injected — only receiver-omitted dots do.
+func TestImplicitThis_ExplicitReceiverUntouched(t *testing.T) {
+	src := `struct Foo
+    method link takes Foo dat, Foo dat2 returns nothing
+        set dat.next = dat2.next
+    endmethod
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	lua := EmitStructLua(res.Structs["Foo"])
+	if strings.Contains(lua, "jass2lua failed") {
+		t.Fatalf("expected no error() stub, got:\n%s", lua)
+	}
+	if !strings.Contains(lua, "dat.next = dat2.next") {
+		t.Errorf("expected explicit-receiver `dat.next = dat2.next`, got:\n%s", lua)
+	}
+	if strings.Contains(lua, "self.dat") || strings.Contains(lua, "dat = self") {
+		t.Errorf("explicit receiver wrongly got `self` injected:\n%s", lua)
+	}
+}
