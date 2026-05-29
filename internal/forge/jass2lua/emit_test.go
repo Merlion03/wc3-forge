@@ -237,6 +237,31 @@ endfunction
 	}
 }
 
+// TestEmit_IntDiv_CompoundOperandParens — a division operand that is itself a
+// binary expression must KEEP its grouping parens inside the R2I wrap. Regression
+// guard: the R2I path must use emitExprWithParens (not emitExpr) for both operands,
+// or `i / (i2 - 1)` reassociates to `R2I(i / i2 - 1)` == (i/i2)-1 — valid Lua, wrong
+// math. Corrupted 34 real gameplay formulas in the Enfo map before this fix.
+func TestEmit_IntDiv_CompoundOperandParens(t *testing.T) {
+	src := `function F takes nothing returns nothing
+local integer i = 0
+local integer i2 = 0
+set i = i / ( i2 - 1 )
+set i = ( i2 - 1 ) / i
+endfunction
+`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "R2I(i / (i2 - 1))") {
+		t.Errorf("compound RIGHT operand lost its parens; want R2I(i / (i2 - 1)), got:\n%s", got)
+	}
+	if !strings.Contains(got, "R2I((i2 - 1) / i)") {
+		t.Errorf("compound LEFT operand lost its parens; want R2I((i2 - 1) / i), got:\n%s", got)
+	}
+}
+
 // TestEmit_IntDiv_GlobalInteger — division of an integer global wraps too.
 func TestEmit_IntDiv_GlobalInteger(t *testing.T) {
 	src := `globals

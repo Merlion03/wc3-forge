@@ -717,7 +717,7 @@ func (e *emitter) emitExpr(x Expr) string {
 			// exactly like JASS, so wrap the float division:
 			// int/int `a / b` -> `R2I(a / b)`. R2I is a stock WC3 Lua native.
 			// Mixed int/real falls through to plain float `/`.
-			return "R2I(" + e.emitExpr(n.L) + " / " + e.emitExpr(n.R) + ")"
+			return "R2I(" + e.emitExprWithParens(n.L) + " / " + e.emitExprWithParens(n.R) + ")"
 		} else {
 			op = mapBinaryOp(op)
 		}
