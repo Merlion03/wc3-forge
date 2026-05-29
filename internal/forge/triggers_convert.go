@@ -341,9 +341,31 @@ func transpileSectionScript(id int32, label, kind, src string) TranspileSection 
 	withoutDefines := jass2lua.PreprocessDefines(withoutIfaces)
 	known := jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil)
 	st := jass2lua.PreprocessStructs(withoutDefines, mods.Modules, known)
-	lua, err := jass2lua.TranspileScript(st.Expanded)
-	if err == nil || lua != "" {
-		lua = jass2lua.SpliceStructLua(lua, st)
+	// P0#2: a "script" section whose post-preprocess body has no top-level
+	// function/globals decl is a bare statement list (a GUI-style custom-script
+	// trigger body), not a full JASS file. Feeding such a body to the top-level
+	// parser (TranspileScript) rejects every if/call/set/loop as an unexpected
+	// top-level token → walls of error(). Route it through the body-fragment
+	// parser instead (exactly as custom_text sections do). True full-script
+	// bodies (with `function Foo takes ...` / `globals`) still go to
+	// TranspileScript and keep their existing behavior.
+	var lua string
+	var parseErrs []string
+	var lexErr error
+	if jass2lua.HasTopLevelDecl(st.Expanded) {
+		lua, parseErrs, lexErr = jass2lua.TranspileScriptWithErrors(st.Expanded)
+	} else {
+		lua, parseErrs, lexErr = jass2lua.TranspileFunctionWithErrors(sectionFuncName(label, id), st.Expanded)
+	}
+	// P0#1 completion: struct method bodies are transpiled DURING the splice
+	// (emitStructLuaInto → transpileMethodBodyWithErrors). Those per-statement
+	// parse errors were previously swallowed (SpliceStructLua returned only a
+	// string), so a section full of struct-method error() markers reported
+	// section.Errors==0. Collect them here and fold them into the section's
+	// errors alongside the top-level body's parse errors.
+	var structErrs []string
+	if lexErr == nil || lua != "" {
+		lua, structErrs = jass2lua.SpliceStructLuaWithErrors(lua, st)
 	}
 	sec := TranspileSection{
 		ID:                 id,
@@ -358,8 +380,23 @@ func transpileSectionScript(id int32, label, kind, src string) TranspileSection 
 		InitOrder:          ls.InitOrder,
 		StructInits:        st.Inits,
 	}
-	sec.Errors = appendErrorMessage(sec.Errors, err)
+	// P0#1: surface the REAL error count. Each recovered parse error maps 1:1
+	// to an inline error("jass2lua failed: ...") marker the emitter wrote, so
+	// the section's Errors now reflects reality instead of under-reporting to 0.
+	sec.Errors = appendErrorMessage(sec.Errors, lexErr)
+	sec.Errors = appendErrorMessages(sec.Errors, parseErrs)
+	sec.Errors = appendErrorMessages(sec.Errors, structErrs)
 	return sec
+}
+
+// sectionFuncName derives a stable Lua function name for the bare-statement
+// auto-wrap shim from a section's label/id. sanitizeName (in jass2lua) further
+// scrubs the result, so this only needs to produce a non-empty seed.
+func sectionFuncName(label string, id int32) string {
+	if strings.TrimSpace(label) != "" {
+		return label
+	}
+	return fmt.Sprintf("Section_%d", id)
 }
 
 // transpileSectionCustomText is the equivalent for GUI-overlay custom_text
@@ -376,9 +413,12 @@ func transpileSectionCustomText(id int32, triggerName, src string) TranspileSect
 	withoutDefines := jass2lua.PreprocessDefines(withoutIfaces)
 	known := jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil)
 	st := jass2lua.PreprocessStructs(withoutDefines, mods.Modules, known)
-	lua, err := jass2lua.TranspileFunction(triggerName+"_CustomText", st.Expanded)
-	if err == nil || lua != "" {
-		lua = jass2lua.SpliceStructLua(lua, st)
+	lua, parseErrs, lexErr := jass2lua.TranspileFunctionWithErrors(triggerName+"_CustomText", st.Expanded)
+	// P0#1 completion: also surface struct method-body transpile errors produced
+	// during the splice (see transpileSectionScript for the full rationale).
+	var structErrs []string
+	if lexErr == nil || lua != "" {
+		lua, structErrs = jass2lua.SpliceStructLuaWithErrors(lua, st)
 	}
 	sec := TranspileSection{
 		ID:                 id,
@@ -393,7 +433,11 @@ func transpileSectionCustomText(id int32, triggerName, src string) TranspileSect
 		InitOrder:          ls.InitOrder,
 		StructInits:        st.Inits,
 	}
-	sec.Errors = appendErrorMessage(sec.Errors, err)
+	// P0#1: surface the real per-statement error count, not a single joined
+	// string (or nothing).
+	sec.Errors = appendErrorMessage(sec.Errors, lexErr)
+	sec.Errors = appendErrorMessages(sec.Errors, parseErrs)
+	sec.Errors = appendErrorMessages(sec.Errors, structErrs)
 	return sec
 }
 
@@ -416,6 +460,24 @@ func appendErrorMessage(dst []string, err error) []string {
 		return dst
 	}
 	return append(dst, msg)
+}
+
+// appendErrorMessages is the bulk variant used to surface the structured
+// per-statement parse-error list returned by TranspileScriptWithErrors /
+// TranspileFunctionWithErrors. Each entry corresponds 1:1 to an inline
+// error("jass2lua failed: ...") marker in the emitted Lua, so appending them
+// here makes the section's reported error count match reality (P0#1). Empty /
+// whitespace-only entries are filtered defensively, consistent with the
+// single-error helper.
+func appendErrorMessages(dst []string, msgs []string) []string {
+	for _, m := range msgs {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		dst = append(dst, m)
+	}
+	return dst
 }
 
 // preprocessWarningsToStrings flattens PreprocessError diagnostics into the
@@ -651,9 +713,15 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 			libInits = append(libInits, ls.InitOrder...)
 			structInits = append(structInits, st.Inits...)
 			var lua string
-			if tr.IsScript || tr.Classifier == wtg.ClassifierScript {
+			if (tr.IsScript || tr.Classifier == wtg.ClassifierScript) && jass2lua.HasTopLevelDecl(st.Expanded) {
+				// True full-script body (function/globals at top level).
 				lua, _ = jass2lua.TranspileScript(st.Expanded)
 			} else {
+				// P0#2: bare-statement bodies — whether classified script or
+				// GUI custom_text — go through the body-fragment parser so
+				// top-level if/call/set/loop transpile cleanly instead of
+				// emitting walls of error(). Mirrors transpileSectionScript so
+				// the written Lua matches the preview.
 				lua, _ = jass2lua.TranspileFunction(tr.Name+"_CustomText", st.Expanded)
 			}
 			lua = jass2lua.SpliceStructLua(lua, st)

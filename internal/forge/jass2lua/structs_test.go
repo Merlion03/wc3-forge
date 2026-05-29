@@ -399,6 +399,62 @@ endstruct
 	}
 }
 
+// TestSpliceStructLuaWithErrors_SurfacesMethodBodyErrors is the P0#1
+// completion regression: a struct whose method body contains an unparseable
+// statement must yield a NON-ZERO surfaced error count (these errors were
+// previously swallowed because SpliceStructLua returned only a string, so the
+// inline error() markers inside method bodies never reached section.Errors).
+func TestSpliceStructLuaWithErrors_SurfacesMethodBodyErrors(t *testing.T) {
+	// `garbage tokens here` is not a valid JASS statement; the body-fragment
+	// parser recovers it into a RawStmt → inline error() marker.
+	src := `struct Foo
+    method bork takes nothing returns nothing
+        garbage tokens here
+    endmethod
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	lua := StructLuaMarker + "Foo\n"
+	out, errs := SpliceStructLuaWithErrors(lua, res)
+	inline := strings.Count(out, "error(")
+	if inline == 0 {
+		t.Fatalf("expected inline error() marker in spliced struct method body, got:\n%s", out)
+	}
+	if len(errs) == 0 {
+		t.Fatalf("P0#1 gap: struct method body had %d inline error() markers but SpliceStructLuaWithErrors surfaced 0", inline)
+	}
+	// The surfaced error must identify the struct + method so the UI's
+	// diagnostics list points at the right place.
+	if !strings.Contains(errs[0], "struct Foo method bork") {
+		t.Errorf("expected surfaced error to name `struct Foo method bork`, got: %q", errs[0])
+	}
+	// Plain SpliceStructLua must still produce identical Lua (emitted output
+	// is unchanged — we only added the error channel).
+	if plain := SpliceStructLua(lua, res); plain != out {
+		t.Errorf("SpliceStructLua output drifted from SpliceStructLuaWithErrors:\nplain:\n%s\nwith-errors:\n%s", plain, out)
+	}
+}
+
+// TestSpliceStructLuaWithErrors_CleanMethodZeroErrors confirms a struct with a
+// well-formed method body surfaces ZERO errors (no false positives).
+func TestSpliceStructLuaWithErrors_CleanMethodZeroErrors(t *testing.T) {
+	src := `struct Foo
+    method greet takes nothing returns nothing
+        call BJDebugMsg("hi")
+    endmethod
+endstruct
+`
+	res := PreprocessStructs(src, nil, nil)
+	lua := StructLuaMarker + "Foo\n"
+	out, errs := SpliceStructLuaWithErrors(lua, res)
+	if strings.Contains(out, "error(") {
+		t.Errorf("clean struct method should not emit error() markers, got:\n%s", out)
+	}
+	if len(errs) != 0 {
+		t.Errorf("clean struct method should surface 0 errors, got %d: %v", len(errs), errs)
+	}
+}
+
 // TestPreprocessStructs_TwoStructsOrder: source order is preserved in
 // StructOrder.
 func TestPreprocessStructs_TwoStructsOrder(t *testing.T) {

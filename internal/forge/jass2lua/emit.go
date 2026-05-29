@@ -11,17 +11,39 @@ import (
 // `--[[ jass2lua: <reason> ]] error("jass2lua failed")` placeholder so the
 // rest of the file still translates and the user sees something actionable
 // in the diff.
+//
+// NOTE: this returns a non-nil `err` ONLY for unrecoverable lex errors. Per-
+// statement parse failures are recovered into RawStmt placeholders and do NOT
+// surface here — callers that need to know how many statements failed must use
+// TranspileScriptWithErrors, which returns the structured File.Errors list.
+// This signature is preserved so the many existing callers/tests that treat a
+// nil err as "clean enough to translate" keep their behavior.
 func TranspileScript(jass string) (lua string, err error) {
+	lua, _, err = TranspileScriptWithErrors(jass)
+	return lua, err
+}
+
+// TranspileScriptWithErrors is the structured-diagnostics variant of
+// TranspileScript. It returns the emitted Lua, the list of recovered parse
+// errors (File.Errors — one entry per statement/top-level node the parser
+// could not parse and turned into a RawStmt/error() placeholder), and a
+// separate hard lex error.
+//
+// This is the source of truth for surfacing the REAL failure count to the
+// convert dialog: each parse error here corresponds 1:1 to an inline
+// `error("jass2lua failed: ...")` marker the emitter writes, so the section's
+// reported error count finally matches reality instead of under-reporting to 0.
+func TranspileScriptWithErrors(jass string) (lua string, parseErrors []string, lexErr error) {
 	toks, err := Tokenize(jass)
 	if err != nil {
 		// Lex errors can't be recovered (we have no token stream to walk).
 		// Surface the whole input as a placeholder so the diff still renders.
-		return fmt.Sprintf("--[[ jass2lua lex error: %s ]]\nerror(%q)\n", err.Error(), "jass2lua failed: "+err.Error()), err
+		return fmt.Sprintf("--[[ jass2lua lex error: %s ]]\nerror(%q)\n", err.Error(), "jass2lua failed: "+err.Error()), nil, err
 	}
 	file := Parse(toks)
 	em := &emitter{}
 	em.emitFile(file)
-	return em.b.String(), nil
+	return em.b.String(), file.Errors, nil
 }
 
 // TranspileFunction translates a JASS fragment for a single trigger's custom_text.
@@ -32,19 +54,45 @@ func TranspileScript(jass string) (lua string, err error) {
 //     script and delegate to TranspileScript.
 //   - Otherwise wrap as a body (`function Name() ... end`) named after `name`.
 //
-// Returns conservative output on errors (same contract as TranspileScript).
+// Returns conservative output on errors (same contract as TranspileScript):
+// a non-nil err when lexing failed OR when statement-list parsing produced
+// recovered soft errors (joined with "; ").
 func TranspileFunction(name, jass string) (lua string, err error) {
+	lua, parseErrors, lexErr := TranspileFunctionWithErrors(name, jass)
+	if lexErr != nil {
+		return lua, lexErr
+	}
+	if len(parseErrors) > 0 {
+		return lua, fmt.Errorf("%s", strings.Join(parseErrors, "; "))
+	}
+	return lua, nil
+}
+
+// TranspileFunctionWithErrors is the structured-diagnostics variant of
+// TranspileFunction. It returns the emitted Lua, the per-statement parse-error
+// list (one entry per RawStmt/error() marker emitted), and a separate hard lex
+// error.
+//
+//   - Full-script fragment (top-level function/globals present) → delegate to
+//     TranspileScriptWithErrors so its File.Errors surface too.
+//   - Bare-statement fragment → auto-wrap as `function Name() ... end` and
+//     collect the statement-list parser's soft errors.
+//
+// The convert orchestrator uses this so bare-statement custom_text / script
+// sections report their REAL failure count (previously these recovered errors
+// were collapsed into a single joined string or dropped entirely).
+func TranspileFunctionWithErrors(name, jass string) (lua string, parseErrors []string, lexErr error) {
 	if hasTopLevelFunction(jass) {
-		return TranspileScript(jass)
+		return TranspileScriptWithErrors(jass)
 	}
 	// Auto-wrap as function body.
 	toks, err := Tokenize(jass)
 	if err != nil {
-		return fmt.Sprintf("--[[ jass2lua lex error: %s ]]\nfunction %s()\n\terror(%q)\nend\n", err.Error(), sanitizeName(name), "jass2lua failed: "+err.Error()), err
+		return fmt.Sprintf("--[[ jass2lua lex error: %s ]]\nfunction %s()\n\terror(%q)\nend\n", err.Error(), sanitizeName(name), "jass2lua failed: "+err.Error()), nil, err
 	}
 	// Synthesize a wrapping function decl by manual statement-list parse.
 	p := &parser{toks: toks}
-	stmts, _, parseErr := p.parseStmtsUntilEOF()
+	stmts, _, _ := p.parseStmtsUntilEOF()
 	em := &emitter{}
 	em.writeLine(fmt.Sprintf("function %s()", sanitizeName(name)))
 	em.indent++
@@ -53,15 +101,10 @@ func TranspileFunction(name, jass string) (lua string, err error) {
 	}
 	em.indent--
 	em.writeLine("end")
-	if parseErr != nil {
-		// Best-effort: still emit what we got.
-		return em.b.String(), parseErr
-	}
-	// Filter empty / whitespace-only entries from the soft-error list before
-	// joining — otherwise an upstream bug pushing a blank entry would cause
-	// `fmt.Errorf("%s", "")` (non-nil but empty error) to leak into the
+	// Filter empty / whitespace-only entries from the soft-error list —
+	// otherwise an upstream bug pushing a blank entry would leak into the
 	// transpile-preview UI as a blank diagnostic bullet. Phase 5 fix.
-	cleaned := p.errs[:0]
+	cleaned := make([]string, 0, len(p.errs))
 	for _, msg := range p.errs {
 		if strings.TrimSpace(msg) == "" {
 			continue
@@ -69,10 +112,18 @@ func TranspileFunction(name, jass string) (lua string, err error) {
 		cleaned = append(cleaned, msg)
 	}
 	if len(cleaned) > 0 {
-		return em.b.String(), fmt.Errorf("%s", strings.Join(cleaned, "; "))
+		return em.b.String(), cleaned, nil
 	}
-	return em.b.String(), nil
+	return em.b.String(), nil, nil
 }
+
+// HasTopLevelDecl reports whether the source contains a top-level JASS
+// declaration (function / globals / native). It is the exported form of
+// hasTopLevelFunction, used by the convert orchestrator to decide whether a
+// "script"-classified trigger body is a real full script (→ TranspileScript)
+// or a bare statement list (→ TranspileFunction body-fragment parser). See
+// triggers_convert.go's transpileSectionScript (P0#2).
+func HasTopLevelDecl(jass string) bool { return hasTopLevelFunction(jass) }
 
 // hasTopLevelFunction is a cheap pre-check used by TranspileFunction to decide
 // whether the input is a full script or a body-only fragment. False positive
