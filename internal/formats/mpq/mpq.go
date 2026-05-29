@@ -401,3 +401,32 @@ func (a *Archive) List() []string {
 	a.listfileCache = out
 	return out
 }
+
+// PresentFileCount returns the number of distinct files physically stored in
+// the archive, counted from the hash table independent of whether their names
+// are known. A slot counts when it references a present, non-deleted block
+// (flagFile set, flagDeleteMark clear). MPQ hash tables don't store names, so
+// this is the only way to know how many files an archive really holds when its
+// (listfile) is absent or incomplete.
+//
+// It exists so the repack path can detect archives that contain more files
+// than List() can name — a name-based repack would silently DROP those extra
+// (typically custom-imported) files, corrupting the map. See the guard in
+// internal/forge/mpq_write_source.go.
+func (a *Archive) PresentFileCount() int {
+	n := 0
+	for _, he := range a.hashTable {
+		if he.blockIndex == emptyNeverUsed || he.blockIndex == emptyDeleted {
+			continue
+		}
+		if int(he.blockIndex) >= len(a.blockTable) {
+			continue
+		}
+		be := a.blockTable[he.blockIndex]
+		if be.flags&flagFile == 0 || be.flags&flagDeleteMark != 0 {
+			continue
+		}
+		n++
+	}
+	return n
+}
