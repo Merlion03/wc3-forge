@@ -59,7 +59,10 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("map.close", handleMapClose)
 	reg("map.status", handleMapStatus)
 	reg("map.info_get", handleMapInfoGet)
-	reg("map.info_set", handleMapInfoSet)
+	// map.info_set routes through the undoable SetMapInfo path so info edits
+	// land on the history stack (handleMapInfoSet, the non-recording variant,
+	// is retained for reference but no longer wired).
+	reg("map.info_set", handleMapInfoSetUndoable)
 	reg("units.list", handleUnitsList)
 	reg("units.get", handleUnitsGet)
 	reg("units.move", handleUnitsMove)
@@ -72,9 +75,15 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("doodads.scale", handleDoodadsScale)
 	reg("map.save", handleMapSave)
 	reg("selection.get", handleSelectionGet)
-	reg("selection.set", handleSelectionSet)
+	// selection.set honors an optional client `primary` (index or kind:id);
+	// handleSelectionSetWithPrimary replaces the legacy handleSelectionSet
+	// which hardcoded primary = len-1.
+	reg("selection.set", handleSelectionSetWithPrimary)
 	reg("selection.clear", handleSelectionClear)
 	reg("view.set_mode", handleViewSetMode)
+	// view.get_mode + the session-side view-mode read-back live in
+	// session_polish_cmd.go; wired via this additive call.
+	registerSessionPolishHandlers(reg)
 	reg("view.set_doodad_category_visible", handleViewSetDoodadCategoryVisible)
 	reg("camera.set_view", handleCameraSetView)
 	// window.set_title — connected agent labels its wc3-forge window so the
@@ -1177,6 +1186,11 @@ func handleViewSetMode(params json.RawMessage) (any, error) {
 	default:
 		return nil, fmt.Errorf("mode must be 'terrain' or 'doodad' (got %q)", p.Mode)
 	}
+	// Record the requested mode on the session so view.get_mode can report a
+	// value (no-op when p.Mode is "" — SetViewMode ignores non-mode values).
+	// This tracks the last REQUEST, not the live frontend toggle; see
+	// Session.ViewMode for the caveat.
+	Current.SetViewMode(p.Mode)
 	Current.EmitUICommand("terrain.toggle")
 	return map[string]any{"ok": true, "mode_requested": p.Mode}, nil
 }

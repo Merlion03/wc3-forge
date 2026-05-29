@@ -299,6 +299,15 @@ type Session struct {
 	groupDepth       int
 	pendingGroup     *groupCmd
 	historyListeners []func()
+
+	// viewMode is the session's record of the editor pick mode
+	// ("terrain" | "doodad"), updated by view.set_mode and read back by
+	// view.get_mode. It tracks the last view.set_mode REQUEST, not the live
+	// frontend toggle (App.svelte's terrainPickModeOn is authoritative for the
+	// renderer). Empty means "never set"; Session.ViewMode reports the
+	// frontend's initial "doodad" default in that case. See
+	// session_polish_cmd.go for the accessor + the read-back rationale.
+	viewMode string
 }
 
 // EntityChange is the payload for OnEntityChanged. Kind/ID identify which
