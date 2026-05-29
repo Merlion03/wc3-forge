@@ -106,11 +106,17 @@ func TestCrossSection_StructUsedInOtherSection(t *testing.T) {
 		"    endmethod\n" +
 		"endstruct\n"
 
-	// Isolated (no context) — Counter is an unknown receiver, so the static
-	// call's dot is rewritten to a colon: the bug.
+	// Isolated (no context) the colon bug MAY reproduce (Counter is an unknown
+	// receiver), but reproduction is input-dependent — for this fixture the
+	// isolated path actually keeps the dot. So this stays a SOFT, best-effort
+	// note, NOT a hard assert: the load-bearing guarantee is the positive
+	// WITH-context assertion below (dot survives, colon never appears), which
+	// holds regardless of how the isolated path happens to render. Hardening
+	// this negative branch would make the test fail on inputs where the bug
+	// simply doesn't surface without context — a false alarm, not a regression.
 	isoLua, _ := transpileSectionForTest("Sec", sectionB, nil)
 	if !strings.Contains(isoLua, "Counter:bump(") {
-		t.Logf("note: isolated path did not reproduce the colon bug here:\n%s", isoLua)
+		t.Logf("note: isolated path did not reproduce the colon bug for this input (kept the dot); the WITH-context assertions below are the real gate:\n%s", isoLua)
 	}
 
 	// With the global context built from BOTH sections, Counter is a known

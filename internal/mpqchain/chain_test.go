@@ -2,12 +2,42 @@ package mpqchain
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/mpq"
 )
+
+// fakeArchive is an in-memory archiveReader used to exercise Chain paths that
+// a real on-disk MPQ can't easily produce — chiefly a file that is PRESENT
+// (Has==true) but UNREADABLE (Read errors), and an archive with no listable
+// entries. present maps the exact lookup name -> bytes; readErr[name], when
+// set, makes Read fail even though Has reports the file present.
+type fakeArchive struct {
+	present map[string][]byte
+	readErr map[string]error
+	listing []string
+}
+
+func (f *fakeArchive) Has(name string) bool {
+	_, ok := f.present[name]
+	return ok
+}
+
+func (f *fakeArchive) Read(name string) ([]byte, error) {
+	if err := f.readErr[name]; err != nil {
+		return nil, err
+	}
+	if b, ok := f.present[name]; ok {
+		return b, nil
+	}
+	return nil, errors.New("fakeArchive: not present")
+}
+
+func (f *fakeArchive) List() []string { return f.listing }
+func (f *fakeArchive) Close() error   { return nil }
 
 // writeArchive builds a real on-disk MPQ at <dir>/<name> holding the given
 // (path -> bytes) files. Uses the package's own writer so the chain reads
@@ -229,5 +259,68 @@ func TestCaseInsensitiveArchiveNames(t *testing.T) {
 	defer c.Close()
 	if _, ok, _ := c.ReadFile("units/human/footman/footman.mdx"); !ok {
 		t.Fatal("read from lowercase-named archive failed")
+	}
+}
+
+// TestReadFileSkipsUnreadableArchive covers ReadFile's read-error fall-through
+// (chain.go): a higher-priority archive that HAS the file but fails to Read it
+// (e.g. an unsupported-codec sector) must not fail the request — resolution
+// continues to the next archive instead of 500-ing.
+func TestReadFileSkipsUnreadableArchive(t *testing.T) {
+	const name = "units/human/footman/footman.mdx"
+	high := &fakeArchive{
+		present: map[string][]byte{name: []byte("patch-but-corrupt")},
+		readErr: map[string]error{name: errors.New("bad sector: unsupported codec")},
+	}
+	low := &fakeArchive{present: map[string][]byte{name: []byte("base-ok")}}
+	c := &Chain{archives: []archiveReader{high, low}, names: []string{"War3Patch.mpq", "War3.mpq"}}
+
+	got, ok, err := c.ReadFile(name)
+	if err != nil {
+		t.Fatalf("ReadFile returned error %v; the present-but-unreadable archive should be skipped, not propagated", err)
+	}
+	if !ok || string(got) != "base-ok" {
+		t.Fatalf("ReadFile = (%q, %v); want (\"base-ok\", true) — must fall through past the unreadable patch archive", got, ok)
+	}
+}
+
+// TestReadFileAllUnreadableIsMiss: when the only archive holding the file
+// can't read it, ReadFile reports a clean miss (nil,false,nil), matching the
+// casc.Storage contract, rather than surfacing the read error.
+func TestReadFileAllUnreadableIsMiss(t *testing.T) {
+	const name = "x.mdx"
+	only := &fakeArchive{
+		present: map[string][]byte{name: {0x01}},
+		readErr: map[string]error{name: errors.New("boom")},
+	}
+	c := &Chain{archives: []archiveReader{only}, names: []string{"only"}}
+
+	got, ok, err := c.ReadFile(name)
+	if got != nil || ok || err != nil {
+		t.Fatalf("ReadFile = (%v, %v, %v); want (nil, false, nil) when the only holder is unreadable", got, ok, err)
+	}
+}
+
+// TestListByPrefixArchiveWithoutEntriesContributesNothing covers the
+// ListByPrefix claim that an archive lacking listable entries (e.g. no
+// (listfile)) simply contributes nothing to the union — it must not error or
+// disturb the lower archive's entries. Also exercises backslash->forward-slash
+// normalization + lowercasing of the surviving names.
+func TestListByPrefixArchiveWithoutEntriesContributesNothing(t *testing.T) {
+	withEntries := &fakeArchive{listing: []string{
+		`ReplaceableTextures\CommandButtons\BTNFootman.blp`,
+		"units/human/footman/footman.mdx",
+	}}
+	empty := &fakeArchive{} // List() == nil, like an archive with no (listfile)
+	// empty is higher priority; it must not alter the union.
+	c := &Chain{archives: []archiveReader{empty, withEntries}, names: []string{"patch", "base"}}
+
+	got, err := c.ListByPrefix("replaceabletextures/commandbuttons/")
+	if err != nil {
+		t.Fatalf("ListByPrefix: %v", err)
+	}
+	want := []string{"replaceabletextures/commandbuttons/btnfootman.blp"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("ListByPrefix = %v; want %v (empty archive contributes nothing; names lowercased + forward-slashed)", got, want)
 	}
 }
