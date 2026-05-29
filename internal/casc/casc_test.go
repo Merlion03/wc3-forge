@@ -2,12 +2,21 @@ package casc
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
-	"unsafe"
 )
 
-const wc3InstallDefault = `C:\Program Files (x86)\Warcraft III`
+// wc3InstallDefault is the canonical install root for the current OS. The
+// tests skip when nothing's found there (a fresh dev machine without WC3
+// is a normal state) — set WC3FORGE_WC3_PATH to override.
+var wc3InstallDefault = func() string {
+	if runtime.GOOS == "windows" {
+		return `C:\Program Files (x86)\Warcraft III`
+	}
+	return "/Applications/Warcraft III"
+}()
 
 func wc3InstallPath(t *testing.T) string {
 	t.Helper()
@@ -15,7 +24,9 @@ func wc3InstallPath(t *testing.T) string {
 	if p == "" {
 		p = wc3InstallDefault
 	}
-	if _, err := os.Stat(p + `\.build.info`); err != nil {
+	// .build.info is what CascLib looks for to recognize a CASC root; if
+	// it's missing, the test wouldn't get past Open anyway.
+	if _, err := os.Stat(filepath.Join(p, ".build.info")); err != nil {
 		t.Skipf("WC3 install not found at %q (set WC3FORGE_WC3_PATH to override)", p)
 	}
 	return p
@@ -39,33 +50,24 @@ func TestEnumerate(t *testing.T) {
 	}
 	defer s.Close()
 
-	dllOnce.Do(loadDLL)
-	procFindFirst := dll.NewProc("CascFindFirstFile")
-	procFindNext := dll.NewProc("CascFindNextFile")
-	procFindClose := dll.NewProc("CascFindClose")
-
-	// CASC_FIND_DATA from CascLib.h — 0x1108 bytes (4360). Most of that
-	// is szFileName[MAX_PATH=0x400] which we read as our result.
-	var data [0x1108]byte
-	mask := append([]byte("*"), 0)
-	listfileName := append([]byte(""), 0)
-
-	hFind, _, _ := procFindFirst.Call(
-		s.handle,
-		uintptr(unsafe.Pointer(&mask[0])),
-		uintptr(unsafe.Pointer(&data[0])),
-		uintptr(unsafe.Pointer(&listfileName[0])),
-	)
+	// Enumeration goes through the platform raw-op helpers (rawFindFirstFile
+	// /NextFile/Close), which Open already bound cross-platform (Open ->
+	// loadLib -> bindCASCLib). Using them — instead of re-binding through a
+	// dlopen handle — keeps this test working on Windows, where the call
+	// layer is syscall.LazyProc.Call rather than purego.
+	//
+	// CASC_FIND_DATA from CascLib.h — findDataSize bytes. Most of that is
+	// szFileName (findDataNameOff..+findDataNameLen) which we read as result.
+	var data [findDataSize]byte
+	hFind := rawFindFirstFile(s.handle, "*", &data)
 	if hFind == 0 || hFind == ^uintptr(0) {
 		t.Fatalf("CascFindFirstFile failed (handle=%x)", hFind)
 	}
-	defer procFindClose.Call(hFind)
+	defer rawFindClose(hFind)
 
 	count := 0
 	for {
-		// szFileName starts at offset 0x18 (24) in CASC_FIND_DATA.
-		// Width is 0x400 (1024) bytes.
-		name := readCString(data[0x18 : 0x18+0x400])
+		name := readCString(data[findDataNameOff : findDataNameOff+findDataNameLen])
 		lname := strings.ToLower(name)
 		if strings.Contains(lname, "footman.mdx") || strings.Contains(lname, "miscdata.txt") || strings.Contains(lname, "units.slk") || strings.Contains(lname, "teamcolor00.blp") {
 			t.Logf("[%d] %s", count, name)
@@ -75,8 +77,7 @@ func TestEnumerate(t *testing.T) {
 			t.Logf("... (capped at %d entries)", count)
 			break
 		}
-		r1, _, _ := procFindNext.Call(hFind, uintptr(unsafe.Pointer(&data[0])))
-		if r1 == 0 {
+		if !rawFindNextFile(hFind, &data) {
 			break
 		}
 	}

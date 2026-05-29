@@ -40,7 +40,7 @@ func wc3InstallPath() string {
 	if p := os.Getenv("WC3FORGE_WC3_PATH"); p != "" {
 		return p
 	}
-	return `C:\Program Files (x86)\Warcraft III`
+	return wc3InstallPathDefault
 }
 
 func getCASC() (*casc.Storage, error) {

@@ -50,7 +50,22 @@ func firstDiff(a, b []byte) (int, string) {
 	return -1, ""
 }
 
+// needFixture skips the calling test if the given path doesn't exist.
+// The MPQ tests run against personal fixtures (real .w3x files the
+// author has locally + StormLib-pre-extracted siblings to byte-compare
+// against) that aren't and shouldn't be checked into the repo. Without
+// this guard, anyone checking out the repo on a fresh box — macOS, a
+// new Windows machine, CI — hits hardcoded-path failures instead of a
+// clean skip.
+func needFixture(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("fixture not present at %q (set up locally; not checked in)", path)
+	}
+}
+
 func TestOpenEnfo(t *testing.T) {
+	needFixture(t, fixtureEnfo)
 	a, err := Open(fixtureEnfo)
 	if err != nil {
 		t.Fatalf("Open(%s): %v", fixtureEnfo, err)
@@ -78,6 +93,8 @@ func TestOpenEnfo(t *testing.T) {
 }
 
 func TestExtractMatchesStormLib_w3i(t *testing.T) {
+	needFixture(t, fixtureEnfo)
+	needFixture(t, fixtureEnfoExtracted)
 	a, err := Open(fixtureEnfo)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -109,6 +126,8 @@ func TestExtractMatchesStormLib_w3i(t *testing.T) {
 }
 
 func TestExtractMatchesStormLib_survival(t *testing.T) {
+	needFixture(t, fixtureSurvival)
+	needFixture(t, fixtureSurvivalExtract)
 	a, err := Open(fixtureSurvival)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -140,6 +159,7 @@ func TestExtractMatchesStormLib_survival(t *testing.T) {
 }
 
 func TestList(t *testing.T) {
+	needFixture(t, fixtureEnfo)
 	a, err := Open(fixtureEnfo)
 	if err != nil {
 		t.Fatalf("Open: %v", err)

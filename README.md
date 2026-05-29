@@ -18,9 +18,11 @@ wc3-forge is a native Warcraft III map editor (Go + TypeScript, single [Wails](h
 
 ## Get started with Claude Code
 
-Three steps. Tested on Windows; should work on macOS/Linux once you replace the paths.
+Three steps. Tested on Windows and macOS.
 
-**1. Install wc3-forge.** Grab a release, or build from source:
+**1. Install wc3-forge.** Grab a release, or build from source.
+
+On **Windows** (PowerShell):
 
 ```powershell
 git clone https://github.com/StephenSHorton/wc3-forge
@@ -29,6 +31,24 @@ wails build
 ```
 
 The binary lands at `build/bin/wc3-forge.exe`.
+
+On **macOS** (one extra step for CascLib):
+
+```bash
+git clone https://github.com/StephenSHorton/wc3-forge
+cd wc3-forge
+./scripts/build-casclib-macos.sh   # one-time: compiles libcasc.dylib into scripts/casclib/
+wails build
+```
+
+The bundle lands at `build/bin/wc3-forge.app`. CascLib is dlopen'd at
+runtime via purego, so the .dylib must sit alongside the binary inside
+the .app bundle; the `darwin/*` postBuildHook in `wails.json` copies it
+in for you. The dylib is `.gitignore`d — every dev machine builds its own.
+
+The macOS build is arm64 by default (matches the host); cross-build with
+`wails build -platform darwin/amd64` after running the casclib script on
+a matching arch.
 
 **2. Build + register the MCP server.** It lives in this repo at [`mcp/`](mcp/):
 
