@@ -59,12 +59,28 @@ var classicArchives = []string{
 	"War3Patch.mpq",
 }
 
+// archiveReader is the subset of *mpq.Archive that Chain depends on. Keeping
+// it as an interface (rather than a concrete *mpq.Archive slice) lets tests
+// inject fakes to exercise paths a real on-disk archive can't easily produce
+// — notably the "present but unreadable" read-error fall-through in ReadFile.
+// *mpq.Archive satisfies it.
+type archiveReader interface {
+	Has(name string) bool
+	Read(name string) ([]byte, error)
+	List() []string
+	Close() error
+}
+
 // Chain is an open, ordered set of Classic-install MPQ archives. archives is
 // sorted HIGHEST-priority first (War3Patch.mpq before War3.mpq), so ReadFile
-// can return the first archive that holds a given path. Safe for concurrent
-// reads; the reforged flag is guarded by mu.
+// can return the first archive that holds a given path.
+//
+// Safe for concurrent use after Open: ReadFile/Has/Read go through the
+// archive's io.ReaderAt (itself concurrent-safe) and the read-only hash
+// table, and ListByPrefix → mpq.Archive.List() guards its lazy listfile
+// cache. The reforged flag is guarded by mu.
 type Chain struct {
-	archives []*mpq.Archive
+	archives []archiveReader
 	// names parallels archives for diagnostic logging.
 	names []string
 
@@ -145,7 +161,7 @@ func Open(installRoot string) (*Chain, error) {
 			continue
 		}
 		// Prepend so War3Patch.mpq (opened last) ends up first.
-		c.archives = append([]*mpq.Archive{a}, c.archives...)
+		c.archives = append([]archiveReader{a}, c.archives...)
 		c.names = append([]string{name}, c.names...)
 	}
 	if len(c.archives) == 0 {
@@ -228,7 +244,8 @@ func (c *Chain) Reforged() bool {
 	return c.reforged
 }
 
-// Close releases every mounted archive. Idempotent; safe to call once.
+// Close releases every mounted archive. Idempotent; safe to call more than
+// once (it nils the archive slice, so a second call is a no-op).
 func (c *Chain) Close() error {
 	var firstErr error
 	for _, a := range c.archives {

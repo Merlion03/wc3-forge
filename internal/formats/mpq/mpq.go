@@ -43,6 +43,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 )
 
 // standardWC3Files is the fallback name list when an archive has no
@@ -94,7 +95,9 @@ type Archive struct {
 	blockTable []blockEntry
 
 	// listfile is the union of the standard WC3 file set and any names
-	// parsed from an internal "(listfile)". Computed lazily by List().
+	// parsed from an internal "(listfile)". Computed lazily by List() under
+	// listMu so concurrent first-time callers don't race on the write.
+	listMu        sync.Mutex
 	listfileCache []string
 }
 
@@ -363,6 +366,8 @@ func (a *Archive) readBlock(name string, be blockEntry) ([]byte, error) {
 // prompt's spec: maps without a (listfile) return ONLY the standard set,
 // not the full block-table contents.
 func (a *Archive) List() []string {
+	a.listMu.Lock()
+	defer a.listMu.Unlock()
 	if a.listfileCache != nil {
 		return a.listfileCache
 	}
