@@ -589,7 +589,12 @@ func handleTriggersAddCategory(params json.RawMessage) (any, error) {
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	id, err := Current.AddTriggerCategory(p.Name, p.ParentID)
+	// Idempotency guard: a single logical add_category that arrives twice in
+	// quick succession (retried/echoed request, or a race across control
+	// surfaces) must not create two category nodes. dedupedAddTriggerCategory
+	// collapses an identical (name,parent) repeat within a tight window onto
+	// the node it just created. See triggers_addcategory_guard.go.
+	id, _, err := dedupedAddTriggerCategory(p.Name, p.ParentID)
 	if err != nil {
 		return nil, err
 	}
@@ -1207,12 +1212,34 @@ func handleTriggersGenerateScript(_ json.RawMessage) (any, error) {
 	return triggerScriptResult{Text: text, Bytes: len(text)}, nil
 }
 
+// triggersSaveScriptParams is the wire shape for triggers.save_script. The
+// optional overwrite flag lets a caller proceed past the non-codegen guard
+// (which refuses to clobber a hand-authored war3map.lua by default). When
+// overwrite is true the existing file is still backed up to war3map.lua.bak
+// before regeneration, so the original bytes stay recoverable.
+type triggersSaveScriptParams struct {
+	Overwrite bool `json:"overwrite,omitempty"`
+}
+
 // handleTriggersSaveScript generates + writes war3map.lua via the session's
 // source. Returns the byte count; the text is omitted from the response to
 // keep the wire payload small (callers wanting both should call
 // generate_script first).
-func handleTriggersSaveScript(_ json.RawMessage) (any, error) {
-	n, err := Current.SaveTriggerScript()
+//
+// Non-destructive: if the existing war3map.lua was NOT produced by wc3-forge's
+// codegen (it lacks the generator marker line), the handler refuses with
+// ErrScriptNotCodegen unless {overwrite:true} is passed. Passing overwrite
+// backs the original up to war3map.lua.bak before regenerating. This is the
+// fix for the live-confirmed bug where save_script clobbered a 51908-byte
+// hand-authored script with 4361 bytes of codegen.
+func handleTriggersSaveScript(params json.RawMessage) (any, error) {
+	var p triggersSaveScriptParams
+	if len(params) > 0 && string(params) != "null" {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+	}
+	n, err := Current.SaveTriggerScriptGuarded(p.Overwrite)
 	if err != nil {
 		return nil, err
 	}

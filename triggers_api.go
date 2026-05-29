@@ -652,8 +652,15 @@ func (a *App) GenerateTriggerScript() (TriggerScriptResultDTO, error) {
 
 // SaveTriggerScript generates + writes war3map.lua into the loaded map's
 // source. Returns the byte count.
+//
+// Non-destructive: if the existing war3map.lua was not produced by wc3-forge's
+// codegen, the original is backed up to war3map.lua.bak before regeneration so
+// a hand-authored script is never silently destroyed (the live-confirmed
+// save_script clobber bug). The GUI button is an explicit user action, so it
+// proceeds (overwrite=true) rather than blocking — but the backup guarantees
+// the original bytes remain recoverable.
 func (a *App) SaveTriggerScript() (TriggerScriptResultDTO, error) {
-	n, err := forge.Current.SaveTriggerScript()
+	n, err := forge.Current.SaveTriggerScriptGuarded(true)
 	if err != nil {
 		return TriggerScriptResultDTO{}, err
 	}
