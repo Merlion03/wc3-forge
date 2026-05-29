@@ -2,12 +2,6 @@
 
 package wc3launch
 
-// wc3InstallRootDefault is the canonical WC3 install root on macOS.
-// Battle.net's macOS client installs Warcraft III here by default; the
-// inner _retail_/x86_64/ layout mirrors the Windows install so other
-// asset-resolution code can reuse the same structure.
-const wc3InstallRootDefault = "/Applications/Warcraft III"
-
 // binaryRelPath is the install-root-relative path to the launchable
 // executable. macOS .app bundles are directories; the actual Mach-O
 // entry point sits at Contents/MacOS/<bundle-name>. We exec that

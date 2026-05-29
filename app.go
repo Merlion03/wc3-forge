@@ -17,6 +17,7 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 	"github.com/StephenSHorton/wc3-forge/internal/wc3launch"
+	"github.com/StephenSHorton/wc3-forge/internal/wc3path"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -55,6 +56,13 @@ const (
 	// onBeforeClose handler in main.go until the user explicitly chooses
 	// Save & Quit, Discard & Quit, or Cancel.
 	eventCloseRequested   = "wc3-forge:close-requested"
+	// eventCASCRemounted fires after the user points wc3-forge at a valid
+	// install via SetWC3InstallPath and the CASC mount is reopened live.
+	// App.svelte subscribes and purges the viewer's resource cache + reloads
+	// the current map so the stock textures/models that 404'd against the
+	// previous (missing/invalid) install get re-fetched through the new mount
+	// — no restart needed.
+	eventCASCRemounted    = "wc3-forge:casc-remounted"
 )
 
 // App is the Wails-bindable surface exposed to the frontend. Every method
@@ -262,6 +270,54 @@ func (a *App) OpenMapFileDialog() (string, error) {
 			{DisplayName: "All files (*.*)", Pattern: "*.*"},
 		},
 	})
+}
+
+// WC3InstallStatusDTO reports whether a usable Warcraft III install (a CASC
+// root containing .build.info) is resolvable, plus the path that was checked.
+type WC3InstallStatusDTO struct {
+	Available bool   `json:"available"`
+	Path      string `json:"path"`
+}
+
+// WC3InstallStatus resolves the WC3 install path (env -> user-saved -> OS
+// default) and reports whether it's a valid CASC root. The frontend calls
+// this on startup and prompts the user to locate their install when
+// Available is false — stock models, textures, and data live in CASC, so
+// without it the viewport renders without stock assets (folder-bundled maps
+// still work, which is why this is a warning, not a hard block).
+func (a *App) WC3InstallStatus() WC3InstallStatusDTO {
+	p := wc3path.Resolve()
+	return WC3InstallStatusDTO{Available: wc3path.IsValidInstall(p), Path: p}
+}
+
+// BrowseForWC3Install opens an OS folder picker for the user to point at
+// their Warcraft III install ROOT (the folder containing .build.info, not a
+// subfolder like _retail_/x86_64). Returns "" if cancelled. It does NOT
+// persist — pass the result to SetWC3InstallPath to validate + save + remount.
+func (a *App) BrowseForWC3Install() (string, error) {
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select your Warcraft III installation folder (the one containing .build.info)",
+	})
+}
+
+// SetWC3InstallPath validates that path is a real WC3 install (has
+// .build.info), persists it for future sessions, and re-opens the CASC mount
+// so stock assets resolve immediately — no restart. Returns the resulting
+// status. If the path isn't a valid install it errors WITHOUT persisting, so
+// the UI can keep the picker open with a "that's not a WC3 install" message.
+func (a *App) SetWC3InstallPath(path string) (WC3InstallStatusDTO, error) {
+	if !wc3path.IsValidInstall(path) {
+		return WC3InstallStatusDTO{Available: false, Path: path},
+			fmt.Errorf("not a Warcraft III install: %q has no .build.info — pick the install root, not a subfolder", path)
+	}
+	if err := wc3path.Save(path); err != nil {
+		return WC3InstallStatusDTO{Available: false, Path: path}, fmt.Errorf("save install path: %w", err)
+	}
+	reopenCASC()
+	// Tell the frontend to drop its now-stale (404/empty) cached assets and
+	// reload the scene against the freshly mounted CASC — see eventCASCRemounted.
+	runtime.EventsEmit(a.ctx, eventCASCRemounted, map[string]any{"path": path})
+	return WC3InstallStatusDTO{Available: true, Path: path}, nil
 }
 
 // MapStatus mirrors the wire shape used by map.status / bridge.ping.

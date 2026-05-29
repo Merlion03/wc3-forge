@@ -34,6 +34,10 @@ export function BeginUndoGroup(arg1) {
   return window['go']['main']['App']['BeginUndoGroup'](arg1);
 }
 
+export function BrowseForWC3Install() {
+  return window['go']['main']['App']['BrowseForWC3Install']();
+}
+
 export function CanRedo() {
   return window['go']['main']['App']['CanRedo']();
 }
@@ -426,6 +430,10 @@ export function SetUnitObjectField(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetUnitObjectField'](arg1, arg2, arg3);
 }
 
+export function SetWC3InstallPath(arg1) {
+  return window['go']['main']['App']['SetWC3InstallPath'](arg1);
+}
+
 export function Status() {
   return window['go']['main']['App']['Status']();
 }
@@ -444,4 +452,8 @@ export function Undo() {
 
 export function UndoTo(arg1) {
   return window['go']['main']['App']['UndoTo'](arg1);
+}
+
+export function WC3InstallStatus() {
+  return window['go']['main']['App']['WC3InstallStatus']();
 }

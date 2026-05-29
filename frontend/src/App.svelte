@@ -12,6 +12,7 @@
     Undo, Redo, CanUndo, CanRedo, HistoryList,
     CheckConvertToLua,
     ForceQuit,
+    WC3InstallStatus,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import type { main, unitsdoo } from '../wailsjs/go/models'
@@ -28,6 +29,7 @@
   import TriggerEditor from './TriggerEditor.svelte'
   import SwapTilesetDialog from './SwapTilesetDialog.svelte'
   import ConvertToLuaDialog from './ConvertToLuaDialog.svelte'
+  import WC3InstallDialog from './WC3InstallDialog.svelte'
   import GameplayConstantsEditor from './GameplayConstantsEditor.svelte'
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
@@ -236,6 +238,11 @@
   let showConvertToLua: boolean = $state(false)
   let convertBlockers: { trigger_id: number; trigger_name: string; kind: string; reason: string }[] = $state([])
   let convertChecking: boolean = $state(false)
+
+  // WC3-install detection: on startup we check whether a usable CASC root is
+  // resolvable; if not, prompt the user to locate their install (soft warning).
+  let showWC3InstallDialog: boolean = $state(false)
+  let wc3CheckedPath: string = $state('')
   async function openConvertToLua() {
     if (!status.loaded) return
     if (status.lua) {
@@ -510,6 +517,25 @@
       error = 'scene init failed: ' + (e instanceof Error ? (e.stack || e.message) : String(e))
       console.error(e)
     }
+    // Non-blocking: warn if no Warcraft III install (CASC root) is resolvable.
+    // Stock models/textures/data come from CASC, so without it the viewport
+    // renders without stock art. Soft warning — folder-bundled maps still work.
+    WC3InstallStatus()
+      .then((st) => {
+        if (!st.available) {
+          wc3CheckedPath = st.path
+          showWC3InstallDialog = true
+        }
+      })
+      .catch(() => {})
+    // Live CASC remount (user located their WC3 install at runtime): the
+    // viewer cached the stock assets that 404'd against the old missing
+    // install as empty/failed, so purge that cache and reload the scene to
+    // re-fetch them through the new mount — no restart needed.
+    EventsOn('wc3-forge:casc-remounted', async () => {
+      scene?.purgeResourceCache()
+      if ((await Status()).loaded) await reloadMap({ keepCamera: true })
+    })
     EventsOn(MAP_EVENT, async () => {
       status = await Status()
       // Bump the minimap-reload generation on every map-changed event so the
@@ -2239,6 +2265,10 @@
       onConverted={onConvertedToLua}
       onOpenTrigger={(id) => openTriggerEditor(id)}
     />
+  {/if}
+
+  {#if showWC3InstallDialog}
+    <WC3InstallDialog bind:open={showWC3InstallDialog} checkedPath={wc3CheckedPath} />
   {/if}
 
   {#if showGameplayConstantsEditor}

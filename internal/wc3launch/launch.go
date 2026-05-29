@@ -22,6 +22,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/StephenSHorton/wc3-forge/internal/wc3path"
 )
 
 // ErrBinaryNotFound is returned when the resolved Warcraft III binary path
@@ -34,14 +36,11 @@ var ErrBinaryNotFound = errors.New("Warcraft III binary not found")
 // is also the error path for "session is folder-backed, no map file to pass".
 var ErrMapNotFound = errors.New("map file not found")
 
-// wc3InstallRoot returns the WC3 install root directory. Mirrors the
-// convention in asset_handler.go::wc3InstallPath so an override via
-// WC3FORGE_WC3_PATH works for both CASC mounting and Test Map.
+// wc3InstallRoot returns the WC3 install root directory via the shared
+// resolver (env override -> user-saved GUI path -> OS default), so Test Map
+// and the CASC asset mount always point at the same install.
 func wc3InstallRoot() string {
-	if p := os.Getenv("WC3FORGE_WC3_PATH"); p != "" {
-		return p
-	}
-	return wc3InstallRootDefault
+	return wc3path.Resolve()
 }
 
 // BinaryPath returns the full path to the Warcraft III executable that we
