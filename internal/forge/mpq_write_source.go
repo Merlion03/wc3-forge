@@ -60,14 +60,16 @@ func (m *mpqSource) flush() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.flushLocked()
+	return m.flushLocked(false)
 }
 
-// flushLocked is the repack body. Caller MUST hold m.mu.
-func (m *mpqSource) flushLocked() error {
+// flushLocked is the repack body. Caller MUST hold m.mu. When force is true the
+// archive is repacked even with no buffered edits (a pure lossless copy-through)
+// — used by forceRepackAll for the clean-save path.
+func (m *mpqSource) flushLocked(force bool) error {
 	// Fast path: nothing buffered means the on-disk archive already matches
-	// the in-memory view; no repack needed.
-	if len(m.pending) == 0 && len(m.deleted) == 0 {
+	// the in-memory view; no repack needed (unless force-repacking).
+	if !force && len(m.pending) == 0 && len(m.deleted) == 0 {
 		return nil
 	}
 	if m.path == "" {
@@ -77,94 +79,107 @@ func (m *mpqSource) flushLocked() error {
 		return fmt.Errorf("%w: mpq source has no open archive to repack", ErrMPQWriteNotImplemented)
 	}
 
-	// DO-NO-HARM GUARD: this repack rebuilds the archive from NAMED files only
-	// (m.a.List() — the standard WC3 set plus any internal (listfile)). MPQ hash
-	// tables don't store filenames, so files that physically exist but aren't
-	// named — most custom imports: models, textures, sounds, war3mapImported/* —
-	// cannot be carried over and would be SILENTLY DROPPED, corrupting the map.
-	// (Observed: a 240-file custom .w3x repacked down to 14 files.) Refuse to
-	// write a lossy archive rather than destroy the map. (listfile)/(attributes)/
-	// (signature) are present-but-unnamed by design, so allow a small slack.
-	// A folder-backed save has no such ambiguity (every file is on disk by name).
-	if present := m.a.PresentFileCount(); present > len(m.a.List())+3 {
-		return fmt.Errorf("%w: this .w3x holds %d files but only %d are resolvable by name; repacking would drop %d unlisted custom/imported file(s) (models, textures, sounds). Extract the map to a folder to edit it safely",
-			ErrMPQWriteNotImplemented, present, len(m.a.List()), present-len(m.a.List()))
+	// LOSSLESS REPACK (raw block copy-through). MPQ hash tables don't store
+	// filenames, so a name-based rebuild would SILENTLY DROP every file the
+	// editor can't name — most custom imports: models, textures, sounds,
+	// war3mapImported/* (observed: a 240-file custom .w3x shrinking to 14).
+	//
+	// Instead we start from the source's RawEntries (every PRESENT block's
+	// identity + on-disk stored bytes, copied verbatim) and overlay this
+	// session's edits:
+	//   - a pending edit replaces the matching raw entry (matched by name-hash)
+	//     with fresh, uncompressed bytes stored as a NAMED entry;
+	//   - a tombstone drops the matching raw entry;
+	//   - a brand-new pending file with no source match is added as a named
+	//     entry.
+	// Unmatched raw entries pass through byte-for-byte. The writer regenerates
+	// the (listfile), so the source listfile entry is dropped from copy-through.
+	rawEntries, err := m.a.RawEntries()
+	if err != nil {
+		return fmt.Errorf("%w: read raw entries for lossless repack of %q: %v", ErrMPQWriteNotImplemented, m.path, err)
 	}
 
-	// Assemble the full file set, keyed by the normalised name so an edited
-	// file (pending) replaces its archive copy exactly once.
-	type fileBuf struct {
-		name string // display (un-folded) name for the new archive + listfile
-		data []byte
-	}
-	collected := make(map[string]fileBuf)
+	// Hash the (listfile) name once so we can recognise + drop the source copy.
+	_, lfA, lfB := mpq.HashName("(listfile)")
 
-	addFromArchive := func(name string) error {
-		key := mpqNameKey(name)
-		if _, dup := collected[key]; dup {
-			return nil
-		}
-		if m.deleted[key] {
-			return nil // tombstoned — drop it
-		}
-		if b, ok := m.pending[key]; ok {
-			collected[key] = fileBuf{name: name, data: append([]byte(nil), b...)}
-			return nil
-		}
-		b, err := m.a.Read(name)
-		if err != nil {
-			return fmt.Errorf("read %q for repack: %w", name, err)
-		}
-		collected[key] = fileBuf{name: name, data: b}
-		return nil
+	// Index this session's edits by name-hash so we can match them against the
+	// unnamed raw entries. Each pending/tombstone key is a normalised name; we
+	// re-hash it with the reader's algorithm (via mpq.HashName) and compare to
+	// each raw entry's HashA/HashB.
+	type editInfo struct {
+		hA, hB  uint32
+		name    string // display name for the new archive + listfile
+		data    []byte
+		deleted bool
 	}
-
-	// 1) Every declared name from the open archive (skips (listfile)/
-	//    (attributes) per the reader's List() contract — we regenerate the
-	//    listfile in the writer).
-	for _, name := range m.a.List() {
-		if strings.EqualFold(name, "(listfile)") || strings.EqualFold(name, "(attributes)") {
-			continue
-		}
-		if err := addFromArchive(name); err != nil {
-			return err
-		}
-	}
-
-	// 2) Any pending writes for files the archive didn't already declare
-	//    (newly-created files, e.g. a war3map.lua added by Convert-to-Lua on
-	//    a map that previously had none). We don't have the original display
-	//    name for these, so the normalised key doubles as the name — it is a
-	//    valid storage path (uppercase is fine; the engine folds case).
-	//    Prefer a lower-cased rendering for the common war3map.* set so the
-	//    listfile reads naturally; fall back to the key otherwise.
+	edits := make([]editInfo, 0, len(m.pending)+len(m.deleted))
 	for key, data := range m.pending {
-		if _, already := collected[key]; already {
-			continue
-		}
-		if m.deleted[key] {
-			continue
-		}
-		collected[key] = fileBuf{name: displayNameForKey(key), data: append([]byte(nil), data...)}
+		name := displayNameForKey(key)
+		_, hA, hB := mpq.HashName(name)
+		edits = append(edits, editInfo{hA: hA, hB: hB, name: name, data: append([]byte(nil), data...)})
+	}
+	for key := range m.deleted {
+		name := displayNameForKey(key)
+		_, hA, hB := mpq.HashName(name)
+		edits = append(edits, editInfo{hA: hA, hB: hB, name: name, deleted: true})
 	}
 
-	// Flatten into the writer's entry slice.
-	entries := make([]mpq.FileEntry, 0, len(collected))
-	for _, fb := range collected {
-		entries = append(entries, mpq.FileEntry{Name: fb.name, Data: fb.data})
+	// Pass 1: copy-through. Keep every raw entry that is NOT the source
+	// listfile, NOT replaced by a pending edit, and NOT tombstoned. (Matching is
+	// by name-hash: a pending/tombstone whose hashes equal the raw entry's
+	// addresses the same file.)
+	keep := make([]mpq.RawEntry, 0, len(rawEntries))
+	for _, re := range rawEntries {
+		if re.HashA == lfA && re.HashB == lfB {
+			continue // source (listfile) — writer regenerates
+		}
+		drop := false
+		for i := range edits {
+			if edits[i].hA == re.HashA && edits[i].hB == re.HashB {
+				drop = true // replaced (pending) or removed (tombstone)
+				break
+			}
+		}
+		if !drop {
+			keep = append(keep, re)
+		}
 	}
-	if len(entries) == 0 {
+
+	// Pass 2: named entries = every pending edit (whether it replaced a source
+	// entry or is brand new). Tombstones produce no named entry. The source
+	// listfile is regenerated by the writer, so a pending edit naming
+	// "(listfile)" is intentionally skipped (BuildLossless also guards this).
+	named := make([]mpq.FileEntry, 0, len(edits))
+	for i := range edits {
+		if edits[i].deleted {
+			continue
+		}
+		if edits[i].hA == lfA && edits[i].hB == lfB {
+			continue
+		}
+		named = append(named, mpq.FileEntry{Name: edits[i].name, Data: edits[i].data})
+	}
+
+	if len(keep) == 0 && len(named) == 0 {
 		return fmt.Errorf("%w: refusing to write an empty archive (no files collected)", ErrMPQWriteNotImplemented)
 	}
+
+	// Capture the source's hash-table size + sector-size shift BEFORE closing —
+	// the lossless writer must reproduce both (slot placement + sector layout).
+	// Also note whether the source carried a (listfile) so a pure copy-through
+	// preserves that property (and doesn't change the file count by +1).
+	hashCount := m.a.HashTableSize()
+	sectorShift := m.a.SectorSizeShift()
+	emitListfile := m.a.Has("(listfile)")
 
 	// Preserve the original preheader (HM3W / user-data shunt) verbatim. We
 	// read it from disk NOW, while the archive handle is still open and the
 	// file definitely exists, and stash the bytes in memory.
 	var preHeader []byte
 	if off := m.a.ArchiveOffset(); off > 0 {
-		raw, err := os.ReadFile(m.path)
-		if err != nil {
-			return fmt.Errorf("read original preheader from %q: %w", m.path, err)
+		raw, rerr := os.ReadFile(m.path)
+		if rerr != nil {
+			return fmt.Errorf("read original preheader from %q: %w", m.path, rerr)
 		}
 		if int64(len(raw)) < off {
 			return fmt.Errorf("original file %q shorter (%d) than its archive offset (%d)", m.path, len(raw), off)
@@ -176,16 +191,19 @@ func (m *mpqSource) flushLocked() error {
 	// Windows refuses to os.Rename a temp file ONTO a path that has an open
 	// handle ("Access is denied"). All file bytes are already collected into
 	// memory above, so we can safely close the archive here, releasing the
-	// handle, before WriteFile's atomic rename. We reopen afterwards.
+	// handle, before WriteFileLossless's atomic rename. We reopen afterwards.
 	//
-	// DO NO HARM: WriteFile writes to a sibling temp file and only renames on
-	// full success. If WriteFile fails, m.path is untouched; we reopen the
+	// DO NO HARM: WriteFileLossless writes to a sibling temp file and only
+	// renames on full success. If it fails, m.path is untouched; we reopen the
 	// (unchanged) original below so the session stays usable and the buffered
-	// edits remain pending for a retry.
+	// edits remain pending for a retry. The genuinely-unpreservable case
+	// (e.g. a pinned key-adjusted block whose offset can't be honoured) surfaces
+	// as a BuildLossless error wrapped in ErrMPQWriteNotImplemented — the
+	// graceful fallback the PRIME DIRECTIVE calls for.
 	_ = m.a.Close()
 	m.a = nil
 
-	writeErr := mpq.WriteFile(m.path, entries, preHeader)
+	writeErr := mpq.WriteFileLossless(m.path, keep, named, hashCount, sectorShift, emitListfile, preHeader)
 
 	// Reopen the archive (the new bytes on success, the untouched original on
 	// failure) so subsequent reads have a live handle again.
@@ -195,8 +213,12 @@ func (m *mpqSource) flushLocked() error {
 	}
 
 	if writeErr != nil {
-		// Leave buffers in place for a retry; surface the write error.
-		return fmt.Errorf("repack %q: %w", m.path, writeErr)
+		// Leave buffers in place for a retry. Wrap in ErrMPQWriteNotImplemented
+		// so the handler maps it to the graceful "extract to a folder" message
+		// rather than a raw internal error — this is the DO-NO-HARM fallback for
+		// the rare genuinely-unpreservable archive (e.g. a pinned key-adjusted
+		// block whose offset can't be honoured). The original .w3x is untouched.
+		return fmt.Errorf("%w: lossless repack of %q failed: %v", ErrMPQWriteNotImplemented, m.path, writeErr)
 	}
 	if openErr != nil {
 		// The repack succeeded on disk but we couldn't reopen — surface it so
@@ -214,10 +236,12 @@ func (m *mpqSource) flushLocked() error {
 // the clean-save path so a "Save" on an unedited .w3x still produces a real,
 // freshly-packed archive at the source path (rather than a misleading no-op).
 //
-// It works by reading every declared file into the pending buffer and then
-// running the normal flush. Because flush reads pending-first, this guarantees
-// a byte-faithful copy of the current contents into the new archive. If a read
-// fails the whole operation aborts before any disk write (DO NO HARM).
+// With the lossless repack this is simply a force-flush: every present block is
+// copied through verbatim (preserving unlisted custom imports and compression),
+// overlaid with whatever edits happen to be buffered. The old approach (reading
+// every NAMED file into pending) is gone — it would have dropped unnamed custom
+// imports and needlessly decompressed every encrypted file. If the repack fails
+// the original .w3x is left untouched (DO NO HARM).
 func (m *mpqSource) forceRepackAll() error {
 	if m == nil {
 		return fmt.Errorf("%w: nil source", ErrMPQWriteNotImplemented)
@@ -227,24 +251,7 @@ func (m *mpqSource) forceRepackAll() error {
 	if m.a == nil {
 		return fmt.Errorf("%w: no archive to repack", ErrMPQWriteNotImplemented)
 	}
-	for _, name := range m.a.List() {
-		if strings.EqualFold(name, "(listfile)") || strings.EqualFold(name, "(attributes)") {
-			continue
-		}
-		key := mpqNameKey(name)
-		if _, ok := m.pending[key]; ok {
-			continue
-		}
-		if m.deleted[key] {
-			continue
-		}
-		b, err := m.a.Read(name)
-		if err != nil {
-			return fmt.Errorf("read %q for full repack: %w", name, err)
-		}
-		m.pending[key] = b
-	}
-	return m.flushLocked()
+	return m.flushLocked(true)
 }
 
 // displayNameForKey renders a normalised (uppercase, backslash) name key back

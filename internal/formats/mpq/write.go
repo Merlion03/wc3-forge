@@ -299,7 +299,14 @@ func WriteFile(path string, files []FileEntry, preHeader []byte) (err error) {
 	if err != nil {
 		return err
 	}
+	return writeAtomic(path, preHeader, body)
+}
 
+// writeAtomic prepends preHeader (if any) to body and writes the result to path
+// atomically: bytes go to a sibling temp file, fsync, then os.Rename over the
+// destination. On any failure the original file is left byte-for-byte untouched
+// and the temp file is removed. Shared by WriteFile and WriteFileLossless.
+func writeAtomic(path string, preHeader, body []byte) (err error) {
 	var full []byte
 	if len(preHeader) > 0 {
 		full = make([]byte, 0, len(preHeader)+len(body))
