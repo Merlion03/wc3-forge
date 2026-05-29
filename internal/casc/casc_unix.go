@@ -3,9 +3,27 @@
 package casc
 
 import (
+	"fmt"
 	"runtime"
 	"unsafe"
+
+	"github.com/ebitengine/purego"
 )
+
+// bindCASCLib loads the CascLib shared library at path and binds every entry
+// point in cascSymbols() to its purego dispatch. macOS/Linux have dlfcn, so
+// we dlopen once (RTLD_GLOBAL so dependent symbols resolve) and let
+// RegisterLibFunc Dlsym-resolve each name.
+func bindCASCLib(path string) error {
+	handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+	if err != nil {
+		return fmt.Errorf("dlopen %s: %w", path, err)
+	}
+	for _, s := range cascSymbols() {
+		purego.RegisterLibFunc(s.fptr, handle, s.name)
+	}
+	return nil
+}
 
 // libFileName is the CascLib shared-library filename we look for on this OS.
 //

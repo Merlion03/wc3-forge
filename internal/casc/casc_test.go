@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"unsafe"
-
-	"github.com/ebitengine/purego"
 )
 
 // wc3InstallDefault is the canonical install root for the current OS. The
@@ -53,23 +51,11 @@ func TestEnumerate(t *testing.T) {
 	}
 	defer s.Close()
 
-	// Enumeration isn't part of casc.go's public surface — we don't need
-	// it at runtime, only here to spot-check CASC contents. Register the
-	// three Find* symbols on the fly against the same handle the package
-	// already opened.
-	libOnce.Do(loadLib)
-	if libErr != nil {
-		t.Fatalf("loadLib: %v", libErr)
-	}
-	var (
-		cascFindFirstFile func(hStorage uintptr, szMask uintptr, pFindData uintptr, szListFile uintptr) uintptr
-		cascFindNextFile  func(hFind uintptr, pFindData uintptr) bool
-		cascFindClose     func(hFind uintptr) bool
-	)
-	purego.RegisterLibFunc(&cascFindFirstFile, libHandle, "CascFindFirstFile")
-	purego.RegisterLibFunc(&cascFindNextFile, libHandle, "CascFindNextFile")
-	purego.RegisterLibFunc(&cascFindClose, libHandle, "CascFindClose")
-
+	// Enumeration uses the package-level Find* funcs, which Open already
+	// bound cross-platform (Open -> loadLib -> bindCASCLib). Using them
+	// directly — instead of re-binding through a dlopen handle — keeps this
+	// test working on Windows, where there's no purego.Dlopen.
+	//
 	// CASC_FIND_DATA from CascLib.h — 0x1108 bytes (4360). Most of that
 	// is szFileName[MAX_PATH=0x400] which we read as our result.
 	var data [0x1108]byte
@@ -78,9 +64,9 @@ func TestEnumerate(t *testing.T) {
 
 	hFind := cascFindFirstFile(
 		s.handle,
-		uintptr(unsafe.Pointer(&mask[0])),
-		uintptr(unsafe.Pointer(&data[0])),
-		uintptr(unsafe.Pointer(&listfileName[0])),
+		unsafe.Pointer(&mask[0]),
+		unsafe.Pointer(&data[0]),
+		unsafe.Pointer(&listfileName[0]),
 	)
 	if hFind == 0 || hFind == ^uintptr(0) {
 		t.Fatalf("CascFindFirstFile failed (handle=%x)", hFind)
@@ -101,7 +87,7 @@ func TestEnumerate(t *testing.T) {
 			t.Logf("... (capped at %d entries)", count)
 			break
 		}
-		if !cascFindNextFile(hFind, uintptr(unsafe.Pointer(&data[0]))) {
+		if !cascFindNextFile(hFind, unsafe.Pointer(&data[0])) {
 			break
 		}
 	}

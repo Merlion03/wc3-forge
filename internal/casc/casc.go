@@ -26,8 +26,6 @@ import (
 	"strings"
 	"sync"
 	"unsafe"
-
-	"github.com/ebitengine/purego"
 )
 
 // Tiny indirection so locateLib stays readable without importing
@@ -51,9 +49,8 @@ var DLLPath string
 // platform-appropriate string conversion (UTF-16 on Windows, NUL-terminated
 // UTF-8/ASCII on macOS) before passing the pointer in.
 var (
-	libOnce   sync.Once
-	libErr    error
-	libHandle uintptr // exposed for in-package tests that need to look up rare CascLib symbols (e.g. enumeration) we don't surface as part of the public API.
+	libOnce sync.Once
+	libErr  error
 
 	// IMPORTANT: every parameter through which CascLib writes back into Go
 	// memory (handles, sizes, byte counts, the read buffer, the find-data
@@ -87,34 +84,40 @@ func loadLib() {
 	if path == "" {
 		path = locateLib()
 	}
-	handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_GLOBAL)
-	if err != nil {
-		libErr = fmt.Errorf("dlopen %s: %w", path, err)
-		return
+	// The actual load + symbol binding is platform-specific: macOS/Linux use
+	// purego.Dlopen + RegisterLibFunc, but purego v0.10.0 exposes no Dlopen
+	// on Windows (no dlfcn_windows.go), so Windows loads via
+	// syscall.NewLazyDLL and binds each symbol by address with
+	// purego.RegisterFunc. Either way the shared func vars above end up bound
+	// to the same purego dispatch, so the typed-pointer pinning rules hold on
+	// both platforms. See bindCASCLib in casc_unix.go / casc_windows.go.
+	libErr = bindCASCLib(path)
+}
+
+// cascSymbols is the fixed list of CascLib entry points the platform binders
+// resolve, in registration order. Both binders iterate it so the symbol set
+// lives in one place. Names are CascLib's exported symbols — undecorated even
+// on the _UNICODE Windows build (main's prior syscall loader used these exact
+// names); CascGetFileSize64 is the 64-bit size variant (the legacy 32-bit
+// CascGetFileSize returns INVALID_FILE_SIZE for valid files).
+func cascSymbols() []struct {
+	fptr any
+	name string
+} {
+	return []struct {
+		fptr any
+		name string
+	}{
+		{&cascOpenStorage, "CascOpenStorage"},
+		{&cascCloseStorage, "CascCloseStorage"},
+		{&cascOpenFile, "CascOpenFile"},
+		{&cascCloseFile, "CascCloseFile"},
+		{&cascReadFile, "CascReadFile"},
+		{&cascGetFileSize, "CascGetFileSize64"},
+		{&cascFindFirstFile, "CascFindFirstFile"},
+		{&cascFindNextFile, "CascFindNextFile"},
+		{&cascFindClose, "CascFindClose"},
 	}
-	libHandle = handle
-	// CascLib was built with _UNICODE on Windows. The lowercase symbol
-	// CascOpenFile is the ASCII variant (CascOpenFileW would be wide).
-	// File names within CASC are conventionally lowercase ASCII so we use
-	// the narrow flavour to avoid UTF-16 conversion per call.
-	//
-	// On macOS, names are not decorated (no W/A suffix); the symbols come
-	// out as plain CascOpenFile etc., matching what RegisterLibFunc looks
-	// up below.
-	purego.RegisterLibFunc(&cascOpenStorage, handle, "CascOpenStorage")
-	purego.RegisterLibFunc(&cascCloseStorage, handle, "CascCloseStorage")
-	purego.RegisterLibFunc(&cascOpenFile, handle, "CascOpenFile")
-	purego.RegisterLibFunc(&cascCloseFile, handle, "CascCloseFile")
-	purego.RegisterLibFunc(&cascReadFile, handle, "CascReadFile")
-	// Use the 64-bit size variant; the 32-bit CascGetFileSize is the
-	// legacy entry point and on this vcpkg build it returns
-	// INVALID_FILE_SIZE for valid files (no Win32 error set).
-	purego.RegisterLibFunc(&cascGetFileSize, handle, "CascGetFileSize64")
-	// Enumeration symbols for ListByPrefix. Core CascLib API, always present
-	// in our vendored builds; registered up front (cheap) rather than lazily.
-	purego.RegisterLibFunc(&cascFindFirstFile, handle, "CascFindFirstFile")
-	purego.RegisterLibFunc(&cascFindNextFile, handle, "CascFindNextFile")
-	purego.RegisterLibFunc(&cascFindClose, handle, "CascFindClose")
 }
 
 // locateLib searches a few standard places for the CASC shared library.

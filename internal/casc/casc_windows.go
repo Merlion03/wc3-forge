@@ -3,13 +3,38 @@
 package casc
 
 import (
+	"fmt"
 	"runtime"
 	"syscall"
 	"unsafe"
+
+	"github.com/ebitengine/purego"
 )
 
 // libFileName is the CascLib shared-library filename we look for on this OS.
 const libFileName = "CascLib.dll"
+
+// bindCASCLib loads CascLib.dll at path and binds every entry point in
+// cascSymbols() to its purego dispatch. purego v0.10.0 ships no Dlopen on
+// Windows (no dlfcn_windows.go), so instead of purego.Dlopen we load with
+// syscall.NewLazyDLL, resolve each proc address, and bind it via
+// purego.RegisterFunc — which routes through purego's Windows SyscallN, the
+// SAME dispatch (and the same typed-pointer pinning) the Unix path uses. So
+// the shared func vars behave identically on both platforms.
+func bindCASCLib(path string) error {
+	dll := syscall.NewLazyDLL(path)
+	if err := dll.Load(); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
+	}
+	for _, s := range cascSymbols() {
+		proc := dll.NewProc(s.name)
+		if err := proc.Find(); err != nil {
+			return fmt.Errorf("resolve %s in %s: %w", s.name, path, err)
+		}
+		purego.RegisterFunc(s.fptr, proc.Addr())
+	}
+	return nil
+}
 
 // encodeLibPath converts a Go string to the form CascLib's
 // CascOpenStorage expects on this platform. The DLL is compiled with
