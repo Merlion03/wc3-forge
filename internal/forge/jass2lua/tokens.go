@@ -225,6 +225,26 @@ func (l *lexer) next() (Token, error) {
 		return Token{Kind: TokOp, Value: string(c), Line: startLine, Col: startCol}, nil
 	}
 
+	// B2 — Zinc / JASS+ graceful handling. The characters below never
+	// appear in pure JASS (nor in the vJASS subset we preprocess). They are the
+	// tell-tale openers of syntaxes we deliberately do NOT support:
+	//
+	//   { }   Zinc (the C-style alternative vJASS dialect; also leaks through
+	//         from unhandled `//! novjass` / Lua-table bodies).
+	//   !     JASS+ (the `!`-prefixed operator dialect).
+	//
+	// Rather than the cryptic "unexpected character '{'", surface a clear,
+	// section-scoped diagnostic so the convert dialog can tell the user this
+	// section uses an unsupported dialect and was skipped — instead of a
+	// mystery lexer error. We still fail the whole section (the caller turns a
+	// lex error into a single error() placeholder), which is the intended
+	// "fail that section gracefully" behavior.
+	switch c {
+	case '{', '}':
+		return Token{}, fmt.Errorf("jass2lua: unsupported syntax (Zinc/JASS+): %q at line %d col %d — this section uses the Zinc dialect, which is not supported; convert it manually", string(c), startLine, startCol)
+	case '!':
+		return Token{}, fmt.Errorf("jass2lua: unsupported syntax (Zinc/JASS+): %q at line %d col %d — this section uses the JASS+ dialect, which is not supported; convert it manually", string(c), startLine, startCol)
+	}
 	return Token{}, fmt.Errorf("jass2lua: lex error at line %d col %d: unexpected character %q", startLine, startCol, c)
 }
 

@@ -22,6 +22,8 @@ export function AddTriggerVariable(arg1:string,arg2:string,arg3:boolean,arg4:num
 
 export function BeginUndoGroup(arg1:string):Promise<void>;
 
+export function BrowseForWC3Install():Promise<string>;
+
 export function CanRedo():Promise<boolean>;
 
 export function CanUndo():Promise<boolean>;
@@ -160,12 +162,6 @@ export function OpenMap(arg1:string):Promise<main.MapStatus>;
 
 export function OpenMapDialog():Promise<string>;
 
-export function BrowseForWC3Install():Promise<string>;
-
-export function SetWC3InstallPath(arg1:string):Promise<main.WC3InstallStatusDTO>;
-
-export function WC3InstallStatus():Promise<main.WC3InstallStatusDTO>;
-
 export function OpenMapFileDialog():Promise<string>;
 
 export function OpenMapInNewWindow(arg1:string):Promise<void>;
@@ -224,6 +220,8 @@ export function SetUnitAnimation(arg1:number,arg2:string):Promise<void>;
 
 export function SetUnitObjectField(arg1:string,arg2:string,arg3:string):Promise<main.UnitObjectDetail>;
 
+export function SetWC3InstallPath(arg1:string):Promise<main.WC3InstallStatusDTO>;
+
 export function Status():Promise<main.MapStatus>;
 
 export function SwapTileset(arg1:main.SwapTilesetRequest):Promise<main.TerrainDTO>;
@@ -233,3 +231,5 @@ export function TestMap():Promise<void>;
 export function Undo():Promise<void>;
 
 export function UndoTo(arg1:number):Promise<void>;
+
+export function WC3InstallStatus():Promise<main.WC3InstallStatusDTO>;

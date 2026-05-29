@@ -65,6 +65,11 @@ func reopenCASC() (*casc.Storage, error) {
 		cascStorage = nil
 	}
 	openCASCLocked()
+	// Drop every stock-data cache that may have memoized a miss while the old
+	// (missing/invalid) install was mounted — the sync.Once loaders otherwise
+	// keep returning the cached failure forever, so terrain/cliffs/water/icons
+	// stay broken until a restart. See resetStockDataCaches.
+	resetStockDataCaches()
 	return cascStorage, cascErr
 }
 

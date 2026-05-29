@@ -485,6 +485,16 @@ export interface SceneAPI {
   setReforgedMode(reforged: boolean): void
   /** Current reforged flag — for UI display. */
   isReforged(): boolean
+  /**
+   * Drop every cached model + texture resource so the next loadMap()
+   * re-fetches them. Used after a live CASC remount (the user located their
+   * WC3 install at runtime): assets that 404'd against the previous missing
+   * install are cached as empty/failed in the viewer's resourceMap and would
+   * otherwise stay broken until a full restart. Detaches instances and
+   * re-primes team textures, mirroring setReforgedMode's cache flush minus
+   * the mode flip. Caller triggers loadMap() afterward.
+   */
+  purgeResourceCache(): void
   /** Move the camera pivot to (x, y) in world XY. Z defaults to 0 (ground plane). */
   panTo(x: number, y: number, z?: number): void
   /**
@@ -2609,6 +2619,29 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       }
     },
     isReforged() { return currentReforged },
+    purgeResourceCache() {
+      flog('[scene] purging resource cache (CASC remount)')
+      // Flush the model + texture resource cache so the next loadMap
+      // re-fetches everything through the freshly mounted CASC. This is the
+      // same eviction setReforgedMode does — terrain/water/cliff textures all
+      // go through viewer.load -> resourceMap, so this covers them too.
+      const v: any = viewer
+      if (v.resourceMap && typeof v.resourceMap.clear === 'function') {
+        v.resourceMap.clear()
+      }
+      // Drop cached (empty) team colors so loadTeamTextures re-fetches them.
+      const cache: any = (viewer as any).sharedCache?.get?.('mdx')
+      if (cache) {
+        cache.teamColors.length = 0
+        cache.teamGlows.length = 0
+      }
+      // Detach all instances so we don't keep stale model refs around.
+      clearInstances()
+      // Re-prime team textures against the new mount.
+      try { handlers.mdx.loadTeamTextures(viewer) } catch (e) {
+        flog('[loadTeamTextures-remount]', e instanceof Error ? e.message : String(e))
+      }
+    },
     panTo(x: number, y: number, z: number = 0) {
       camera.setPivot(x, y, z)
     },

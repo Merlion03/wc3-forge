@@ -472,20 +472,6 @@ export namespace main {
 	        this.lua = source["lua"];
 	    }
 	}
-	export class WC3InstallStatusDTO {
-	    available: boolean;
-	    path: string;
-
-	    static createFrom(source: any = {}) {
-	        return new WC3InstallStatusDTO(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.available = source["available"];
-	        this.path = source["path"];
-	    }
-	}
 	export class MinimapDTO {
 	    bytes: string;
 	    ext: string;
@@ -1262,6 +1248,20 @@ export namespace main {
 	        this.base_id = source["base_id"];
 	        this.campaign = source["campaign"];
 	        this.icon_art = source["icon_art"];
+	    }
+	}
+	export class WC3InstallStatusDTO {
+	    available: boolean;
+	    path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new WC3InstallStatusDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.available = source["available"];
+	        this.path = source["path"];
 	    }
 	}
 

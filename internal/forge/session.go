@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -80,12 +81,25 @@ func (f folderSource) read(name string) ([]byte, bool, error) {
 // write replaces (or creates) the named file under f.root. Path traversal is
 // defended against via filepath.Clean — name comes from Session's own code
 // today but plumb safely in case future callers route untrusted strings here.
+//
+// We normalize Windows-style backslashes to forward slashes before cleaning
+// so the same code rejects `C:\Windows\…` and `subdir\..\..\evil` on both
+// macOS and Windows. filepath.Clean on POSIX doesn't treat `\` as a
+// separator (only `/`), so without this normalization a backslash-traversal
+// string survives Clean untouched and the IsAbs / `..` checks all miss it.
+// The Windows drive-letter form (`X:`) is rejected explicitly because it's
+// "absolute" on Windows but not according to POSIX filepath.IsAbs.
 func (f folderSource) write(name string, data []byte) error {
-	clean := filepath.Clean(name)
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, string(filepath.Separator)+"..") {
+	norm := strings.ReplaceAll(name, `\`, "/")
+	clean := path.Clean(norm)
+	switch {
+	case strings.HasPrefix(clean, "/"),
+		strings.HasPrefix(clean, ".."),
+		strings.Contains(clean, "/.."),
+		len(clean) >= 2 && clean[1] == ':':
 		return fmt.Errorf("write %q: unsafe path", name)
 	}
-	return os.WriteFile(filepath.Join(f.root, clean), data, 0o644)
+	return os.WriteFile(filepath.Join(f.root, filepath.FromSlash(clean)), data, 0o644)
 }
 
 // delete removes the named file under f.root. Returns nil if the file is

@@ -22,7 +22,7 @@ endfunction
 
 // TestEmit_TernaryFalseCaveat — if the then-arm looks boolean, the emitter
 // appends an inline caveat comment about the false/nil unreliability.
-func TestEmit_TernaryFalseCaveat(t *testing.T) {
+func TestEmit_TernaryBooleanThenUsesTableForm(t *testing.T) {
 	// `x > 0 ? a > 0 : a < 0` — then-arm is a comparison ⇒ caveat expected.
 	src := `function F takes nothing returns boolean
 return x > 0 ? a > 0 : a < 0
@@ -32,8 +32,12 @@ endfunction
 	if err != nil {
 		t.Fatalf("transpile err: %v", err)
 	}
-	if !strings.Contains(got, "ternary:") {
-		t.Errorf("expected ternary caveat comment for boolean-then, got:\n%s", got)
+	if !strings.Contains(got, "((x > 0) and {a > 0} or {a < 0})[1]") {
+		t.Errorf("expected table-wrap ternary for boolean-then, got:\n%s", got)
+	}
+	// The old buggy caveat comment must NOT appear -- the form is now correct.
+	if strings.Contains(got, "ternary:") {
+		t.Errorf("table-wrap form should not emit the false/nil caveat, got:\n%s", got)
 	}
 }
 
@@ -125,7 +129,6 @@ func TestEmit_NULSourceStillTranspiles(t *testing.T) {
 		t.Errorf("expected Foo() in output, got:\n%s", lua)
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // P1#3 — integer division: JASS `/` between two integers truncates toward
@@ -428,5 +431,300 @@ endfunction
 	}
 	if !strings.Contains(got, "R2I(steps[1] / steps[2])") {
 		t.Errorf("expected integer-array element division wrapped, got:\n%s", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P2#9 C1 — string concat: JASS `+` is overloaded (numeric add OR string
+// concat). The emitter must emit Lua `..` whenever an operand is provably a
+// string, even with NO string literal in sight (e.g. two string-typed params).
+// Numeric `+` must stay `+`. Unknown stays `+` (conservative).
+// ---------------------------------------------------------------------------
+
+// TestEmit_Concat_LiteralFreeStringParams is the core C1 case: two string-typed
+// params with NO string literal. Before the fix this wrongly emitted Lua `+`
+// (runtime "attempt to perform arithmetic on a string"). After: `..`.
+func TestEmit_Concat_LiteralFreeStringParams(t *testing.T) {
+	src := `function F takes string a, string b returns string
+	return a + b
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "a .. b") {
+		t.Errorf("literal-free string concat must emit `..`, got:\n%s", got)
+	}
+	if strings.Contains(got, "a + b") {
+		t.Errorf("string concat must NOT emit `+`, got:\n%s", got)
+	}
+}
+
+// TestEmit_Concat_StringGlobal — a string-typed global concatenated with an
+// unknown ident still routes through `..` (one provably-string operand is
+// enough).
+func TestEmit_Concat_StringGlobal(t *testing.T) {
+	src := `globals
+	string udg_msg
+	endglobals
+	function F takes nothing returns string
+	return udg_msg + suffix
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "udg_msg .. suffix") {
+		t.Errorf("string-global concat must emit `..`, got:\n%s", got)
+	}
+}
+
+// TestEmit_Concat_StringNativeReturn — a string-returning known native
+// (I2S/GetUnitName) makes the whole `+` a concat even with an unknown other
+// operand.
+func TestEmit_Concat_StringNativeReturn(t *testing.T) {
+	src := `function F takes nothing returns nothing
+	call BJDebugMsg("level " + I2S(lvl))
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	// Both the literal hint and the I2S string-return route this to `..`.
+	if !strings.Contains(got, `"level " .. I2S(lvl)`) {
+		t.Errorf("string-native concat must emit `..`, got:\n%s", got)
+	}
+}
+
+// TestEmit_Concat_GetUnitNameNoLiteral — `GetUnitName(u) + GetUnitName(v)`:
+// neither operand is a literal, both are string-returning natives ⇒ `..`.
+func TestEmit_Concat_GetUnitNameNoLiteral(t *testing.T) {
+	src := `function F takes unit u, unit v returns string
+	return GetUnitName(u) + GetUnitName(v)
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "GetUnitName(u) .. GetUnitName(v)") {
+		t.Errorf("two string-native concat must emit `..`, got:\n%s", got)
+	}
+}
+
+// TestEmit_Concat_IntegerAddStaysPlus — two integer-typed params added stays
+// Lua `+` (NOT `..`). Regression guard: the string fix must not steal numeric
+// add.
+func TestEmit_Concat_IntegerAddStaysPlus(t *testing.T) {
+	src := `function F takes integer a, integer b returns integer
+	return a + b
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "a + b") {
+		t.Errorf("integer add must stay `+`, got:\n%s", got)
+	}
+	if strings.Contains(got, "a .. b") {
+		t.Errorf("integer add must NOT become `..`, got:\n%s", got)
+	}
+}
+
+// TestEmit_Concat_RealAddStaysPlus — real `+` stays `+`.
+func TestEmit_Concat_RealAddStaysPlus(t *testing.T) {
+	src := `function F takes real x, real y returns real
+	return x + y
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "x + y") || strings.Contains(got, "x .. y") {
+		t.Errorf("real add must stay `+`, got:\n%s", got)
+	}
+}
+
+// TestEmit_Concat_IntLiteralAddStaysPlus — two integer literals add as `+`.
+func TestEmit_Concat_IntLiteralAddStaysPlus(t *testing.T) {
+	src := `function F takes nothing returns integer
+	return 1 + 2
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "1 + 2") {
+		t.Errorf("int-literal add must stay `+`, got:\n%s", got)
+	}
+}
+
+// TestEmit_Concat_UnknownStaysPlus — neither operand provably string nor
+// numeric ⇒ unknown ⇒ keep `+` (conservative; matches pre-fix behavior so
+// already-correct numeric uses of unknown idents don't regress).
+func TestEmit_Concat_UnknownStaysPlus(t *testing.T) {
+	src := `function F takes nothing returns nothing
+	set z = x + y
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "x + y") {
+		t.Errorf("unknown-typed `+` must stay `+` (conservative), got:\n%s", got)
+	}
+}
+
+// TestEmit_Concat_OneStringLiteralUnchanged is the DO-NO-HARM guard: the
+// pre-existing one-string-literal heuristic must emit EXACTLY as before
+// (`"x=" .. n`). This already worked; the type-based path must not change it.
+func TestEmit_Concat_OneStringLiteralUnchanged(t *testing.T) {
+	src := `function F takes integer n returns string
+	return "x=" + n
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, `"x=" .. n`) {
+		t.Errorf("one-string-literal concat must stay `..`, got:\n%s", got)
+	}
+}
+
+// TestEmit_Concat_StringChainLiteralFree — a 3-way literal-free chain of
+// string params concatenates fully (`a .. b .. c`). Exercises the
+// inferBinaryType `+`-returns-string path so the chain classifies as string
+// at every node.
+func TestEmit_Concat_StringChainLiteralFree(t *testing.T) {
+	src := `function F takes string a, string b, string c returns string
+	return a + b + c
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "a .. b") || !strings.Contains(got, ".. c") {
+		t.Errorf("literal-free string chain must use `..` throughout, got:\n%s", got)
+	}
+	if strings.Contains(got, " + ") {
+		t.Errorf("no `+` should survive in an all-string chain, got:\n%s", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P2#9 C2 — ternary correctness: `cond ? then : else`. The bare
+// `(cond and then) or else` idiom returns `else` when `then` is false/nil. The
+// fix emits the table-wrap form `((cond) and {then} or {else})[1]` when `then`
+// could be falsy, and keeps the cheap idiom (byte-identical) when `then` is
+// provably truthy.
+// ---------------------------------------------------------------------------
+
+// TestEmit_Ternary_FalseThenReturnsThen is the core C2 case: a literal `false`
+// then-branch must return `then` (false), NOT `else`. We verify both the
+// emitted FORM and the Lua-equivalent runtime SEMANTICS.
+func TestEmit_Ternary_FalseThenReturnsThen(t *testing.T) {
+	// `cond ? false : true` — with cond true, JASS yields false. The broken
+	// idiom `(cond and false) or true` yields true (wrong).
+	src := `function F takes boolean cond returns boolean
+	return cond ? false : true
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "and {false} or {true})[1]") {
+		t.Errorf("false-then ternary must use table-wrap form, got:\n%s", got)
+	}
+	// Demonstrate the semantics the table-wrap form restores vs the broken
+	// and/or idiom, for cond == true:
+	//   broken:   (true and false) or true  == true   (WRONG)
+	//   tablewrap:((true and {false} or {true})[1]) == false (CORRECT)
+	const condTrue = true
+	broken := func() bool {
+		// (cond and then) or else, with then=false, else=true
+		if condTrue && false {
+			return false
+		}
+		return true // the `or else` fallback fires on falsy then
+	}
+	if broken() != true {
+		t.Fatalf("sanity: broken idiom should mis-return true")
+	}
+	tablewrap := func() bool {
+		// {then}/{else} are always-truthy tables; [1] unwraps the real value.
+		var picked []bool
+		if condTrue {
+			picked = []bool{false}
+		} else {
+			picked = []bool{true}
+		}
+		return picked[0]
+	}
+	if tablewrap() != false {
+		t.Errorf("table-wrap form must return then==false for cond==true, got %v", tablewrap())
+	}
+}
+
+// TestEmit_Ternary_NumericThenKeepsAndOr is the DO-NO-HARM guard: a
+// provably-truthy then-arm (integer literal) keeps the cheap `(cond and then)
+// or else` idiom byte-for-byte — NOT the table-wrap form. (Mirrors the existing
+// TestEmit_Ternary expectation, asserted here against the new code path.)
+func TestEmit_Ternary_NumericThenKeepsAndOr(t *testing.T) {
+	src := `function F takes nothing returns integer
+	return x ? 1 : 2
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "((x) and (1) or (2))") {
+		t.Errorf("numeric-then ternary must keep cheap and/or idiom, got:\n%s", got)
+	}
+	if strings.Contains(got, "{1}") || strings.Contains(got, "[1]") {
+		t.Errorf("provably-truthy then must NOT use table-wrap form, got:\n%s", got)
+	}
+}
+
+// TestEmit_Ternary_StringThenKeepsAndOr — a string literal then-arm is truthy
+// (even "" is truthy in Lua), so the cheap idiom is kept.
+func TestEmit_Ternary_StringThenKeepsAndOr(t *testing.T) {
+	src := `function F takes boolean cond returns string
+	return cond ? "yes" : "no"
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, `(cond) and ("yes") or ("no")`) {
+		t.Errorf("string-then ternary must keep cheap and/or idiom, got:\n%s", got)
+	}
+}
+
+// TestEmit_Ternary_NullThenUsesTableForm — a `null` then-arm lowers to Lua
+// `nil` (falsy), so it must use the correct table-wrap form to actually return
+// nil instead of the else-branch.
+func TestEmit_Ternary_NullThenUsesTableForm(t *testing.T) {
+	src := `function F takes boolean cond returns unit
+	return cond ? null : u
+	endfunction
+	`
+	got, err := TranspileScript(src)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if !strings.Contains(got, "and {nil} or {u})[1]") {
+		t.Errorf("null-then ternary must use table-wrap form, got:\n%s", got)
 	}
 }

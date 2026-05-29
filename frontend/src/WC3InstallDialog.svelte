@@ -29,7 +29,7 @@
       if (!picked) return // cancelled
       const status = await SetWC3InstallPath(picked)
       if (status.available) {
-        showToast('Warcraft III install set — reload the map to see stock assets.', 'info')
+        showToast('Warcraft III install set — loading stock assets…', 'info')
         open = false
       }
     } catch (e) {

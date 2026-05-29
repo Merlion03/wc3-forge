@@ -1,14 +1,15 @@
 // Package wc3launch handles spawning Warcraft III with a map preloaded via the
-// `-loadfile` CLI flag. Mirrors HiveWE's `play_test` behaviour
+// `-launch -loadfile` CLI flags. Mirrors HiveWE's `play_test` behaviour
 // (src/main_window/hivewe.cpp:419-435) so the editor's "Test Map" affordance
 // matches what map authors already expect from the de-facto incumbent tool.
 //
-// Resolution order for the WC3 binary:
-//  1. `WC3FORGE_WC3_PATH` env var (an install root path; we append the standard
-//     `_retail_/x86_64/Warcraft III.exe` suffix). Matches the existing wc3-forge
-//     convention used by asset_handler.go::wc3InstallPath so a user who already
-//     points wc3-forge at a custom CASC root automatically gets Test Map too.
-//  2. Default Reforged install path: `C:\Program Files (x86)\Warcraft III\`.
+// Resolution order for the WC3 install root:
+//  1. `WC3FORGE_WC3_PATH` env var (an install root path). Matches the existing
+//     wc3-forge convention used by asset_handler.go::wc3InstallPath so a user
+//     who already points wc3-forge at a custom CASC root automatically gets
+//     Test Map too.
+//  2. The platform default — see wc3InstallRootDefault and binaryRelPath in
+//     the OS-specific file (launch_windows.go / launch_darwin.go).
 //
 // The launch is fire-and-forget (`cmd.Start`, not `cmd.Run`) — we don't block
 // the editor on WC3's lifetime. The OS process becomes a child of wc3-forge,
@@ -25,10 +26,10 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/wc3path"
 )
 
-// ErrBinaryNotFound is returned when the resolved Warcraft III.exe path
+// ErrBinaryNotFound is returned when the resolved Warcraft III binary path
 // doesn't exist on disk. The UI uses this to surface a friendlier toast
-// than the raw exec error ("the system cannot find the path…").
-var ErrBinaryNotFound = errors.New("Warcraft III.exe not found")
+// than the raw exec error.
+var ErrBinaryNotFound = errors.New("Warcraft III binary not found")
 
 // ErrMapNotFound is returned when the map path doesn't resolve to a real
 // file. Folder-backed sessions don't have a single launchable .w3x, so this
@@ -42,27 +43,29 @@ func wc3InstallRoot() string {
 	return wc3path.Resolve()
 }
 
-// BinaryPath returns the full path to Warcraft III.exe under the install
-// root. Does NOT verify the file exists — that's the caller's job (the UI
-// can choose to surface ErrBinaryNotFound differently than a generic error).
+// BinaryPath returns the full path to the Warcraft III executable that we
+// should exec. The exact filename / bundle layout is per-OS — see
+// binaryRelPath in the OS-specific file. Does NOT verify the file exists —
+// that's the caller's job (the UI can choose to surface ErrBinaryNotFound
+// differently than a generic error).
 //
 // Matches HiveWE's `hierarchy.root_directory / "x86_64" / "Warcraft III.exe"`
 // where root_directory is `<install>/_retail_/` (see hierarchy.ixx:48).
 func BinaryPath() string {
-	return filepath.Join(wc3InstallRoot(), "_retail_", "x86_64", "Warcraft III.exe")
+	return filepath.Join(append([]string{wc3InstallRoot()}, binaryRelPath...)...)
 }
 
 // LaunchWithMap spawns Warcraft III with the supplied map preloaded.
 // Returns immediately after spawning — the WC3 process is detached from
-// wc3-forge's lifetime by Windows itself (its window is its own).
+// wc3-forge's lifetime by the OS itself (its window is its own).
 //
 // CLI matches HiveWE's play_test exactly:
 //
-//	Warcraft III.exe -launch -loadfile <absolute map path>
+//	Warcraft III -launch -loadfile <absolute map path>
 //
 // `-launch` skips Battle.net login and goes straight to the local-files
 // path; `-loadfile` opens the named .w3x as if the user double-clicked it
-// from Windows Explorer.
+// from the Finder / Windows Explorer.
 //
 // IMPORTANT v1 limitation: this function does NOT save the current session
 // before launching. The caller MUST gate the button on session.IsDirty()

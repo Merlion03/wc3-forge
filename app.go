@@ -56,6 +56,13 @@ const (
 	// onBeforeClose handler in main.go until the user explicitly chooses
 	// Save & Quit, Discard & Quit, or Cancel.
 	eventCloseRequested   = "wc3-forge:close-requested"
+	// eventCASCRemounted fires after the user points wc3-forge at a valid
+	// install via SetWC3InstallPath and the CASC mount is reopened live.
+	// App.svelte subscribes and purges the viewer's resource cache + reloads
+	// the current map so the stock textures/models that 404'd against the
+	// previous (missing/invalid) install get re-fetched through the new mount
+	// — no restart needed.
+	eventCASCRemounted    = "wc3-forge:casc-remounted"
 )
 
 // App is the Wails-bindable surface exposed to the frontend. Every method
@@ -307,6 +314,9 @@ func (a *App) SetWC3InstallPath(path string) (WC3InstallStatusDTO, error) {
 		return WC3InstallStatusDTO{Available: false, Path: path}, fmt.Errorf("save install path: %w", err)
 	}
 	reopenCASC()
+	// Tell the frontend to drop its now-stale (404/empty) cached assets and
+	// reload the scene against the freshly mounted CASC — see eventCASCRemounted.
+	runtime.EventsEmit(a.ctx, eventCASCRemounted, map[string]any{"path": path})
 	return WC3InstallStatusDTO{Available: true, Path: path}, nil
 }
 

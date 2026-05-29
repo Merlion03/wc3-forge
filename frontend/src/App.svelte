@@ -528,6 +528,14 @@
         }
       })
       .catch(() => {})
+    // Live CASC remount (user located their WC3 install at runtime): the
+    // viewer cached the stock assets that 404'd against the old missing
+    // install as empty/failed, so purge that cache and reload the scene to
+    // re-fetch them through the new mount — no restart needed.
+    EventsOn('wc3-forge:casc-remounted', async () => {
+      scene?.purgeResourceCache()
+      if ((await Status()).loaded) await reloadMap({ keepCamera: true })
+    })
     EventsOn(MAP_EVENT, async () => {
       status = await Status()
       // Bump the minimap-reload generation on every map-changed event so the

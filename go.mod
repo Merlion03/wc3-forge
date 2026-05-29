@@ -3,6 +3,7 @@ module github.com/StephenSHorton/wc3-forge
 go 1.26
 
 require (
+	github.com/ebitengine/purego v0.10.0
 	github.com/nielsAD/gowarcraft3 v1.7.1
 	github.com/wailsapp/wails/v2 v2.12.0
 )
