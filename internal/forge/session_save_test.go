@@ -920,8 +920,8 @@ func TestMPQ_WriteBuffersThenFlushFails(t *testing.T) {
 	}
 	// flush can't repack (no path) so it returns an errors.Is-checkable error
 	// rather than silently dropping the data.
-	if err := src.flush(); !errors.Is(err, ErrMPQWriteNotImplemented) {
-		t.Errorf("flush with no path: want ErrMPQWriteNotImplemented, got %v", err)
+	if err := src.flush(); !errors.Is(err, ErrMPQRepackFailed) {
+		t.Errorf("flush with no path: want ErrMPQRepackFailed, got %v", err)
 	}
 }
 

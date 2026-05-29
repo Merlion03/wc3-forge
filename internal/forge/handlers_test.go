@@ -38,7 +38,7 @@ func TestHandleDoodadsMove_NoMap(t *testing.T) {
 }
 
 // TestHandleMapSave_MPQSentinelMessage exercises the error-mapping branch:
-// when Session.Save returns a wrapped ErrMPQWriteNotImplemented (which now
+// when Session.Save returns a wrapped ErrMPQRepackFailed (which now
 // happens only when an MPQ-backed source cannot repack — here, a source with
 // no archive/path), the handler turns it into the user-visible message instead
 // of letting the wrapped sentinel leak.
@@ -66,7 +66,7 @@ func TestHandleMapSave_MPQSentinelMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from MPQ-backed save with no repack target")
 	}
-	if !strings.Contains(err.Error(), "extract the map to a folder first") {
+	if !strings.Contains(err.Error(), "extract the map to a folder") {
 		t.Errorf("expected user-visible MPQ message, got %q", err.Error())
 	}
 }

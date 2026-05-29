@@ -958,8 +958,8 @@
     try {
       await SaveMap()
       // Save succeeded → drop the modal and ForceQuit. If Save fails (e.g.
-      // ErrMPQWriteNotImplemented), show the toast and leave the modal open
-      // so the user can pick Discard or Cancel instead.
+      // ErrMPQRepackFailed on an unpreservable archive), show the toast and
+      // leave the modal open so the user can pick Discard or Cancel instead.
       quitGuardOpen = false
       await ForceQuit()
     } catch (e) {

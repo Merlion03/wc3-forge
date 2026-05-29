@@ -273,12 +273,21 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 	}
 	out := &TranspilePreview{Sections: []TranspileSection{}}
 
+	// P2#6: build the cross-section vJASS context ONCE from every section's
+	// source, so a section that references a struct/module/textmacro/library
+	// defined in ANOTHER section sees those definitions during its own
+	// transpile (the flat war3map.j path already sees everything at once; this
+	// mirrors that visibility for the per-section path). The context only
+	// supplies VISIBILITY — each section still emits only its own struct/module
+	// Lua, so the per-section output mapping is unchanged.
+	ctx := jass2lua.BuildGlobalContext(s.collectSectionSourcesLocked())
+
 	// Hand-rolled map_header path.
 	if s.triggerIsHandRolled {
 		if s.triggers != nil && len(s.triggers.Triggers) > 0 {
 			tr := &s.triggers.Triggers[0]
 			if strings.TrimSpace(tr.CustomText) != "" {
-				sec := transpileSectionScript(tr.ID, "Map Header (war3map.j)", "map_header", tr.CustomText)
+				sec := transpileSectionScript(tr.ID, "Map Header (war3map.j)", "map_header", tr.CustomText, ctx)
 				out.Sections = append(out.Sections, sec)
 			}
 		}
@@ -287,7 +296,7 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 
 	// Global JASS header (war3map.wct) — top of the diff so the user sees it first.
 	if s.triggersWct != nil && strings.TrimSpace(s.triggersWct.GlobalJASS) != "" {
-		sec := transpileSectionScript(-1, "war3map.wct GlobalJASS", "global_jass", s.triggersWct.GlobalJASS)
+		sec := transpileSectionScript(-1, "war3map.wct GlobalJASS", "global_jass", s.triggersWct.GlobalJASS, ctx)
 		out.Sections = append(out.Sections, sec)
 	}
 
@@ -302,17 +311,54 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 			continue
 		}
 		if (tr.IsScript || tr.Classifier == wtg.ClassifierScript) && strings.TrimSpace(tr.CustomText) != "" {
-			sec := transpileSectionScript(tr.ID, "Custom Script: "+tr.Name, "script", tr.CustomText)
+			sec := transpileSectionScript(tr.ID, "Custom Script: "+tr.Name, "script", tr.CustomText, ctx)
 			out.Sections = append(out.Sections, sec)
 			continue
 		}
 		if strings.TrimSpace(tr.CustomText) != "" {
 			// GUI trigger with custom_text overlay — auto-wrap as a function.
-			sec := transpileSectionCustomText(tr.ID, tr.Name, tr.CustomText)
+			sec := transpileSectionCustomText(tr.ID, tr.Name, tr.CustomText, ctx)
 			out.Sections = append(out.Sections, sec)
 		}
 	}
 	return out, nil
+}
+
+// collectSectionSourcesLocked returns the raw source text of every section the
+// convert flow transpiles (custom-script triggers, GUI custom-text overlays,
+// the war3map.wct GlobalJASS header, and a hand-rolled war3map.j). It is the
+// input to jass2lua.BuildGlobalContext, which derives the cross-section
+// struct/module/textmacro/library visibility set.
+//
+// Caller must hold s.mu (read or write). Order mirrors the transpile order so
+// the global context's last-wins duplicate resolution is deterministic and
+// matches the diff the user sees.
+func (s *Session) collectSectionSourcesLocked() []string {
+	var srcs []string
+	if s.triggerIsHandRolled {
+		if s.triggers != nil && len(s.triggers.Triggers) > 0 {
+			tr := &s.triggers.Triggers[0]
+			if strings.TrimSpace(tr.CustomText) != "" {
+				srcs = append(srcs, tr.CustomText)
+			}
+		}
+		return srcs
+	}
+	if s.triggersWct != nil && strings.TrimSpace(s.triggersWct.GlobalJASS) != "" {
+		srcs = append(srcs, s.triggersWct.GlobalJASS)
+	}
+	if s.triggers != nil {
+		for i := range s.triggers.Triggers {
+			tr := &s.triggers.Triggers[i]
+			if tr.IsComment {
+				continue
+			}
+			if strings.TrimSpace(tr.CustomText) != "" {
+				srcs = append(srcs, tr.CustomText)
+			}
+		}
+	}
+	return srcs
 }
 
 // transpileSectionScript runs the full preprocessor pipeline for a section
@@ -332,15 +378,23 @@ func (s *Session) TranspilePreview() (*TranspilePreview, error) {
 // strings" observation: an unsurfaced parser-error branch could push
 // blank entries into `p.errs`, and the helper join produced a non-nil
 // error.Error() that was empty or all-whitespace.
-func transpileSectionScript(id int32, label, kind, src string) TranspileSection {
+func transpileSectionScript(id int32, label, kind, src string, ctx *jass2lua.GlobalContext) TranspileSection {
 	stripped := jass2lua.StripBlockComments(src)
-	pp := jass2lua.Preprocess(stripped)
+	// P2#6: seed cross-section textmacros so a `//! runtextmacro` whose
+	// definition lives in another section expands here too.
+	pp := jass2lua.PreprocessWithMacros(stripped, ctx.MacrosFor())
 	ls := jass2lua.PreprocessLibScope(pp.Expanded)
 	mods := jass2lua.PreprocessModules(ls.Expanded)
 	withoutIfaces := jass2lua.PreprocessInterfaces(mods.Expanded)
 	withoutDefines := jass2lua.PreprocessDefines(withoutIfaces)
-	known := jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil)
-	st := jass2lua.PreprocessStructs(withoutDefines, mods.Modules, known)
+	// Merge the section's own top-level names with the global dot-forcing set
+	// (cross-section struct names + library publics) so the struct ref-rewriter
+	// treats a struct defined elsewhere as dot (static) not colon (instance).
+	known := ctx.KnownNamesFor(jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil))
+	// Pass the section-local module table (ModulesForSection is local-only:
+	// cross-section `implement` body inlining is deliberately NOT performed —
+	// see GlobalContext.ModulesFor's caution).
+	st := jass2lua.PreprocessStructs(withoutDefines, ctx.ModulesForSection(mods.Modules), known)
 	// P0#2: a "script" section whose post-preprocess body has no top-level
 	// function/globals decl is a bare statement list (a GUI-style custom-script
 	// trigger body), not a full JASS file. Feeding such a body to the top-level
@@ -404,15 +458,16 @@ func sectionFuncName(label string, id int32) string {
 // full preprocessor pipeline still runs (an overlay can contain a library
 // or struct or module, though it's rare) before falling through to
 // TranspileFunction. Splice struct Lua afterwards.
-func transpileSectionCustomText(id int32, triggerName, src string) TranspileSection {
+func transpileSectionCustomText(id int32, triggerName, src string, ctx *jass2lua.GlobalContext) TranspileSection {
 	stripped := jass2lua.StripBlockComments(src)
-	pp := jass2lua.Preprocess(stripped)
+	// P2#6: cross-section visibility — see transpileSectionScript.
+	pp := jass2lua.PreprocessWithMacros(stripped, ctx.MacrosFor())
 	ls := jass2lua.PreprocessLibScope(pp.Expanded)
 	mods := jass2lua.PreprocessModules(ls.Expanded)
 	withoutIfaces := jass2lua.PreprocessInterfaces(mods.Expanded)
 	withoutDefines := jass2lua.PreprocessDefines(withoutIfaces)
-	known := jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil)
-	st := jass2lua.PreprocessStructs(withoutDefines, mods.Modules, known)
+	known := ctx.KnownNamesFor(jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil))
+	st := jass2lua.PreprocessStructs(withoutDefines, ctx.ModulesForSection(mods.Modules), known)
 	lua, parseErrs, lexErr := jass2lua.TranspileFunctionWithErrors(triggerName+"_CustomText", st.Expanded)
 	// P0#1 completion: also surface struct method-body transpile errors produced
 	// during the splice (see transpileSectionScript for the full rationale).
@@ -690,6 +745,12 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 	//
 	// Each section also gets its struct-Lua snippets spliced into the
 	// transpiled output at the marker positions PreprocessStructs left.
+	// P2#6: cross-section vJASS context, built ONCE from every section so the
+	// written war3map.lua matches the preview's cross-section visibility (a
+	// struct/module/textmacro/library defined in one section is visible to the
+	// others during transpile). MUST match TranspilePreview's context exactly so
+	// the diff the user approved is what gets written.
+	convertCtx := jass2lua.BuildGlobalContext(s.collectSectionSourcesLocked())
 	customTextsLua := map[int32]string{}
 	var libInits []jass2lua.LibraryInit
 	var structInits []jass2lua.StructInit
@@ -703,13 +764,13 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 				continue
 			}
 			stripped := jass2lua.StripBlockComments(tr.CustomText)
-			pp := jass2lua.Preprocess(stripped)
+			pp := jass2lua.PreprocessWithMacros(stripped, convertCtx.MacrosFor())
 			ls := jass2lua.PreprocessLibScope(pp.Expanded)
 			mods := jass2lua.PreprocessModules(ls.Expanded)
 			withoutIfaces := jass2lua.PreprocessInterfaces(mods.Expanded)
 			withoutDefines := jass2lua.PreprocessDefines(withoutIfaces)
-			known := jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil)
-			st := jass2lua.PreprocessStructs(withoutDefines, mods.Modules, known)
+			known := convertCtx.KnownNamesFor(jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil))
+			st := jass2lua.PreprocessStructs(withoutDefines, convertCtx.ModulesForSection(mods.Modules), known)
 			libInits = append(libInits, ls.InitOrder...)
 			structInits = append(structInits, st.Inits...)
 			var lua string
@@ -744,13 +805,13 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 	}
 	if s.triggersWct != nil && strings.TrimSpace(s.triggersWct.GlobalJASS) != "" {
 		stripped := jass2lua.StripBlockComments(s.triggersWct.GlobalJASS)
-		pp := jass2lua.Preprocess(stripped)
+		pp := jass2lua.PreprocessWithMacros(stripped, convertCtx.MacrosFor())
 		ls := jass2lua.PreprocessLibScope(pp.Expanded)
 		mods := jass2lua.PreprocessModules(ls.Expanded)
 		withoutIfaces := jass2lua.PreprocessInterfaces(mods.Expanded)
 		withoutDefines := jass2lua.PreprocessDefines(withoutIfaces)
-		known := jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil)
-		st := jass2lua.PreprocessStructs(withoutDefines, mods.Modules, known)
+		known := convertCtx.KnownNamesFor(jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil))
+		st := jass2lua.PreprocessStructs(withoutDefines, convertCtx.ModulesForSection(mods.Modules), known)
 		in.LibInits = append(in.LibInits, ls.InitOrder...)
 		in.StructInits = append(in.StructInits, st.Inits...)
 		lua, _ := jass2lua.TranspileScript(st.Expanded)

@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // EnvVar overrides every other source when set. Exported so callers and tests
@@ -95,14 +96,68 @@ func Resolve() string {
 	return defaultInstallPath()
 }
 
-// IsValidInstall reports whether path looks like a real WC3 install root: it
-// contains a CASC ".build.info" manifest. That's the same marker CascLib keys
-// on, and it's what distinguishes the install ROOT from a subfolder such as
-// _retail_/x86_64 (a common mis-pick).
-func IsValidInstall(path string) bool {
+// Kind classifies a WC3 install root by how its STOCK assets are stored.
+type Kind int
+
+const (
+	// KindNone — the path is not a recognizable WC3 install root.
+	KindNone Kind = iota
+	// KindCASC — a Reforged / modern install (.build.info present, assets in
+	// CASC storage). Read via internal/casc.
+	KindCASC
+	// KindClassic — a pre-Reforged, MPQ-based install (1.27b-era): no
+	// .build.info, stock assets layered across War3*.mpq archives. Read via
+	// internal/mpqchain.
+	KindClassic
+)
+
+// classicArchiveMarkers are the stock MPQ archives that mark a Classic
+// (pre-Reforged) install. Matched case-insensitively against the root's
+// directory listing. Mirrors internal/mpqchain's chain; kept here too so the
+// install classifier stays free of an mpqchain import (mpqchain imports the
+// mpq reader, which we don't want to drag into the path resolver).
+var classicArchiveMarkers = []string{"War3.mpq", "War3Patch.mpq"}
+
+// Classify reports how the install at path stores its stock assets:
+// KindCASC (.build.info present), KindClassic (no .build.info but a stock
+// War3*.mpq present), or KindNone. CASC takes precedence — a modern install
+// that happens to retain a stray .mpq is still CASC.
+func Classify(path string) Kind {
 	if path == "" {
+		return KindNone
+	}
+	if info, err := os.Stat(filepath.Join(path, ".build.info")); err == nil && !info.IsDir() {
+		return KindCASC
+	}
+	for _, marker := range classicArchiveMarkers {
+		if hasFileInsensitive(path, marker) {
+			return KindClassic
+		}
+	}
+	return KindNone
+}
+
+// hasFileInsensitive reports whether dir contains a non-dir entry whose name
+// case-insensitively equals name. False on any read failure.
+func hasFileInsensitive(dir, name string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return false
 	}
-	info, err := os.Stat(filepath.Join(path, ".build.info"))
-	return err == nil && !info.IsDir()
+	want := strings.ToLower(name)
+	for _, e := range entries {
+		if !e.IsDir() && strings.ToLower(e.Name()) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// IsValidInstall reports whether path looks like a real WC3 install root —
+// EITHER a CASC (Reforged/modern) install or a Classic (MPQ-based, 1.27b-era)
+// install. Both are accepted so the "locate install" UI takes a Classic
+// folder; the install ROOT is what distinguishes it from a subfolder such as
+// _retail_/x86_64 (a common mis-pick).
+func IsValidInstall(path string) bool {
+	return Classify(path) != KindNone
 }

@@ -73,10 +73,10 @@ func (m *mpqSource) flushLocked(force bool) error {
 		return nil
 	}
 	if m.path == "" {
-		return fmt.Errorf("%w: mpq source has no path to write to", ErrMPQWriteNotImplemented)
+		return fmt.Errorf("%w: mpq source has no path to write to", ErrMPQRepackFailed)
 	}
 	if m.a == nil {
-		return fmt.Errorf("%w: mpq source has no open archive to repack", ErrMPQWriteNotImplemented)
+		return fmt.Errorf("%w: mpq source has no open archive to repack", ErrMPQRepackFailed)
 	}
 
 	// LOSSLESS REPACK (raw block copy-through). MPQ hash tables don't store
@@ -96,7 +96,7 @@ func (m *mpqSource) flushLocked(force bool) error {
 	// the (listfile), so the source listfile entry is dropped from copy-through.
 	rawEntries, err := m.a.RawEntries()
 	if err != nil {
-		return fmt.Errorf("%w: read raw entries for lossless repack of %q: %v", ErrMPQWriteNotImplemented, m.path, err)
+		return fmt.Errorf("%w: read raw entries for lossless repack of %q: %v", ErrMPQRepackFailed, m.path, err)
 	}
 
 	// Hash the (listfile) name once so we can recognise + drop the source copy.
@@ -161,7 +161,7 @@ func (m *mpqSource) flushLocked(force bool) error {
 	}
 
 	if len(keep) == 0 && len(named) == 0 {
-		return fmt.Errorf("%w: refusing to write an empty archive (no files collected)", ErrMPQWriteNotImplemented)
+		return fmt.Errorf("%w: refusing to write an empty archive (no files collected)", ErrMPQRepackFailed)
 	}
 
 	// Capture the source's hash-table size + sector-size shift BEFORE closing —
@@ -198,7 +198,7 @@ func (m *mpqSource) flushLocked(force bool) error {
 	// (unchanged) original below so the session stays usable and the buffered
 	// edits remain pending for a retry. The genuinely-unpreservable case
 	// (e.g. a pinned key-adjusted block whose offset can't be honoured) surfaces
-	// as a BuildLossless error wrapped in ErrMPQWriteNotImplemented — the
+	// as a BuildLossless error wrapped in ErrMPQRepackFailed — the
 	// graceful fallback the PRIME DIRECTIVE calls for.
 	_ = m.a.Close()
 	m.a = nil
@@ -213,12 +213,12 @@ func (m *mpqSource) flushLocked(force bool) error {
 	}
 
 	if writeErr != nil {
-		// Leave buffers in place for a retry. Wrap in ErrMPQWriteNotImplemented
+		// Leave buffers in place for a retry. Wrap in ErrMPQRepackFailed
 		// so the handler maps it to the graceful "extract to a folder" message
 		// rather than a raw internal error — this is the DO-NO-HARM fallback for
 		// the rare genuinely-unpreservable archive (e.g. a pinned key-adjusted
 		// block whose offset can't be honoured). The original .w3x is untouched.
-		return fmt.Errorf("%w: lossless repack of %q failed: %v", ErrMPQWriteNotImplemented, m.path, writeErr)
+		return fmt.Errorf("%w: lossless repack of %q failed: %v", ErrMPQRepackFailed, m.path, writeErr)
 	}
 	if openErr != nil {
 		// The repack succeeded on disk but we couldn't reopen — surface it so
@@ -244,12 +244,12 @@ func (m *mpqSource) flushLocked(force bool) error {
 // the original .w3x is left untouched (DO NO HARM).
 func (m *mpqSource) forceRepackAll() error {
 	if m == nil {
-		return fmt.Errorf("%w: nil source", ErrMPQWriteNotImplemented)
+		return fmt.Errorf("%w: nil source", ErrMPQRepackFailed)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.a == nil {
-		return fmt.Errorf("%w: no archive to repack", ErrMPQWriteNotImplemented)
+		return fmt.Errorf("%w: no archive to repack", ErrMPQRepackFailed)
 	}
 	return m.flushLocked(true)
 }

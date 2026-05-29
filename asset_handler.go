@@ -9,8 +9,28 @@ import (
 
 	"github.com/StephenSHorton/wc3-forge/internal/casc"
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
+	"github.com/StephenSHorton/wc3-forge/internal/mpqchain"
 	"github.com/StephenSHorton/wc3-forge/internal/wc3path"
 )
+
+// stockSource is the seam behind which a WC3 install's STOCK assets are read.
+// Two implementations slot in interchangeably:
+//   - *casc.Storage     — Reforged / modern installs (CASC storage).
+//   - *mpqchain.Chain   — Classic / pre-Reforged installs (layered War3*.mpq).
+//
+// Both already satisfy this shape. The asset handler talks only to this
+// interface, so the resolution order and sibling-extension logic are
+// identical regardless of which kind of install is mounted. The contract for
+// ReadFile is exactly casc.Storage's: (nil, false, nil) on a clean miss, a
+// non-nil error only on a genuine failure — so the handler's "map source
+// exhausted before stock" ordering is preserved byte-for-byte.
+type stockSource interface {
+	ReadFile(name string) ([]byte, bool, error)
+	ListByPrefix(prefix string) ([]string, error)
+	SetReforged(b bool)
+	Reforged() bool
+	Close() error
+}
 
 // assetHandler serves /asset/<path> requests from Go-side asset sources.
 // mdx-m3-viewer's pathSolver returns "/asset/<src>" strings; the viewer
@@ -27,13 +47,17 @@ func newAssetHandler() http.Handler {
 	return &assetHandler{}
 }
 
-// Lazy-init the WC3 CASC storage. We don't fail wc3-forge to start if CASC
-// isn't available — folder-based maps still work, and the user may not have
-// WC3 installed yet (the GUI prompts them to locate it). reopenCASC lets the
-// user point at a new install without restarting.
+// Lazy-init the WC3 stock-asset source. We don't fail wc3-forge to start if
+// it isn't available — folder-based maps still work, and the user may not
+// have WC3 installed yet (the GUI prompts them to locate it). reopenCASC lets
+// the user point at a new install without restarting.
+//
+// The source is either a CASC storage (Reforged/modern install) or an MPQ
+// patch chain (Classic 1.27b-era install), chosen by wc3path.Classify. Both
+// satisfy stockSource, so everything downstream is source-agnostic.
 var (
 	cascMu      sync.Mutex
-	cascStorage *casc.Storage
+	cascStorage stockSource
 	cascErr     error
 	cascLoaded  bool
 )
@@ -45,7 +69,7 @@ func wc3InstallPath() string {
 	return wc3path.Resolve()
 }
 
-func getCASC() (*casc.Storage, error) {
+func getCASC() (stockSource, error) {
 	cascMu.Lock()
 	defer cascMu.Unlock()
 	if !cascLoaded {
@@ -57,7 +81,7 @@ func getCASC() (*casc.Storage, error) {
 // reopenCASC closes any open storage and re-opens at the currently-resolved
 // install path. Called after the user picks a new WC3 install so stock assets
 // resolve immediately, without a restart.
-func reopenCASC() (*casc.Storage, error) {
+func reopenCASC() (stockSource, error) {
 	cascMu.Lock()
 	defer cascMu.Unlock()
 	if cascStorage != nil {
@@ -73,15 +97,43 @@ func reopenCASC() (*casc.Storage, error) {
 	return cascStorage, cascErr
 }
 
-// openCASCLocked (re)opens the storage at the resolved path. Caller holds cascMu.
+// openCASCLocked (re)opens the stock-asset source at the resolved path,
+// choosing CASC vs the MPQ patch chain by the install kind. Caller holds
+// cascMu.
+//
+// On any failure we leave cascStorage as a nil INTERFACE (not a typed-nil
+// pointer wrapped in an interface), so the `c != nil` guards at the call
+// sites correctly treat "no source" as absent. Assigning a typed nil pointer
+// to the interface would make it non-nil and crash those callers.
 func openCASCLocked() {
-	p := wc3InstallPath()
-	log.Printf("CASC: opening storage at %q", p)
-	cascStorage, cascErr = casc.Open(p)
 	cascLoaded = true
-	if cascErr != nil {
-		log.Printf("CASC: open failed: %v", cascErr)
-	} else {
+	cascStorage = nil
+	cascErr = nil
+
+	p := wc3InstallPath()
+	switch wc3path.Classify(p) {
+	case wc3path.KindClassic:
+		log.Printf("stock: opening Classic MPQ chain at %q", p)
+		chain, err := mpqchain.Open(p)
+		if err != nil {
+			cascErr = err
+			log.Printf("stock: MPQ chain open failed: %v", err)
+			return
+		}
+		cascStorage = chain
+		log.Printf("stock: MPQ chain open")
+	default:
+		// KindCASC or KindNone: try CASC. On a KindNone path CASC will fail
+		// to open and we degrade gracefully (folder maps still work), exactly
+		// as before this change.
+		log.Printf("CASC: opening storage at %q", p)
+		store, err := casc.Open(p)
+		if err != nil {
+			cascErr = err
+			log.Printf("CASC: open failed: %v", err)
+			return
+		}
+		cascStorage = store
 		log.Printf("CASC: storage open")
 	}
 }
