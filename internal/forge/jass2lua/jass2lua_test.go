@@ -91,7 +91,7 @@ udg_name = "hero"
 udg_flag = true
 udg_callback = nil
 udg_player_unit = nil
-udg_scores = {}
+udg_scores = __jarray(0)
 `
 	got, err := TranspileScript(jass)
 	if err != nil {

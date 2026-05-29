@@ -94,6 +94,10 @@ func TranspileFunctionWithErrors(name, jass string) (lua string, parseErrors []s
 	p := &parser{toks: toks}
 	stmts, _, _ := p.parseStmtsUntilEOF()
 	em := &emitter{}
+	// Body-fragment scope: locals declared inside become entries in localTypes
+	// (emitLocal registers them) so the integer-division fix can classify uses
+	// of typed locals here too. No globals/params are visible in a fragment.
+	em.localTypes = map[string]string{}
 	em.writeLine(fmt.Sprintf("function %s()", sanitizeName(name)))
 	em.indent++
 	for _, s := range stmts {
@@ -195,6 +199,163 @@ func sanitizeName(s string) string {
 type emitter struct {
 	b      strings.Builder
 	indent int
+
+	// Minimal type tables for the two semantic fixes (P1#3 integer division,
+	// P1#4 typed-array defaults). The transpiler has no real type system, so
+	// these record only the JASS-declared types we can see directly:
+	//
+	//   - globalTypes : name -> JASS type, from the globals block (file scope).
+	//   - localTypes  : name -> JASS type, from the CURRENT function's params +
+	//                   local decls. Rebuilt per function in emitFuncDecl and
+	//                   cleared when the function ends.
+	//
+	// inferExprType walks an expression bottom-up against these tables (plus
+	// literal typing and a small known-native return-type map) and returns one
+	// of "integer" / "real" / "" (unknown). When it can't prove both operands
+	// of a `/` are integers, the division stays float -- conservative by design.
+	globalTypes map[string]string
+	localTypes  map[string]string
+}
+
+// typeInteger / typeReal are the only two numeric classifications the division
+// fix cares about. "" means "unknown / non-numeric" -- treated as not-provably-
+// integer, so a `/` involving it stays float.
+const (
+	typeInteger = "integer"
+	typeReal    = "real"
+)
+
+// knownNativeReturns maps a small, safe set of stock WC3 natives/BJs to their
+// return type so expressions like `R2I(x) / n` or `GetUnitState(...) / 2` can
+// be classified. Intentionally tiny and high-confidence: an unlisted function
+// yields an unknown type, which keeps its enclosing division as float. Adding
+// a name here can only ever turn a float `/` into a (correct) integer `/` when
+// BOTH operands are provably integer -- never the other way.
+var knownNativeReturns = map[string]string{
+	// Integer-returning natives/BJs.
+	"R2I":                 typeInteger,
+	"StringLength":        typeInteger,
+	"GetRandomInt":        typeInteger,
+	"GetPlayerId":         typeInteger,
+	"GetHandleId":         typeInteger,
+	"GetUnitTypeId":       typeInteger,
+	"GetTriggerEvalCount": typeInteger,
+	"ModuloInteger":       typeInteger,
+	"GetHeroLevel":        typeInteger,
+	"GetUnitLevel":        typeInteger,
+	// Real-returning natives/BJs.
+	"I2R":           typeReal,
+	"GetRandomReal": typeReal,
+	"GetUnitState":  typeReal,
+	"GetWidgetLife": typeReal,
+	"ModuloReal":    typeReal,
+	"SquareRoot":    typeReal,
+	"Pow":           typeReal,
+	"Sin":           typeReal,
+	"Cos":           typeReal,
+	"Tan":           typeReal,
+}
+
+// lookupVarType resolves an identifier's JASS type from the local table first
+// (a local/param shadows a global of the same name in JASS), then globals.
+// Returns "" when unknown.
+func (e *emitter) lookupVarType(name string) string {
+	if e.localTypes != nil {
+		if t, ok := e.localTypes[name]; ok {
+			return t
+		}
+	}
+	if e.globalTypes != nil {
+		if t, ok := e.globalTypes[name]; ok {
+			return t
+		}
+	}
+	return ""
+}
+
+// inferExprType classifies an expression as "integer", "real", or "" (unknown /
+// non-numeric). It is deliberately conservative: any node it cannot prove is
+// integer-or-real returns "". This is the whole basis of the integer-division
+// fix -- only a division whose BOTH operands infer to "integer" is rewritten.
+func (e *emitter) inferExprType(x Expr) string {
+	switch n := x.(type) {
+	case *IntLit:
+		return typeInteger
+	case *RealLit:
+		return typeReal
+	case *RawLit:
+		// A JASS rawcode ('hpea') is an integer; emitted as FourCC("..."),
+		// whose WC3-Lua return is an integer.
+		return typeInteger
+	case *StringLit, *BoolLit, *NullLit:
+		return "" // non-numeric
+	case *Ident:
+		return numericType(e.lookupVarType(n.Name))
+	case *CallExpr:
+		return numericType(knownNativeReturns[n.Func])
+	case *IndexExpr:
+		// Array element type == the array variable's declared element type.
+		if base, ok := n.Base.(*Ident); ok {
+			return numericType(e.lookupVarType(base.Name))
+		}
+		return ""
+	case *UnaryExpr:
+		switch n.Op {
+		case "-", "~":
+			// Arithmetic / bitwise unary preserves numeric type.
+			return e.inferExprType(n.X)
+		}
+		return "" // `not` -> boolean
+	case *BinaryExpr:
+		return e.inferBinaryType(n)
+	case *TernaryExpr:
+		// Both arms should share a type; only commit when they agree.
+		tt := e.inferExprType(n.Then)
+		et := e.inferExprType(n.Else)
+		if tt == et {
+			return tt
+		}
+		return ""
+	}
+	return ""
+}
+
+// inferBinaryType infers the result type of a binary expression. Comparison /
+// logical operators are boolean (-> ""). Arithmetic follows JASS promotion:
+// int op int -> int; anything involving a real (and only reals/ints) -> real.
+// `/` likewise (its emitted form differs, but the TYPE it yields is int when
+// both sides are int). Unknown operands poison the result to "".
+func (e *emitter) inferBinaryType(n *BinaryExpr) string {
+	switch n.Op {
+	case "==", "!=", "<", "<=", ">", ">=", "and", "or":
+		return "" // boolean
+	}
+	lt := e.inferExprType(n.L)
+	rt := e.inferExprType(n.R)
+	switch n.Op {
+	case "+", "-", "*", "/", "%", "|", "&", "^", "<<", ">>":
+		if lt == typeInteger && rt == typeInteger {
+			return typeInteger
+		}
+		if (lt == typeInteger || lt == typeReal) && (rt == typeInteger || rt == typeReal) {
+			return typeReal
+		}
+		return ""
+	}
+	return ""
+}
+
+// numericType normalizes a JASS type name to "integer" / "real" / "". Only the
+// two numeric primitives matter for the division fix; every other type (string,
+// boolean, handle subtypes, code, unknown) is non-numeric -> "".
+func numericType(t string) string {
+	switch t {
+	case typeInteger:
+		return typeInteger
+	case typeReal:
+		return typeReal
+	}
+	return ""
 }
 
 func (e *emitter) writeIndent() {
@@ -228,7 +389,39 @@ func defaultInitForType(t string) string {
 	return "nil"
 }
 
+// arrayInitForType returns the Lua initializer for a JASS array of the given
+// element type (P1#4). Numeric/boolean arrays get a __jarray(default) so reads
+// of unset indices return the JASS zero value (0 / 0.0 / false) instead of a
+// bare Lua `{}`'s nil -- which crashes "arithmetic on a nil value" the first
+// time an untouched slot is read (e.g. `FearCounter[ud] + 1` on a fresh ud).
+// Everything else (handles, string, code, unknown user types) keeps a bare
+// `{}` -- their JASS default is null, and Lua's nil-for-unset matches exactly,
+// so no metatable is needed.
+//
+// __jarray is part of the WC3 Lua runtime (blizzard.lua):
+//
+//	function __jarray(default) return setmetatable({}, {__index = function() return default end}) end
+//
+// The GUI codegen (triggers_codegen.go) already emits udg_* arrays via
+// __jarray, so this stays consistent with the rest of the generated script.
+func arrayInitForType(t string) string {
+	switch t {
+	case "integer":
+		return "__jarray(0)"
+	case "real":
+		return "__jarray(0.0)"
+	case "boolean":
+		return "__jarray(false)"
+	}
+	// string / code / handle subtypes / unknown user types -> null default,
+	// which Lua's nil-for-unset already provides.
+	return "{}"
+}
+
 func (e *emitter) emitFile(f *File) {
+	// First pass: collect globals' declared types so the division/array fixes
+	// can classify references to file-scope variables anywhere below.
+	e.collectGlobalTypes(f)
 	for _, item := range f.Items {
 		switch n := item.(type) {
 		case *CommentStmt:
@@ -247,6 +440,25 @@ func (e *emitter) emitFile(f *File) {
 	}
 }
 
+// collectGlobalTypes records every globals-block declaration's name -> JASS type
+// so inferExprType can resolve file-scope variable references. Cheap, runs once
+// per file before emission. Array globals are recorded under their ELEMENT
+// type, which is exactly what an IndexExpr read should infer to.
+func (e *emitter) collectGlobalTypes(f *File) {
+	if e.globalTypes == nil {
+		e.globalTypes = map[string]string{}
+	}
+	for _, item := range f.Items {
+		gb, ok := item.(*GlobalsBlock)
+		if !ok {
+			continue
+		}
+		for _, d := range gb.Decls {
+			e.globalTypes[d.Name] = d.Type
+		}
+	}
+}
+
 func (e *emitter) emitGlobalsBlock(g *GlobalsBlock) {
 	for _, d := range g.Decls {
 		// Constant: emit a comment marker since WC3's Lua is 5.3 (no <const>).
@@ -256,8 +468,13 @@ func (e *emitter) emitGlobalsBlock(g *GlobalsBlock) {
 		}
 		var init string
 		if d.Array {
-			// Array decl — empty table; Lua tables are dynamic.
-			init = "{}"
+			// P1#4: JASS arrays default unset slots to the element type's zero
+			// value (0 / 0.0 / false / null). A bare Lua `{}` returns nil for
+			// unset indices. arrayInitForType emits __jarray(default) for
+			// numeric/boolean element types so reads of untouched indices yield
+			// the JASS default; non-numeric element types keep `{}` (null
+			// default == Lua nil).
+			init = arrayInitForType(d.Type)
 		} else if d.Init != nil {
 			init = e.emitExpr(d.Init)
 		} else {
@@ -287,6 +504,13 @@ func (e *emitter) emitFuncDecl(f *FuncDecl) {
 	for _, p := range f.Params {
 		params = append(params, p.Name)
 	}
+	// Build the per-function local/param type table for inferExprType. Params
+	// are known up front; locals are added as their `local` decls are emitted
+	// (emitLocal registers them) so a use after the decl resolves correctly.
+	e.localTypes = make(map[string]string, len(f.Params))
+	for _, p := range f.Params {
+		e.localTypes[p.Name] = p.Type
+	}
 	e.writeLine(fmt.Sprintf("function %s(%s)", f.Name, strings.Join(params, ", ")))
 	e.indent++
 	for _, s := range f.Body {
@@ -295,6 +519,8 @@ func (e *emitter) emitFuncDecl(f *FuncDecl) {
 	e.indent--
 	e.writeLine("end")
 	e.b.WriteByte('\n')
+	// Clear so a following declaration doesn't see this function's locals.
+	e.localTypes = nil
 }
 
 func retName(r string) string {
@@ -342,9 +568,21 @@ func (e *emitter) emitStmt(s Stmt) {
 }
 
 func (e *emitter) emitLocal(d LocalDecl) {
+	// Register the local's declared type so later expressions in this function
+	// can classify references to it (drives the integer-division fix). Stored
+	// under the element type for arrays -- an IndexExpr read infers to that.
+	if e.localTypes != nil {
+		e.localTypes[d.Name] = d.Type
+	}
 	if d.Array {
-		// Lua tables are dynamic — no size; just initialize to {}.
-		e.writeLine(fmt.Sprintf("local %s = {} -- jass: %s array", d.Name, d.Type))
+		// Typed default init (P1#4) so reads of unset indices return the JASS
+		// zero value instead of nil (same rationale as the globals-array path).
+		init := arrayInitForType(d.Type)
+		if init == "{}" {
+			e.writeLine(fmt.Sprintf("local %s = {} -- jass: %s array", d.Name, d.Type))
+		} else {
+			e.writeLine(fmt.Sprintf("local %s = %s -- jass: %s array", d.Name, init, d.Type))
+		}
 		return
 	}
 	if d.Init == nil {
@@ -470,6 +708,16 @@ func (e *emitter) emitExpr(x Expr) string {
 		op := n.Op
 		if op == "+" && (isStringExpr(n.L) || isStringExpr(n.R)) {
 			op = ".."
+		} else if op == "/" && e.inferExprType(n.L) == typeInteger && e.inferExprType(n.R) == typeInteger {
+			// Integer division (P1#3): JASS `/` between two integers truncates
+			// TOWARD ZERO; Lua `/` is always float (so `a - (a/b)*b` returns
+			// 0.0 for all inputs instead of the remainder). Lua's `//` FLOORS
+			// toward -inf and DIFFERS for negatives (-7//2 == -4, but JASS
+			// -7/2 == -3), so we can't use it. R2I truncates toward zero
+			// exactly like JASS, so wrap the float division:
+			// int/int `a / b` -> `R2I(a / b)`. R2I is a stock WC3 Lua native.
+			// Mixed int/real falls through to plain float `/`.
+			return "R2I(" + e.emitExprWithParens(n.L) + " / " + e.emitExprWithParens(n.R) + ")"
 		} else {
 			op = mapBinaryOp(op)
 		}
