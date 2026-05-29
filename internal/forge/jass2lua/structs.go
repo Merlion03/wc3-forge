@@ -1281,6 +1281,16 @@ func emitStructMethodInto(b *strings.Builder, s StructDef, m StructMethod, errs 
 //   - `thistype` → struct name (the containing struct)
 //   - `this`     → `self` (so the transpiled Lua matches the colon-syntax
 //     implicit `self` arg)
+//   - implicit-`this` member access: a leading `.field` (receiver omitted) is
+//     vJASS sugar for `this.field`. We expand a bare `.` (one whose previous
+//     significant token can't be a receiver) to `self.`, so `set .x = .y` →
+//     `set self.x = self.y`, `call .destroy()` → `call self.destroy()`,
+//     `GetUnitX(.s)` → `GetUnitX(self.s)`. The downstream parser already has
+//     member-access grammar (MemberExpr / MemberCallExpr) and emits the dot
+//     verbatim, so this is the only missing piece for receiver-omitted access.
+//     Chained access `.i.rs` becomes `self.i.rs` — only the FIRST dot is
+//     receiver-omitted; the second is preceded by ident `i` (a receiver tail)
+//     and is left alone.
 //
 // We use the tokenizer so strings/comments aren't touched. On lex error we
 // fall back to the original body (the downstream transpiler will surface
@@ -1297,6 +1307,12 @@ func rewriteMethodBody(structName string, m StructMethod) string {
 	out.Grow(len(m.Body))
 	pos := 0
 	line, col := 1, 1
+	// Track the previous significant token (EOL / comment skipped) so we can
+	// decide whether a `.` is implicit-this. havePrev=false at body start, which
+	// is itself a non-receiver position.
+	var prevKind TokenKind
+	var prevVal string
+	havePrev := false
 	for _, t := range toks {
 		if t.Kind == TokEOF {
 			if pos < len(m.Body) {
@@ -1323,6 +1339,12 @@ func rewriteMethodBody(structName string, m StructMethod) string {
 				srcLen = 1
 			}
 		}
+		// Implicit-this expansion: a `.` op whose previous significant token is
+		// NOT a receiver tail is `this.field` with `this` elided. Inject `self`
+		// before writing the dot.
+		if t.Kind == TokOp && t.Value == "." && !isReceiverTail(havePrev, prevKind, prevVal) {
+			out.WriteString("self")
+		}
 		// Apply rewrites at TokIdent positions.
 		if t.Kind == TokIdent {
 			switch t.Value {
@@ -1335,6 +1357,14 @@ func rewriteMethodBody(structName string, m StructMethod) string {
 			}
 		} else {
 			out.WriteString(m.Body[pos : pos+srcLen])
+		}
+		// Update prev for the NEXT iteration (skip EOL / comment tokens so a
+		// statement that wraps across lines doesn't lose receiver context — JASS
+		// statements don't wrap, but be defensive).
+		if t.Kind != TokEOL && t.Kind != TokComment {
+			prevKind = t.Kind
+			prevVal = t.Value
+			havePrev = true
 		}
 		for k := 0; k < srcLen && pos < len(m.Body); k++ {
 			c := m.Body[pos]
@@ -1351,6 +1381,33 @@ func rewriteMethodBody(structName string, m StructMethod) string {
 		out.WriteString(m.Body[pos:])
 	}
 	return out.String()
+}
+
+// isReceiverTail reports whether the previous significant token can be the tail
+// of a member-access receiver, i.e. a `.` immediately after it is a normal
+// `recv.field` (NOT receiver-omitted implicit-this). Receiver tails are:
+//
+//   - identifiers (`foo.field`, and chained `a.b.c` — the `b` ident before the
+//     second dot is a tail);
+//   - the closing brackets `)` and `]` (`f(x).field`, `arr[i].field`);
+//   - literals (defensive — JASS has no numeric/string method syntax, so
+//     `1.f` / `"x".f` don't appear, but treating them as tails can only ever
+//     SUPPRESS a self-injection, never add a wrong one).
+//
+// Everything else — `set` / `call` / `if` / `then` / `return` keywords, `(`,
+// `,`, `=`, arithmetic/comparison operators, the `.` itself, and body start
+// (havePrev=false) — means a following `.` has no receiver and is implicit-this.
+func isReceiverTail(havePrev bool, kind TokenKind, val string) bool {
+	if !havePrev {
+		return false
+	}
+	switch kind {
+	case TokIdent, TokInt, TokReal, TokString, TokRaw:
+		return true
+	case TokOp:
+		return val == ")" || val == "]"
+	}
+	return false
 }
 
 // transpileMethodBody runs the raw (already-rewritten) JASS body through the

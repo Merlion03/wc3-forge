@@ -1,6 +1,7 @@
 package jass2lua
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -108,5 +109,83 @@ func TestParseUnaryTilde(t *testing.T) {
 	un, ok := ret.Value.(*UnaryExpr)
 	if !ok || un.Op != "~" {
 		t.Errorf("expected unary ~ UnaryExpr, got %T (%v)", ret.Value, ret.Value)
+	}
+}
+
+// --- vJASS data member access (`recv.field`) ---------------------------------
+//
+// JASS proper has no member-access syntax; the struct preprocessor leaves
+// `recv.field` data access (NOT method calls — those go through the dot->colon
+// rewrite) in the source. The parser must accept `recv.field` both as an
+// assignable LVALUE and in expression position; the emitter writes it as Lua
+// `recv.field`. These pin the documented design intent end-to-end.
+
+// wrapBody transpiles a single statement inside a trivial function wrapper and
+// returns the emitted Lua body line (trimmed). Fails on any parse/lex error.
+func wrapBody(t *testing.T, stmt string) string {
+	t.Helper()
+	src := "function F takes nothing returns nothing\n" + stmt + "\nendfunction\n"
+	lua, parseErrs, lexErr := TranspileScriptWithErrors(src)
+	if lexErr != nil {
+		t.Fatalf("lex error on %q: %v", stmt, lexErr)
+	}
+	if len(parseErrs) != 0 {
+		t.Fatalf("parse errors on %q: %v\n%s", stmt, parseErrs, lua)
+	}
+	if strings.Contains(lua, "jass2lua failed") {
+		t.Fatalf("unexpected error() stub on %q:\n%s", stmt, lua)
+	}
+	for _, ln := range strings.Split(lua, "\n") {
+		tl := strings.TrimSpace(ln)
+		if tl == "" || strings.HasPrefix(tl, "function F") || tl == "end" {
+			continue
+		}
+		return tl
+	}
+	t.Fatalf("no body line emitted for %q:\n%s", stmt, lua)
+	return ""
+}
+
+// TestMemberAccess_SetAssign — `set a.b = c.d` → `a.b = c.d` (LVALUE + RHS).
+func TestMemberAccess_SetAssign(t *testing.T) {
+	if got := wrapBody(t, "set a.b = c.d"); got != "a.b = c.d" {
+		t.Errorf("got %q, want %q", got, "a.b = c.d")
+	}
+	// AST shape: the SetStmt target is a MemberExpr.
+	toks, _ := Tokenize("function F takes nothing returns nothing\nset a.b = c.d\nendfunction\n")
+	f := Parse(toks)
+	fn := f.Items[0].(*FuncDecl)
+	set, ok := fn.Body[0].(*SetStmt)
+	if !ok {
+		t.Fatalf("expected SetStmt, got %T", fn.Body[0])
+	}
+	if _, ok := set.Target.(*MemberExpr); !ok {
+		t.Errorf("expected SetStmt.Target to be *MemberExpr, got %T", set.Target)
+	}
+}
+
+// TestMemberAccess_InCondition — member access in an `if` condition.
+func TestMemberAccess_InCondition(t *testing.T) {
+	src := "function F takes nothing returns nothing\nif dat.s == null then\nset x = 1\nendif\nendfunction\n"
+	lua, parseErrs, lexErr := TranspileScriptWithErrors(src)
+	if lexErr != nil || len(parseErrs) != 0 {
+		t.Fatalf("errors: lex=%v parse=%v\n%s", lexErr, parseErrs, lua)
+	}
+	if !strings.Contains(lua, "if dat.s == nil then") {
+		t.Errorf("expected `if dat.s == nil then`, got:\n%s", lua)
+	}
+}
+
+// TestMemberAccess_Chained — `a.b.c` chains into nested MemberExpr.
+func TestMemberAccess_Chained(t *testing.T) {
+	if got := wrapBody(t, "set q = a.b.c"); got != "q = a.b.c" {
+		t.Errorf("got %q, want %q", got, "q = a.b.c")
+	}
+}
+
+// TestMemberAccess_CallArg — member access as a call argument.
+func TestMemberAccess_CallArg(t *testing.T) {
+	if got := wrapBody(t, "set dat.x1 = GetUnitX(dat.s)"); got != "dat.x1 = GetUnitX(dat.s)" {
+		t.Errorf("got %q, want %q", got, "dat.x1 = GetUnitX(dat.s)")
 	}
 }
