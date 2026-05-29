@@ -898,17 +898,30 @@ func TestScaleUnit_FiresEntityChanged(t *testing.T) {
 	}
 }
 
-// TestMPQ_SaveReturnsSentinel asserts MPQ-backed sessions reject Save with
-// the documented sentinel error so the UI can show a friendly toast.
-func TestMPQ_SaveReturnsSentinel(t *testing.T) {
-	// Smoke-build the smallest plausible mpqSource scenario via direct
-	// construction (avoid needing a real .w3x in the test fixture set).
-	// We don't actually need a working archive — we just need an mpqSource
-	// whose write() returns ErrMPQWriteNotImplemented when called.
-	src := mpqSource{a: nil}
-	err := src.write("war3mapUnits.doo", []byte("garbage"))
-	if !errors.Is(err, ErrMPQWriteNotImplemented) {
-		t.Errorf("expected ErrMPQWriteNotImplemented, got %v", err)
+// TestMPQ_WriteBuffersThenFlushFails asserts the new MPQ write semantics:
+// write() now BUFFERS (returns nil) instead of failing eagerly, and the
+// failure surfaces only at flush() time when the source can't actually repack
+// (no path / no open archive). This documents the boundary where the writer
+// degrades gracefully rather than corrupting anything.
+func TestMPQ_WriteBuffersThenFlushFails(t *testing.T) {
+	src := newMPQSource(nil, "") // no archive, no path
+
+	// write buffers without error.
+	if err := src.write("war3mapUnits.doo", []byte("buffered")); err != nil {
+		t.Fatalf("write should buffer, got error: %v", err)
+	}
+	// The buffered bytes are visible to a subsequent read.
+	got, ok, err := src.read("war3mapUnits.doo")
+	if err != nil || !ok {
+		t.Fatalf("read after write: ok=%v err=%v", ok, err)
+	}
+	if string(got) != "buffered" {
+		t.Errorf("read = %q, want %q", got, "buffered")
+	}
+	// flush can't repack (no path) so it returns an errors.Is-checkable error
+	// rather than silently dropping the data.
+	if err := src.flush(); !errors.Is(err, ErrMPQWriteNotImplemented) {
+		t.Errorf("flush with no path: want ErrMPQWriteNotImplemented, got %v", err)
 	}
 }
 

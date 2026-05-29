@@ -40,22 +40,28 @@ type fileSource interface {
 	// error means a real I/O / format problem.
 	read(name string) (data []byte, ok bool, err error)
 	// write replaces (or creates) the named file's bytes in this source.
-	// Folder sources write to disk; MPQ sources currently return
-	// ErrMPQWriteNotImplemented (extract to a folder first).
+	// Folder sources write straight to disk; MPQ sources BUFFER the write
+	// in memory and commit it during flush() (a single atomic repack).
 	write(name string, data []byte) error
 	// delete removes the named file from the source. Returns nil if the
 	// file is already absent (idempotent — used by Convert-to-Lua to drop
 	// war3map.j after the .lua replacement has been written). MPQ sources
-	// return ErrMPQWriteNotImplemented.
+	// buffer the tombstone and apply it during flush().
 	delete(name string) error
+	// flush commits any buffered changes durably. Folder sources write
+	// eagerly so their flush is a no-op; MPQ sources repack the whole
+	// archive and atomically replace the .w3x on disk. Save calls flush
+	// exactly once after the per-file write loop.
+	flush() error
 	// close releases any open handles. Safe to call once at end of Open.
 	close() error
 }
 
-// ErrMPQWriteNotImplemented is returned by Save when the loaded map is backed
-// by an MPQ archive. MPQ writing is not yet supported — callers should extract
-// the map to a folder first. errors.Is-checkable so the UI can surface a
-// friendly toast rather than a stack trace.
+// ErrMPQWriteNotImplemented was the historical sentinel returned by MPQ-backed
+// writes before the pure-Go MPQ writer landed (see internal/formats/mpq's
+// write.go). It is retained for the unusual fallback path where a repack fails
+// for a reason the writer can't recover from, and so external errors.Is checks
+// keep compiling. The common path now WRITES the archive.
 var ErrMPQWriteNotImplemented = errors.New("MPQ archive writing is not yet implemented — extract the map to a folder first")
 
 type folderSource struct{ root string }
@@ -97,12 +103,52 @@ func (f folderSource) delete(name string) error {
 	return nil
 }
 
+// flush is a no-op for folder sources — write/delete already hit disk.
+func (f folderSource) flush() error { return nil }
+
 func (f folderSource) close() error { return nil }
 
-type mpqSource struct{ a *mpq.Archive }
+// mpqSource is an MPQ-backed file source. Reads come straight from the open
+// archive; writes/deletes are BUFFERED in memory (pending/deleted) and applied
+// in one atomic repack when flush() runs (see mpq_write_source.go). path is the
+// on-disk .w3x location flush() repacks over.
+//
+// Pointer receiver: the pending/deleted maps + archive handle are mutated by
+// write/delete/flush, so the source must be a single shared instance, not a
+// value copy. mu guards ALL of those fields because ReadFile reads the source
+// concurrently (on bridge goroutines) with a Save-driven flush — see read().
+type mpqSource struct {
+	mu      sync.Mutex
+	a       *mpq.Archive
+	path    string
+	pending map[string][]byte // name -> new bytes (overrides the archive)
+	deleted map[string]bool   // name -> tombstone
+}
 
-func (m mpqSource) read(name string) ([]byte, bool, error) {
-	if !m.a.Has(name) {
+func newMPQSource(a *mpq.Archive, path string) *mpqSource {
+	return &mpqSource{
+		a:       a,
+		path:    path,
+		pending: make(map[string][]byte),
+		deleted: make(map[string]bool),
+	}
+}
+
+func (m *mpqSource) read(name string) ([]byte, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Pending writes shadow the archive; tombstones shadow both.
+	key := mpqNameKey(name)
+	if b, ok := m.pending[key]; ok {
+		return append([]byte(nil), b...), true, nil
+	}
+	if m.deleted[key] {
+		return nil, false, nil
+	}
+	// m.a can be nil only in the degenerate no-archive construction (tests) or
+	// transiently if a repack reopen failed; treat as "not present" so callers
+	// degrade gracefully rather than panicking.
+	if m.a == nil || !m.a.Has(name) {
 		return nil, false, nil
 	}
 	b, err := m.a.Read(name)
@@ -112,22 +158,36 @@ func (m mpqSource) read(name string) ([]byte, bool, error) {
 	return b, true, nil
 }
 
-// write on an MPQ source is intentionally unsupported. MPQ writing is a
-// multi-thousand-line problem (rebuild block table, hash table, sector
-// offsets, optional compression) that wc3-forge defers in favour of the
-// folder-source path. Callers should extract the .w3x to a folder first.
-func (m mpqSource) write(name string, data []byte) error {
-	return fmt.Errorf("%w (file=%q)", ErrMPQWriteNotImplemented, name)
+// write buffers the new bytes; the archive on disk is untouched until flush().
+// Buffering (rather than rebuilding the whole MPQ per file) keeps Save's
+// per-file write loop cheap and lets one repack commit every change atomically.
+func (m *mpqSource) write(name string, data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := mpqNameKey(name)
+	m.pending[key] = append([]byte(nil), data...)
+	delete(m.deleted, key)
+	return nil
 }
 
-// delete on an MPQ source is intentionally unsupported (same rationale as
-// write — MPQ writing is a large unfinished project; folder sources are the
-// supported edit path).
-func (m mpqSource) delete(name string) error {
-	return fmt.Errorf("%w (file=%q)", ErrMPQWriteNotImplemented, name)
+// delete buffers a tombstone; applied at flush(). Idempotent.
+func (m *mpqSource) delete(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := mpqNameKey(name)
+	m.deleted[key] = true
+	delete(m.pending, key)
+	return nil
 }
 
-func (m mpqSource) close() error { return m.a.Close() }
+func (m *mpqSource) close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.a == nil {
+		return nil
+	}
+	return m.a.Close()
+}
 
 // Session holds the currently-loaded map. Phase 1 only supports folder-based
 // maps (an extracted .w3x). MPQ-backed opening is deferred to a follow-up.
@@ -377,7 +437,7 @@ func (s *Session) Open(path string) error {
 		if err != nil {
 			return fmt.Errorf("open MPQ %q: %w", abs, err)
 		}
-		src = mpqSource{a: archive}
+		src = newMPQSource(archive, abs)
 	}
 
 	// war3map.w3i — REQUIRED.
@@ -2004,8 +2064,10 @@ func (s *Session) IsDirty() bool {
 // failed file stays dirty so the user can retry. The first error is returned;
 // successive failures are surfaced via wrapped messages.
 //
-// MPQ-backed sessions short-circuit with ErrMPQWriteNotImplemented — extract
-// the map to a folder first.
+// MPQ-backed sessions write a freshly-repacked .w3x at the source path via the
+// pure-Go MPQ writer (atomic temp-file + rename, so a failure never corrupts
+// the original). A clean (non-dirty) .w3x save takes the SAME repack path as a
+// dirty one — it does not falsely report success without writing.
 func (s *Session) Save() error {
 	s.mu.Lock()
 	if !s.loaded {
@@ -2013,8 +2075,19 @@ func (s *Session) Save() error {
 		return fmt.Errorf("no map loaded")
 	}
 	if !s.anyDirtyLocked() && s.pendingSkyModel == nil {
+		// Nothing dirty. For folder-backed maps that genuinely means "no
+		// work" (every file already on disk). For MPQ-backed maps a "Save"
+		// still rewrites the archive at the source path so the user gets a
+		// real, packed .w3x rather than a no-op that misleadingly reports
+		// success — this is the SAME repack path a dirty save would take.
+		src := s.source
 		s.mu.Unlock()
-		return nil // nothing to do
+		if mp, ok := src.(*mpqSource); ok {
+			if err := mp.forceRepackAll(); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	src := s.source
 	units := s.units
@@ -2231,6 +2304,16 @@ func (s *Session) Save() error {
 		s.mu.Lock()
 		s.pendingSkyModel = nil
 		s.mu.Unlock()
+	}
+
+	// Commit any buffered changes durably. For folder sources this is a no-op
+	// (write/delete already hit disk). For MPQ sources this is the single
+	// atomic repack that rewrites the .w3x at the source path. If it fails the
+	// per-file dirty flags have already cleared above, but the buffered bytes
+	// stay pending in the source so a later Save retries the repack; surface
+	// the error so the UI doesn't falsely report success.
+	if err := src.flush(); err != nil {
+		return err
 	}
 
 	// Fire the public dirty=false event only when everything cleared. (If a

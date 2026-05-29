@@ -38,25 +38,25 @@ func TestHandleDoodadsMove_NoMap(t *testing.T) {
 }
 
 // TestHandleMapSave_MPQSentinelMessage exercises the error-mapping branch:
-// when Session.Save returns ErrMPQWriteNotImplemented (which it does for an
-// MPQ-backed session OR — as covered here — when invoked with no map loaded
-// in a way that returns the sentinel), the handler turns it into the
-// user-visible message instead of letting the wrapped sentinel leak.
+// when Session.Save returns a wrapped ErrMPQWriteNotImplemented (which now
+// happens only when an MPQ-backed source cannot repack — here, a source with
+// no archive/path), the handler turns it into the user-visible message instead
+// of letting the wrapped sentinel leak.
 //
-// We construct the mapping directly off the sentinel to keep the test
-// hermetic (no real .w3x fixture needed).
+// With the pure-Go MPQ writer landed, the failure surfaces at flush() time
+// (the per-file write now buffers); a real .w3x with a valid path saves
+// successfully. This test uses a degenerate no-path source to hit the guarded
+// fallback without a fixture.
 func TestHandleMapSave_MPQSentinelMessage(t *testing.T) {
-	// Build a temp session that's MPQ-backed and dirty, swap it into Current,
-	// invoke the handler, then restore. mpqSource{a: nil}.write() returns
-	// the wrapped sentinel which Session.Save propagates.
 	prev := Current
 	t.Cleanup(func() { Current = prev })
 
 	s := &Session{}
 	s.loaded = true
 	s.path = "fake.w3x"
-	s.source = mpqSource{a: nil}
-	// Set dirtyUnits + a units file so Save reaches the write path. Empty
+	// No path + no archive => write buffers, flush returns the wrapped sentinel.
+	s.source = newMPQSource(nil, "")
+	// Set dirtyUnits + a units file so Save reaches the write+flush path. Empty
 	// Entities slice is fine — Encode handles it.
 	s.units = &unitsdoo.File{}
 	s.dirtyUnits = true
@@ -64,7 +64,7 @@ func TestHandleMapSave_MPQSentinelMessage(t *testing.T) {
 
 	_, err := handleMapSave(nil)
 	if err == nil {
-		t.Fatal("expected error from MPQ-backed save")
+		t.Fatal("expected error from MPQ-backed save with no repack target")
 	}
 	if !strings.Contains(err.Error(), "extract the map to a folder first") {
 		t.Errorf("expected user-visible MPQ message, got %q", err.Error())
