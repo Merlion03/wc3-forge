@@ -2247,7 +2247,7 @@
     <ObjectEditor bind:open={showObjectEditor} initialId={objectEditorInitialId} {reforged} onClose={closeObjectEditor} />
   {/if}
   {#if showTriggerEditor}
-    <TriggerEditor bind:open={showTriggerEditor} initialId={triggerEditorInitialId} onClose={closeTriggerEditor} />
+    <TriggerEditor bind:open={showTriggerEditor} initialId={triggerEditorInitialId} onClose={closeTriggerEditor} isLuaMap={status.lua} />
   {/if}
 
   {#if showSwapTileset}
