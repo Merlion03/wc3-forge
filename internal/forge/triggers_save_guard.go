@@ -80,6 +80,7 @@ func (s *Session) SaveTriggerScriptGuarded(overwrite bool) (int, error) {
 	s.mu.RLock()
 	src := s.source
 	loaded := s.loaded
+	isLua := s.info == nil || s.info.Lua
 	s.mu.RUnlock()
 	if !loaded {
 		return 0, fmt.Errorf("no map loaded")
@@ -88,26 +89,37 @@ func (s *Session) SaveTriggerScriptGuarded(overwrite bool) (int, error) {
 		return 0, fmt.Errorf("no source for writing")
 	}
 
-	// Inspect the existing file. A read error other than "absent" is surfaced
-	// so we never overwrite based on a half-read inspection.
-	existing, ok, err := src.read("war3map.lua")
-	if err != nil {
-		return 0, fmt.Errorf("inspect existing war3map.lua: %w", err)
+	// Note: hand-rolled-script maps land here too (the synthesized Map Header's
+	// war3map.lua/.j won't carry a codegen marker), so save_script correctly
+	// refuses to clobber them without overwrite. Map Header *edits* are
+	// persisted through the normal Save() path (mapHeaderScriptDirty), not here.
+
+	// Pick the language-appropriate script file + codegen marker.
+	scriptFile, marker := "war3map.lua", CodegenMarkerLine
+	if !isLua {
+		scriptFile, marker = "war3map.j", JASSCodegenMarkerLine
 	}
 
-	if ok && len(existing) > 0 && !looksLikeCodegen(existing) {
+	// Inspect the existing file. A read error other than "absent" is surfaced
+	// so we never overwrite based on a half-read inspection.
+	existing, ok, err := src.read(scriptFile)
+	if err != nil {
+		return 0, fmt.Errorf("inspect existing %s: %w", scriptFile, err)
+	}
+
+	if ok && len(existing) > 0 && firstLine(existing) != marker {
 		// Hand-authored / unknown-origin script. Never silently clobber.
 		if !overwrite {
 			return 0, ErrScriptNotCodegen
 		}
 		// Backup the precious bytes before we regenerate over them. The backup
 		// failing is fatal — better to refuse the save than to lose the file.
-		if err := src.write("war3map.lua"+ScriptBackupSuffix, existing); err != nil {
-			return 0, fmt.Errorf("backup hand-authored war3map.lua before overwrite: %w", err)
+		if err := src.write(scriptFile+ScriptBackupSuffix, existing); err != nil {
+			return 0, fmt.Errorf("backup hand-authored %s before overwrite: %w", scriptFile, err)
 		}
 	}
 
 	// Codegen-owned, absent, or backed-up-and-cleared-to-overwrite: regenerate.
-	// SaveTriggerScript honors ErrLuaOnly + ErrPreserveScript itself.
+	// SaveTriggerScript honors ErrPreserveScript itself.
 	return s.SaveTriggerScript()
 }

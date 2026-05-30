@@ -190,8 +190,15 @@ func TestSaveScript_RefusesToClobberHandAuthored(t *testing.T) {
 
 // TestSaveScript_OverwriteBacksUpHandAuthored confirms that an explicit
 // overwrite still preserves the original bytes via the .bak sidecar.
+//
+// Hand-rolled-script maps now round-trip their authoritative Map Header text
+// verbatim (no GUI tree to lower, and no fresh scaffold to wrap around a script
+// that already has its own main/config). So we edit the Map Header first, then
+// assert the overwrite save writes the EDITED script while .bak preserves the
+// original on-disk bytes.
 func TestSaveScript_OverwriteBacksUpHandAuthored(t *testing.T) {
 	const handAuthored = "-- precious hand-written script\nlocal x = 42\n"
+	const edited = "-- precious hand-written script (edited)\nlocal x = 43\nlocal y = 7\n"
 	dir := writeLuaMapFixture(t, handAuthored)
 	s := &Session{}
 	if err := s.Open(dir); err != nil {
@@ -199,20 +206,27 @@ func TestSaveScript_OverwriteBacksUpHandAuthored(t *testing.T) {
 	}
 	useCurrent(t, s)
 
+	if !s.triggerIsHandRolled {
+		t.Fatalf("fixture should classify as hand-rolled (no .wtg + a war3map.lua)")
+	}
+	if err := s.SetMapHeaderScript(edited); err != nil {
+		t.Fatalf("SetMapHeaderScript: %v", err)
+	}
+
 	params, _ := json.Marshal(triggersSaveScriptParams{Overwrite: true})
 	if _, err := handleTriggersSaveScript(params); err != nil {
 		t.Fatalf("save_script overwrite=true: %v", err)
 	}
 
-	// war3map.lua should now be codegen output.
+	// war3map.lua should now hold the edited Map Header script verbatim.
 	got, err := os.ReadFile(filepath.Join(dir, "war3map.lua"))
 	if err != nil {
 		t.Fatalf("read lua: %v", err)
 	}
-	if !looksLikeCodegen(got) {
-		t.Fatalf("after overwrite, war3map.lua is not codegen output (first line=%q)", firstLine(got))
+	if string(got) != edited {
+		t.Fatalf("after overwrite, war3map.lua != edited script:\n got: %q\nwant: %q", string(got), edited)
 	}
-	// The original must be recoverable from the backup.
+	// The original on-disk bytes must be recoverable from the backup.
 	bak, err := os.ReadFile(filepath.Join(dir, "war3map.lua"+ScriptBackupSuffix))
 	if err != nil {
 		t.Fatalf("read backup: %v", err)

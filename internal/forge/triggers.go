@@ -287,6 +287,7 @@ func synthesizeHandRolledScriptTriggers(scriptName, scriptText string) *wtg.Trig
 func (s *Session) GenerateTriggerScript() (string, error) {
 	s.mu.RLock()
 	src := s.source
+	handRolled := s.triggerIsHandRolled
 	in := CodegenInputs{
 		Triggers: s.triggers,
 		Units:    s.units,
@@ -300,28 +301,49 @@ func (s *Session) GenerateTriggerScript() (string, error) {
 	if s.triggersWct != nil {
 		in.GlobalJASS = s.triggersWct.GlobalJASS
 	}
+	// Snapshot the hand-rolled Map Header text under the lock so we can return
+	// it verbatim without holding the lock across codegen.
+	var handRolledText string
+	if handRolled && s.triggers != nil && len(s.triggers.Triggers) > 0 {
+		handRolledText = s.triggers.Triggers[0].CustomText
+	}
 	loaded := s.loaded
 	s.mu.RUnlock()
 	if !loaded {
 		return "", fmt.Errorf("no map loaded")
 	}
-	if in.Info != nil && !in.Info.Lua {
-		return "", ErrLuaOnly
+
+	// Hand-rolled-script maps have no GUI tree to lower — the script file IS the
+	// source of truth. Return its current (possibly-edited) text verbatim,
+	// regardless of language. This is the native-JASS passthrough path.
+	if handRolled {
+		return handRolledText, nil
 	}
-	// Preserve-marker peek. Reading the existing war3map.lua under the
-	// source's read path covers both folder + MPQ backed sessions.
+
+	isLua := in.Info == nil || in.Info.Lua
+
+	// Pick the language-appropriate script file + preserve marker.
+	scriptFile, marker := "war3map.lua", PreserveScriptMarker
+	if !isLua {
+		scriptFile, marker = "war3map.j", PreserveScriptMarkerJASS
+	}
+	// Preserve-marker peek. Reading the existing script under the source's read
+	// path covers both folder + MPQ backed sessions.
 	if src != nil {
-		if b, ok, _ := src.read("war3map.lua"); ok && len(b) > 0 {
+		if b, ok, _ := src.read(scriptFile); ok && len(b) > 0 {
 			first := string(b)
 			if i := strings.IndexByte(first, '\n'); i >= 0 {
 				first = first[:i]
 			}
-			if strings.TrimSpace(first) == PreserveScriptMarker {
+			if strings.TrimSpace(first) == marker {
 				return "", ErrPreserveScript
 			}
 		}
 	}
-	return GenerateLuaScript(in)
+	if isLua {
+		return GenerateLuaScript(in)
+	}
+	return GenerateJASSScript(in)
 }
 
 // SaveTriggerScript generates the Lua script and writes it to war3map.lua
@@ -338,12 +360,25 @@ func (s *Session) SaveTriggerScript() (int, error) {
 	}
 	s.mu.RLock()
 	src := s.source
+	isLua := s.info == nil || s.info.Lua
+	handRolled := s.triggerIsHandRolled
+	scriptName := s.mapHeaderScriptName
 	s.mu.RUnlock()
 	if src == nil {
 		return 0, fmt.Errorf("no source for writing")
 	}
-	if err := src.write("war3map.lua", []byte(text)); err != nil {
-		return 0, fmt.Errorf("write war3map.lua: %w", err)
+	// JASS maps write war3map.j; Lua maps write war3map.lua.
+	scriptFile := "war3map.lua"
+	if !isLua {
+		scriptFile = "war3map.j"
+	}
+	// Hand-rolled maps remember the exact file they loaded from (Reforged
+	// occasionally mislabels the w3i Lua flag); honor that over the flag.
+	if handRolled && scriptName != "" {
+		scriptFile = scriptName
+	}
+	if err := src.write(scriptFile, []byte(text)); err != nil {
+		return 0, fmt.Errorf("write %s: %w", scriptFile, err)
 	}
 	return len(text), nil
 }
@@ -357,22 +392,75 @@ func (s *Session) SaveTriggerScript() (int, error) {
 // can render a friendly toast. Calling code is expected to be the editor
 // toolbar "Test Map" button or the MCP triggers.test_map handler.
 func (s *Session) TestMap() error {
+	// Snapshot the regen-relevant state BEFORE Save() (which resets
+	// dirtyTriggers). triggersEdited tells us whether the user actually changed
+	// the GUI tree this session.
+	s.mu.RLock()
+	handRolled := s.triggerIsHandRolled
+	triggersEdited := s.dirtyTriggers
+	src := s.source
+	isLua := s.info == nil || s.info.Lua
+	s.mu.RUnlock()
+
 	// 1. Save pending edits to other files (units, doodads, info, terrain,
-	//    gameplay, object mods, triggers wtg/wct). The codegen path doesn't
-	//    flip dirtyTriggers because the GUI tree was the input, not the
-	//    output — but a user who edited a trigger and then clicked Test Map
-	//    expects the changes to be in the in-memory wtg → ALSO on disk.
+	//    gameplay, object mods, triggers wtg/wct). For hand-rolled maps this is
+	//    also where the Map Header script text reaches disk.
 	if err := s.Save(); err != nil {
 		return fmt.Errorf("save pending edits: %w", err)
 	}
-	// 2. Regenerate + save the script.
-	if _, err := s.SaveTriggerScript(); err != nil {
-		return fmt.Errorf("regen war3map.lua: %w", err)
+
+	// 2. Decide whether to regenerate the script file from the trigger tree.
+	//    See scriptNeedsRegen for the policy. The key case this protects: an
+	//    imported, untouched war3map.j (the original post-JassHelper script of
+	//    an old JASS map) is PRESERVED — regenerating from a possibly partial or
+	//    vJASS .wtg would replace a known-good script with a worse one. That's
+	//    what makes "open an old JASS map → Test Map" launch the real script
+	//    instead of a broken regeneration. Hand-rolled maps never regenerate
+	//    (their script was already written by Save).
+	var existing []byte
+	var existingOK bool
+	if !handRolled && src != nil && !triggersEdited {
+		scriptFile := "war3map.lua"
+		if !isLua {
+			scriptFile = "war3map.j"
+		}
+		existing, existingOK, _ = src.read(scriptFile)
 	}
+	if scriptNeedsRegen(handRolled, triggersEdited, isLua, existing, existingOK) {
+		if _, err := s.SaveTriggerScript(); err != nil {
+			return fmt.Errorf("regen script: %w", err)
+		}
+	}
+
 	// 3. Launch WC3 with the map. Folder-backed sessions error out here
 	//    (LaunchWithMap rejects paths that aren't files); MPQ-backed
 	//    sessions launch the .w3x path stored at Open time.
 	return wc3launch.LaunchWithMap(s.Path())
+}
+
+// scriptNeedsRegen is the Test Map / save policy for whether to regenerate the
+// script file (war3map.j/.lua) from the trigger tree:
+//
+//   - hand-rolled maps: never (the script IS the source; Save persisted edits).
+//   - the user edited triggers this session: yes (compile their changes).
+//   - otherwise, regenerate only if the on-disk script is ABSENT/empty or was
+//     itself produced by wc3-forge codegen (first line == the codegen marker).
+//     A foreign, untouched script (imported / hand- / JassHelper-authored) is
+//     PRESERVED.
+//
+// Pure over its inputs so the policy is unit-tested without launching WC3.
+func scriptNeedsRegen(handRolled, triggersEdited, isLua bool, existing []byte, existingOK bool) bool {
+	if handRolled {
+		return false
+	}
+	if triggersEdited {
+		return true
+	}
+	marker := CodegenMarkerLine
+	if !isLua {
+		marker = JASSCodegenMarkerLine
+	}
+	return !existingOK || len(existing) == 0 || firstLine(existing) == marker
 }
 
 // ---------------------------------------------------------------------------

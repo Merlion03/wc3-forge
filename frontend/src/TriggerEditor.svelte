@@ -81,10 +81,16 @@
     open = $bindable(false),
     onClose,
     initialId,
+    isLuaMap = true,
   }: {
     open?: boolean
     onClose?: () => void
     initialId?: number | null
+    // Whether the loaded map's script language is Lua (from MapStatus.lua).
+    // Used to pick JASS vs Lua syntax highlighting for script triggers whose
+    // name doesn't end in .j (i.e. everything except the synthesized Map
+    // Header). Defaults to Lua to match the legacy Reforged bias.
+    isLuaMap?: boolean
   } = $props()
 
   // Loaded tree (flat node list ordered as-written). Hierarchy is built
@@ -705,14 +711,16 @@
   })
   let editorDirty = $derived(editorBoundId != null && pendingTexts.has(editorBoundId))
 
-  // Detect the script language for a given script trigger. We don't have
-  // info.Lua piped to the frontend, so fall back to filename matching for
-  // synthesized Map Header triggers and default to Lua otherwise (Reforged
-  // bias — most new maps are Lua, and Lua's highlighter degrades better on
-  // JASS source than vice versa).
+  // Detect the script language for a given script trigger. Filename wins for
+  // the synthesized Map Header triggers (war3map.j → jass, war3map.lua → lua);
+  // for ordinary script triggers (custom names) we fall back to the map's
+  // declared script language (MapStatus.lua, threaded in as isLuaMap). That's
+  // what makes per-trigger custom JASS in a JASS map highlight as JASS instead
+  // of defaulting to Lua.
   function detectLanguage(name: string | undefined): 'lua' | 'jass' {
     if (name && /\.j$/i.test(name)) return 'jass'
-    return 'lua'
+    if (name && /\.lua$/i.test(name)) return 'lua'
+    return isLuaMap ? 'lua' : 'jass'
   }
 
   // Map header detection mirrors the back-end classifier: synthesized header
