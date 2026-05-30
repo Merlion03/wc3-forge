@@ -270,6 +270,14 @@ func chooseSkinIDPresence(subversion uint32) []bool {
 // returns the parsed entities or the first error encountered; the caller
 // decides which policy "wins" by checking that r consumed the whole buffer.
 func parseEntities(r *reader, subversion uint32, count uint32, withSkin bool) ([]Entity, error) {
+	// Bound the entity count against the bytes actually remaining before
+	// preallocating. Even though Parse already caps count at maxEntities (1M),
+	// a small truncated/fuzzed file declaring a near-cap count would still make
+	// us preallocate ~272 MB for a few hundred bytes of input. A real entity is
+	// far larger than 4 bytes on disk, so remaining()/4 is a safe upper bound.
+	if err := r.checkCount(count, 4, "entity"); err != nil {
+		return nil, err
+	}
 	entities := make([]Entity, 0, count)
 	for i := uint32(0); i < count; i++ {
 		e, err := readEntity(r, subversion, withSkin)
@@ -400,6 +408,13 @@ func readEntity(r *reader, subversion uint32, readSkinID bool) (Entity, error) {
 	if err != nil {
 		return e, fmt.Errorf("item_drop_set_count: %w", err)
 	}
+	// Bound the untrusted count before allocating: each set is at least its own
+	// 4-byte item-count prefix, so a file can't hold more sets than it has
+	// bytes/4. This rejects a garbage/misaligned setCount (billions) instead of
+	// allocating gigabytes for the itemDropSetSizes slice.
+	if err := r.checkCount(setCount, 4, "item_drop_set"); err != nil {
+		return e, fmt.Errorf("item_drop_set_count: %w", err)
+	}
 	// Flatten all sets into a single []ItemDrop, but capture per-set sizes in
 	// itemDropSetSizes so byte-faithful Encode can reconstruct the
 	// (set_count, [items_in_set_i]*) prefix structure.
@@ -409,6 +424,11 @@ func readEntity(r *reader, subversion uint32, readSkinID bool) (Entity, error) {
 	for s := uint32(0); s < setCount; s++ {
 		itemCount, err := r.readU32()
 		if err != nil {
+			return e, fmt.Errorf("drop_set[%d] count: %w", s, err)
+		}
+		// Each drop entry is 8 bytes (4-byte item id + 4-byte chance). Bound
+		// itemCount before the inner read loop so a hostile value fails fast.
+		if err := r.checkCount(itemCount, 8, "drop_set item"); err != nil {
 			return e, fmt.Errorf("drop_set[%d] count: %w", s, err)
 		}
 		e.itemDropSetSizes = append(e.itemDropSetSizes, itemCount)
@@ -452,6 +472,11 @@ func readEntity(r *reader, subversion uint32, readSkinID bool) (Entity, error) {
 	if err != nil {
 		return e, fmt.Errorf("inventory_count: %w", err)
 	}
+	// Each inventory slot is 8 bytes (4-byte slot index + 4-byte item id).
+	// Bound before allocating to reject a garbage count.
+	if err := r.checkCount(invCount, 8, "inventory"); err != nil {
+		return e, fmt.Errorf("inventory_count: %w", err)
+	}
 	e.Inventory = make([]InventorySlot, 0, invCount)
 	for i := uint32(0); i < invCount; i++ {
 		var slot InventorySlot
@@ -467,6 +492,11 @@ func readEntity(r *reader, subversion uint32, readSkinID bool) (Entity, error) {
 	// Ability modifications.
 	abilCount, err := r.readU32()
 	if err != nil {
+		return e, fmt.Errorf("ability_count: %w", err)
+	}
+	// Each ability modification is 12 bytes (4-byte id + 4-byte autocast +
+	// 4-byte level). Bound before allocating to reject a garbage count.
+	if err := r.checkCount(abilCount, 12, "ability"); err != nil {
 		return e, fmt.Errorf("ability_count: %w", err)
 	}
 	e.AbilityModifications = make([]AbilityMod, 0, abilCount)
@@ -505,6 +535,13 @@ func readEntity(r *reader, subversion uint32, readSkinID bool) (Entity, error) {
 		// Custom group — uint32 count, then count * 8 bytes (chance + id pairs).
 		n, err := r.readU32()
 		if err != nil {
+			return e, fmt.Errorf("random_data (type=2) count: %w", err)
+		}
+		// Each pair is 8 bytes (chance uint32 + item_id uint32). Bound n before
+		// computing int(n)*8 — that multiply overflows on 32-bit platforms and
+		// produces a bogus (possibly negative) length, and even on 64-bit a
+		// hostile n would make readBytes attempt a huge allocation.
+		if err := r.checkCount(n, 8, "random_data (type=2)"); err != nil {
 			return e, fmt.Errorf("random_data (type=2) count: %w", err)
 		}
 		if e.RandomData, err = r.readBytes(int(n) * 8); err != nil {
@@ -571,6 +608,39 @@ func SetScaleRaw(e *Entity, raw [3]float32) {
 type reader struct {
 	buf []byte
 	pos int
+}
+
+// remaining reports how many unread bytes are left in the buffer.
+func (r *reader) remaining() int {
+	if r.pos >= len(r.buf) {
+		return 0
+	}
+	return len(r.buf) - r.pos
+}
+
+// checkCount validates an untrusted element count read from the byte stream
+// before it is used to size an allocation. A count is implausible if the bytes
+// it would consume (count * minElemBytes) exceed the bytes remaining in the
+// buffer — no legitimate file can describe more elements than it has bytes for.
+// Rejecting up front turns a malformed/truncated/fuzzed length field into a
+// fast decode error instead of an attempted multi-gigabyte allocation (the
+// war3mapUnits.doo OOM-on-malformed-input class of bug). minElemBytes must be
+// the smallest on-disk footprint of one element (>= 1).
+//
+// what/index are used only to build a descriptive, wrapped error matching the
+// package's existing error style.
+func (r *reader) checkCount(count uint32, minElemBytes int, what string) error {
+	if minElemBytes < 1 {
+		minElemBytes = 1
+	}
+	// remaining()/minElemBytes is an upper bound on how many elements could
+	// possibly follow; anything beyond it is corrupt. Using division (rather
+	// than count*minElemBytes) avoids any multiply overflow on a hostile count.
+	if uint64(count) > uint64(r.remaining()/minElemBytes) {
+		return fmt.Errorf("%s count %d exceeds %d bytes remaining (min %d bytes/element) at offset %d: %w",
+			what, count, r.remaining(), minElemBytes, r.pos, io.ErrUnexpectedEOF)
+	}
+	return nil
 }
 
 func (r *reader) readBytes(n int) ([]byte, error) {
