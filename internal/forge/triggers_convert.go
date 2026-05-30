@@ -253,6 +253,7 @@ type TranspileSection struct {
 	Kind               string                 `json:"kind"` // "script", "custom_text", "global_jass", "map_header"
 	Original           string                 `json:"original"`
 	Transpiled         string                 `json:"transpiled"`
+	Diagnostics        []Diagnostic           `json:"diagnostics,omitempty"`
 	Errors             []string               `json:"errors,omitempty"`
 	PreprocessWarnings []string               `json:"preprocess_warnings,omitempty"`
 	LibScopeWarnings   []string               `json:"libscope_warnings,omitempty"`
@@ -422,12 +423,14 @@ func transpileSectionScript(id int32, label, kind, src string, ctx *jass2lua.Glo
 	if lexErr == nil || lua != "" {
 		lua, structErrs = jass2lua.SpliceStructLuaWithErrors(lua, st)
 	}
+	cleanLua, diags := extractDiagnostics(lua)
 	sec := TranspileSection{
 		ID:                 id,
 		Label:              label,
 		Kind:               kind,
 		Original:           src,
-		Transpiled:         lua,
+		Transpiled:         cleanLua,
+		Diagnostics:        diags,
 		PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
 		LibScopeWarnings:   libScopeWarningsToStrings(ls.Errors),
 		ModuleWarnings:     moduleWarningsToStrings(mods.Errors),
@@ -476,12 +479,14 @@ func transpileSectionCustomText(id int32, triggerName, src string, ctx *jass2lua
 	if lexErr == nil || lua != "" {
 		lua, structErrs = jass2lua.SpliceStructLuaWithErrors(lua, st)
 	}
+	cleanLua, diags := extractDiagnostics(lua)
 	sec := TranspileSection{
 		ID:                 id,
 		Label:              "Custom Text: " + triggerName,
 		Kind:               "custom_text",
 		Original:           src,
-		Transpiled:         lua,
+		Transpiled:         cleanLua,
+		Diagnostics:        diags,
 		PreprocessWarnings: preprocessWarningsToStrings(pp.Errors),
 		LibScopeWarnings:   libScopeWarningsToStrings(ls.Errors),
 		ModuleWarnings:     moduleWarningsToStrings(mods.Errors),
@@ -797,6 +802,8 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 			lua = jass2lua.SpliceStructLua(lua, st)
 			if ov, ok := opts.Overrides[tr.ID]; ok {
 				lua = ov // user hand-edited this section in the convert dialog
+			} else {
+				lua = cleanTranspiled(lua) // strip error markers to match the cleaned preview
 			}
 			customTextsLua[tr.ID] = lua
 		}
@@ -830,6 +837,8 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 		lua = jass2lua.SpliceStructLua(lua, st)
 		if ov, ok := opts.Overrides[-1]; ok {
 			lua = ov // user hand-edited the GlobalJASS section (id -1)
+		} else {
+			lua = cleanTranspiled(lua) // strip error markers to match the cleaned preview
 		}
 		in.GlobalJASS = lua
 	}

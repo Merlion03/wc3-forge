@@ -344,7 +344,7 @@ func Parse(toks []Token) *File {
 			}
 			f.Errors = append(f.Errors, err.Error())
 			// Skip to next EOL to recover and avoid infinite loops.
-			snippet := p.snippetFrom(startPos)
+			snippet := p.failLineSnippet(startPos)
 			f.Items = append(f.Items, &RawStmt{Reason: err.Error(), Snippet: snippet})
 			p.skipToEOL()
 			continue
@@ -472,7 +472,7 @@ func (p *parser) recoverStrayBlock(firstErr string) *StrayBlock {
 			// One bad statement inside the run: record a RawStmt for it but DON'T
 			// add another File.Error (we already surfaced one for the whole run);
 			// recover per-line and keep going.
-			snippet := p.snippetFrom(startPos)
+			snippet := p.failLineSnippet(startPos)
 			sb.Body = append(sb.Body, &RawStmt{Reason: err.Error(), Snippet: snippet})
 			p.skipToEOL()
 			continue
@@ -490,6 +490,41 @@ func (p *parser) snippetFrom(startPos int) string {
 		b.WriteString(p.toks[i].Value)
 	}
 	return b.String()
+}
+
+// lineText reconstructs the full source line at `line` (the 1-based line the
+// lexer assigned) from its tokens. Exact whitespace is lost (tokens are joined
+// with single spaces), so consumers must compare with whitespace-INSENSITIVE
+// matching. Used to capture the verbatim-ish JASS of an untranslatable line so
+// the convert UI can find + highlight it in the original source.
+func (p *parser) lineText(line int) string {
+	if line <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, t := range p.toks {
+		if t.Line != line || t.Kind == TokEOL || t.Kind == TokEOF {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(t.Value)
+	}
+	return b.String()
+}
+
+// failLineSnippet captures the full failing line (preferred, for source
+// matching) and falls back to the skipped-token reconstruction.
+func (p *parser) failLineSnippet(startPos int) string {
+	line := 0
+	if startPos < len(p.toks) {
+		line = p.toks[startPos].Line
+	}
+	if s := p.lineText(line); s != "" {
+		return s
+	}
+	return p.snippetFrom(startPos)
 }
 
 // parseTopLevel dispatches between globals / function / native / type / constant
@@ -624,7 +659,7 @@ func (p *parser) parseFunction(native bool, constant bool) (*FuncDecl, error) {
 		if err != nil {
 			startPos := p.pos
 			p.errs = append(p.errs, err.Error())
-			snippet := p.snippetFrom(startPos)
+			snippet := p.failLineSnippet(startPos)
 			fd.Body = append(fd.Body, &RawStmt{Reason: err.Error(), Snippet: snippet})
 			p.skipToEOL()
 			continue
@@ -1052,7 +1087,7 @@ func (p *parser) parseStmtsUntil(terminators ...string) ([]Stmt, string, error) 
 		s, err := p.parseStmt()
 		if err != nil {
 			p.errs = append(p.errs, err.Error())
-			snippet := p.snippetFrom(startPos)
+			snippet := p.failLineSnippet(startPos)
 			out = append(out, &RawStmt{Reason: err.Error(), Snippet: snippet})
 			p.skipToEOL()
 			continue

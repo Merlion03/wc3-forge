@@ -41,6 +41,7 @@
     kind: string
     original: string
     transpiled: string
+    diagnostics?: Array<{ lua_line: number; reason: string; source?: string }>
     errors?: string[]
     preprocess_warnings?: string[]
     libscope_warnings?: string[]
@@ -87,6 +88,11 @@
   // when the user changed a section away from its transpiled output. Written
   // verbatim on Convert (see doConvert / ConvertMapToLuaWithEdits).
   let edits: Record<number, string> = $state({})
+
+  // The diff editor instance for the current section + its live unresolved-gap
+  // count (gaps the user hasn't filled yet), reported by MonacoDiffEditor.
+  let diffRef = $state<{ gotoGap: (dir: 1 | -1) => void } | undefined>(undefined)
+  let unresolvedGaps = $state(0)
 
   const errCount = (s: TranspileSection): number => s.errors?.length ?? 0
 
@@ -394,11 +400,22 @@
                     <span class="shrink-0 pt-0.5">⚠</span>
                     <span class="flex-1">
                       The transpiler couldn't fully translate this section
-                      ({errCount(currentSection)} spot{errCount(currentSection) === 1 ? '' : 's'}). Its
-                      best-effort Lua is on the right —
-                      <code class="bg-muted px-1 py-0.5 rounded">error("jass2lua failed…")</code>
-                      marks each line it gave up on. <strong>Edit the Lua to fix it;</strong>
-                      your edits are written verbatim on Convert.
+                      ({errCount(currentSection)} spot{errCount(currentSection) === 1 ? '' : 's'}).
+                      Each is an <span class="text-amber-400">amber gap on the right</span> —
+                      <strong>write its Lua there</strong> ({unresolvedGaps} unfilled). The matching
+                      JASS is highlighted on the left where we could pinpoint it. Edits are written on Convert.
+                    </span>
+                    <span class="shrink-0 flex items-center gap-1">
+                      <Button
+                        variant="ghost" size="sm" class="text-xs h-6 px-2"
+                        onclick={() => diffRef?.gotoGap(-1)}
+                        title="Jump to the previous unfilled gap"
+                      >◂ Prev</Button>
+                      <Button
+                        variant="ghost" size="sm" class="text-xs h-6 px-2"
+                        onclick={() => diffRef?.gotoGap(1)}
+                        title="Jump to the next unfilled gap"
+                      >Next ▸</Button>
                     </span>
                     {#if currentSection.id in edits}
                       <Button
@@ -508,12 +525,15 @@
                 <div class="flex-1 min-h-0">
                   {#key selectedSectionIdx}
                     <MonacoDiffEditor
+                      bind:this={diffRef}
                       originalValue={currentSection.original}
                       modifiedValue={currentModified}
                       originalLanguage="jass"
                       modifiedLanguage="lua"
                       modifiedEditable={true}
                       onModifiedChange={onModifiedEdit}
+                      diagnostics={currentSection.diagnostics ?? []}
+                      onUnresolvedCount={(n) => (unresolvedGaps = n)}
                     />
                   {/key}
                 </div>
