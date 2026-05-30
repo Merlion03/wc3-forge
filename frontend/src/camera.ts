@@ -24,6 +24,8 @@
 // disabled because the mouse can leave the window mid-pan and strand the
 // camera in motion.
 
+import { registerDiag } from './diag-registry'
+
 const PITCH_MIN = 0.18  // ~10°, prevents the floor-eye view
 const PITCH_MAX = 1.45  // ~83°, prevents flipping past straight down
 const DIST_MIN = 200
@@ -40,6 +42,45 @@ const FOV = Math.PI / 3
 // "up" on screen. resetOrbit() snaps back to these.
 const DEFAULT_YAW = 0
 const DEFAULT_PITCH = Math.PI / 3
+
+// ---- Stuck-pan-key watchdog (diagnostics) ----
+//
+// The pan keys (WASD/arrows) drive the camera from window-level keydown
+// listeners. The classic failure mode — already fixed via typingInField() +
+// onBlur() — was a held pan key continuing to pan while the window had no
+// focus (e.g. WASD typed into a search box that then lost focus, or an
+// alt-tab that swallowed the keyup). This watchdog re-surfaces that exact
+// signature so a regression shows up in the diagnostics overlay / MCP tool:
+// pan keys held WHILE document.hasFocus() is false is the smoking gun.
+//
+// The provider reads only the live camera's keysDown set (the most recent
+// createCamera()) — O(1), no GL, no scene scan. A module-level ref points at
+// the active controller's set so the singleton provider stays valid across
+// camera dispose/recreate (only the latest instance owns input listeners).
+let activeKeysDown: Set<string> | null = null
+const PAN_KEYS = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'])
+// Count of pump ticks that observed held pan keys while the window was
+// unfocused — the *Suspected/*Fails-style red-tinted counter for the overlay.
+let stuckKeyTicks = 0
+
+registerDiag('input', () => {
+  const keys = activeKeysDown
+  const heldPanKeys = keys ? [...keys].filter(k => PAN_KEYS.has(k)) : []
+  const keysHeld = heldPanKeys.length
+  // document.hasFocus() is cheap and synchronous. When focus is elsewhere but
+  // a pan key is still "down" in our set, the keyup likely never reached us.
+  const unfocused = typeof document !== 'undefined' && !document.hasFocus()
+  const stuckSuspected = keysHeld > 0 && unfocused
+  if (stuckSuspected) stuckKeyTicks++
+  return {
+    keysHeld,
+    heldPanKeys,
+    stuckSuspected,
+    // Cumulative red-tinted counter: nonzero means the stuck-pan-key
+    // signature was observed at least once this session.
+    stuckKeyFails: stuckKeyTicks,
+  }
+})
 
 export interface RTSCamera {
   /** Re-center on a map: set pivot to (cx, cy) on the ground plane and frame the given span. */
@@ -150,6 +191,10 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
   // canvas so we don't keep panning when focus is elsewhere.
   let pointer: { x: number; y: number } | null = null
   const keysDown = new Set<string>()
+  // Point the module-level watchdog at THIS controller's key set. The newest
+  // camera owns the live window-level input listeners, so the diagnostics
+  // 'input' provider always reflects the active instance.
+  activeKeysDown = keysDown
 
   // MMB / RMB drag state.
   let dragging: { button: number; lastX: number; lastY: number } | null = null
@@ -300,6 +345,9 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
     },
     dispose() {
       cancelAnimationFrame(rafId)
+      // Detach the watchdog if it still points at this (now-dead) instance so
+      // the provider doesn't report stale held keys after dispose.
+      if (activeKeysDown === keysDown) activeKeysDown = null
       canvas.removeEventListener('mousemove', onMouseMove)
       canvas.removeEventListener('mouseleave', onMouseLeave)
       canvas.removeEventListener('mousedown', onMouseDown)
