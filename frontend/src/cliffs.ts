@@ -39,7 +39,8 @@
 // `inst.rotateLocal(CLIFF_UNROTATE_QUAT)` is REMOVED — the new path doesn't
 // create lib instances, and the shader handles the rotation in-pipe.
 
-import { flog } from './debuglog'
+import { flog, flogWarn } from './debuglog'
+import { registerDiag } from './diag-registry'
 // Deep import: the top-level package exports a namespace bundle whose
 // `viewer.ModelViewer` is the class — there's no named `ModelViewer` re-export
 // at the package root. The path mirrors how icon-loader.ts reaches into
@@ -79,6 +80,21 @@ export interface CliffPlacement {
   /** Cliff palette index (CornerCliffTexture[BL] from .w3e). */
   paletteIdx: number
 }
+
+// --- Diagnostics counters (U6) -------------------------------------------
+// Cliff placement has two quiet silent-failure sites: a cliff/clifftrans MDX
+// that 404s (cell ends up with a hole) and a cliff-palette texture that fails
+// to load (cliff renders untextured). Both currently only flog. Surface them
+// as precomputed counters so diagnostics.get / the F9 overlay can show a map
+// with broken cliff geometry without scraping the log. *Fails/*Miss suffix →
+// overlay auto-red-tint. lastLoad is the most-recent renderCliffs() summary.
+const cliffDiag = {
+  lastPlaced: 0,
+  lastFailedCells: 0,
+  paletteFails: 0,    // cumulative: cliff palette textures that failed to load
+  meshMissPaths: 0,   // cumulative: unique MDX paths that 404'd both variations
+}
+registerDiag('cliffs', () => ({ ...cliffDiag }))
 
 export function computeCliffPlacements(t: TerrainCliffData): CliffPlacement[] {
   const out: CliffPlacement[] = []
@@ -299,7 +315,8 @@ export async function renderCliffs(
     palettePromises.push(
       viewer.load(path, pathSolver).then((res: any) => {
         if (!res || !res.webglResource) {
-          flog(`[cliffs] cliff palette[${p}] (${t.cliff_palette[p]}) failed to load: ${path}`)
+          cliffDiag.paletteFails++
+          flogWarn(`[cliffs] cliff palette[${p}] (${t.cliff_palette[p]}) failed to load: ${path}`)
           return
         }
         paletteTextures[p] = {
@@ -308,7 +325,8 @@ export async function renderCliffs(
           height: res.height as number,
         }
       }).catch((e: unknown) => {
-        flog(`[cliffs] cliff palette[${p}] load threw:`, e instanceof Error ? e.message : String(e))
+        cliffDiag.paletteFails++
+        flogWarn(`[cliffs] cliff palette[${p}] load threw:`, e instanceof Error ? e.message : String(e))
       }),
     )
   }
@@ -347,8 +365,9 @@ export async function renderCliffs(
     }
     if (!model || !model.geosets || model.geosets.length === 0) {
       failed += group.length
+      cliffDiag.meshMissPaths++
       if (failed === group.length || failed < 10) {
-        flog(`[cliffs miss] ${path} (×${group.length} cells)`)
+        flogWarn(`[cliffs miss] ${path} (×${group.length} cells)`)
       }
       continue
     }
@@ -361,8 +380,10 @@ export async function renderCliffs(
     renderer.addMesh(path, model, insts)
     placed += group.length
   }
+  cliffDiag.lastPlaced = placed
+  cliffDiag.lastFailedCells = failed
   if (failed > 0) {
-    flog(`[cliffs] placed=${placed} failed=${failed} unique-paths=${byPath.size}`)
+    flogWarn(`[cliffs] placed=${placed} failed=${failed} unique-paths=${byPath.size}`)
   } else {
     flog(`[cliffs] placed=${placed} unique-paths=${byPath.size}`)
   }

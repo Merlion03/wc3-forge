@@ -40,7 +40,7 @@
   import CameraOrbitGizmo from './CameraOrbitGizmo.svelte'
   import DiagnosticsOverlay from './DiagnosticsOverlay.svelte'
   import { showToast } from './toast'
-  import { flog, flogError, setLogLevel } from './debuglog'
+  import { flog, flogError, flogDebug, setLogLevel } from './debuglog'
   import { registerDiag } from './diag-registry'
   import { loadIconURL } from './icon-loader'
   import { TEAM_COLORS_RGB } from './sloc-markers'
@@ -598,6 +598,22 @@
   const ENTITY_EVENT = 'wc3-forge:entity-changed'
   const DEV_ANIM_EVENT = 'wc3-forge:dev-set-anim'
 
+  // ----- Wails-event-subscription health (diagnostics) -----
+  //
+  // Every named EventsOn subscription bumps its {count, lastTs} here on each
+  // delivery (via bumpEvent()). The 'events' diag provider exposes the map so
+  // a SILENTLY-UNFIRED subscription is visible: count===0 means Go never
+  // emitted (or the listener was registered against a stale event name) for an
+  // event we expect to flow — e.g. selection-changed staying at 0 after a
+  // click is the signature of a broken selection round-trip. O(1), no GL, no
+  // scene scan: just a counter bump per delivery and a shallow copy on read.
+  const eventStats: Record<string, { count: number; lastTs: number }> = {}
+  function bumpEvent(name: string) {
+    const s = eventStats[name] ?? (eventStats[name] = { count: 0, lastTs: 0 })
+    s.count++
+    s.lastTs = Date.now()
+  }
+
   onMount(async () => {
     try {
       try { reforged = await GetReforgedMode() } catch { reforged = false }
@@ -612,6 +628,21 @@
       if (verboseLogging) setLogLevel('debug')
       // Pump-health provider — appears in both the overlay and diagnostics.get.
       registerDiag('pump', () => ({ ...pumpHealth }))
+      // Event-subscription health provider. Pre-seed the events we subscribe to
+      // below so a never-delivered one reports count:0 (visible "silent
+      // subscription") rather than being absent from the map entirely.
+      for (const n of [
+        'casc-remounted', MAP_EVENT, DEV_ANIM_EVENT, DIRTY_EVENT, ENTITY_EVENT,
+        SEL_EVENT, 'history-changed', 'close-requested', 'test-command',
+      ]) {
+        eventStats[n] = { count: 0, lastTs: 0 }
+      }
+      registerDiag('events', () => {
+        // Shallow-copy each entry so the snapshot is an inert plain object.
+        const out: Record<string, { count: number; lastTs: number }> = {}
+        for (const k in eventStats) out[k] = { ...eventStats[k] }
+        return out
+      })
       ;(window as any).__scene = scene
       // Push diagnostics to Go ~5Hz so the diagnostics.get MCP tool can peek at
       // the live viewport numbers without a screenshot — runs regardless of the
@@ -665,10 +696,12 @@
     // install as empty/failed, so purge that cache and reload the scene to
     // re-fetch them through the new mount — no restart needed.
     EventsOn('wc3-forge:casc-remounted', async () => {
+      bumpEvent('casc-remounted')
       scene?.purgeResourceCache()
       if ((await Status()).loaded) await reloadMap({ keepCamera: true })
     })
     EventsOn(MAP_EVENT, async () => {
+      bumpEvent(MAP_EVENT)
       status = await Status()
       // Bump the minimap-reload generation on every map-changed event so the
       // Minimap component refetches its image + terrain coords. Covers both
@@ -696,6 +729,7 @@
       }
     })
     EventsOn(DEV_ANIM_EVENT, (payload: { creation_number: number; anim_name: string }) => {
+      bumpEvent(DEV_ANIM_EVENT)
       scene?.setUnitAnimation(payload.creation_number, payload.anim_name)
     })
     // Verification harness. Triggered by Go-side --pick-self-test flag (which
@@ -731,9 +765,13 @@
       }
     }
     EventsOn(DIRTY_EVENT, (payload: { dirty: boolean }) => {
+      bumpEvent(DIRTY_EVENT)
       dirty = !!payload?.dirty
+      // dirty-state consistency trace — silent unless Verbose Logging is on.
+      flogDebug(`[dirty] dirty=${dirty}`)
     })
     EventsOn(ENTITY_EVENT, async (payload: { kind: string; id: number; field: string; position: number[] }) => {
+      bumpEvent(ENTITY_EVENT)
       if (!payload) return
       if (payload.kind === 'terrain') {
         // Tileset swap (initial Apply, Undo, or Redo) — palette + per-tile
@@ -745,10 +783,18 @@
         return
       }
       if (payload.kind === 'unit') {
-        if (!primaryEntity || primaryEntity.CreationNumber !== payload.id) return
+        if (!primaryEntity || primaryEntity.CreationNumber !== payload.id) {
+          // entity-changed drop: a unit other than the focused primary changed,
+          // so no Properties-panel refresh is needed. Noisy → debug-level.
+          flogDebug(`[entity] drop unit id=${payload.id} (not primary)`)
+          return
+        }
         try { primaryEntity = await GetUnit(payload.id) } catch { /* ignore */ }
       } else if (payload.kind === 'doodad') {
-        if (!primaryDoodad || primaryDoodad.creation_number !== payload.id) return
+        if (!primaryDoodad || primaryDoodad.creation_number !== payload.id) {
+          flogDebug(`[entity] drop doodad id=${payload.id} (not primary)`)
+          return
+        }
         const p = payload.position
         if (!p || p.length < 3) return
         primaryDoodad = { ...primaryDoodad, position: [p[0], p[1], p[2]] }
@@ -760,8 +806,11 @@
       }
     })
     EventsOn(SEL_EVENT, async (s: main.SelectionDTO) => {
+      bumpEvent(SEL_EVENT)
       ingestSelection(s)
       const items = s.items || []
+      // selection round-trip trace — silent unless Verbose Logging is on.
+      flogDebug(`[selection] items=${items.length} primary=${s.primary}`)
       if (items.length === 0) {
         primaryEntity = null
         primaryDoodad = null
@@ -794,12 +843,14 @@
     try { dirty = await IsDirty() } catch { dirty = false }
     await refreshHistoryState()
     EventsOn('wc3-forge:history-changed', () => {
-      flog('[history] wc3-forge:history-changed received')
+      bumpEvent('history-changed')
+      flogDebug('[history] wc3-forge:history-changed received')
       void refreshHistoryState()
     })
     // Window-close gate: Go's OnBeforeClose handler emits this event when
     // the user tries to close a dirty session. Show the confirmation modal.
     EventsOn('wc3-forge:close-requested', () => {
+      bumpEvent('close-requested')
       flog('[quit-guard] close-requested fired (dirty session)')
       quitGuardOpen = true
     })
@@ -814,6 +865,7 @@
     // clicks (WebView2 can drop synthetic input — see memory). Subscribed
     // to the Wails event and dispatched per the simple text command format.
     EventsOn('wc3-forge:test-command', (payload: { cmd: string }) => {
+      bumpEvent('test-command')
       const cmd = payload?.cmd || ''
       const [op, ...args] = cmd.trim().split(/\s+/)
       switch (op) {
@@ -1006,7 +1058,7 @@
       if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
       e.preventDefault()
       e.stopPropagation()
-      flog(`[hotkey] ${e.shiftKey ? 'redo' : 'undo'} canUndo=${canUndo} canRedo=${canRedo}`)
+      flogDebug(`[hotkey] ${e.shiftKey ? 'redo' : 'undo'} canUndo=${canUndo} canRedo=${canRedo}`)
       if (e.shiftKey) void doRedo()
       else            void doUndo()
     }

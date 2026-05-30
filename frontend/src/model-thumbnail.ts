@@ -22,8 +22,27 @@
 import * as MV_ns from 'mdx-m3-viewer'
 import { pathSolver } from './scene-instances'
 import { patchMdxParser } from './mdx-parser-patch'
+import { registerDiag } from './diag-registry'
 
 const MV: any = (MV_ns as any).default ?? MV_ns
+
+// --- Diagnostics counters (U6) -------------------------------------------
+// The thumbnail renderer is a quiet silent-failure site: a model that can't
+// load / can't render just falls back to the 2D icon with no log. Count the
+// outcomes (BEFORE the negative-cache write) so diagnostics.get / the F9
+// overlay can surface a rash of unrenderable models. *Fails/*Miss suffix →
+// overlay auto-red-tint.
+const thumbDiag = {
+  rendered: 0,        // produced a non-empty Blob URL
+  loadMiss: 0,        // every candidate model path failed to load
+  renderFails: 0,     // model loaded but capture/render threw or yielded ''
+  viewerBuildFails: 0, // shared offscreen ModelViewer couldn't be built
+}
+registerDiag('thumbnails', () => ({
+  ...thumbDiag,
+  cached: cache.size,
+  buildFailed,
+}))
 
 // Thumbnail resolution. 128² is plenty for a ~52px grid cell at 2× DPI and
 // keeps per-capture cost (and the PNG size) low.
@@ -121,7 +140,7 @@ function canvasToBlobURL(c: HTMLCanvasElement): Promise<string> {
 }
 
 async function renderOne(paths: string[], reforged: boolean): Promise<string> {
-  if (!ensureViewer(reforged) || !viewer) return ''
+  if (!ensureViewer(reforged) || !viewer) { thumbDiag.viewerBuildFails++; return '' }
   // First model path that loads wins (variant → unsuffixed → other-extension,
   // same chain placeDoodad walks).
   let model: any = null
@@ -132,7 +151,7 @@ async function renderOne(paths: string[], reforged: boolean): Promise<string> {
       if (m && typeof m.addInstance === 'function') { model = m; break }
     } catch { /* try next */ }
   }
-  if (!model) return ''
+  if (!model) { thumbDiag.loadMiss++; return '' }
 
   const inst = model.addInstance()
   inst.setScene(scene)
@@ -165,6 +184,7 @@ async function renderOne(paths: string[], reforged: boolean): Promise<string> {
   } catch { /* fall through to capture whatever's there */ }
 
   const url = canvas ? await canvasToBlobURL(canvas) : ''
+  if (url) thumbDiag.rendered++; else thumbDiag.renderFails++
   // Detach the instance but keep the model + textures in the viewer's resource
   // cache — re-rendering a shared model/texture later is then nearly free.
   try { inst.detach() } catch { /* already gone */ }

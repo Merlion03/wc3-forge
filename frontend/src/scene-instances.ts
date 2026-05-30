@@ -28,8 +28,8 @@
 //   Wails map-changed event fires.
 
 import * as MV_ns from 'mdx-m3-viewer'
-import { flog, flogDebug, flogError, getLogLevel } from './debuglog'
-import { collectDiag } from './diag-registry'
+import { flog, flogDebug, flogError, flogWarn, getLogLevel } from './debuglog'
+import { collectDiag, registerDiag } from './diag-registry'
 import { patchMdxParser } from './mdx-parser-patch'
 import {
   ListUnits, ListDoodads, GetUnitTypeIndex, GetDoodadTypeIndex, GetTerrain,
@@ -60,6 +60,45 @@ import { buildGizmo, type GizmoRenderer, type SelectionItem as GizmoSelectionIte
 patchMdxParser()
 
 const MV: any = (MV_ns as any).default ?? MV_ns
+
+// --- Scene diagnostics (U5 scene-load stats + U6 swallowed-error counters) ---
+//
+// Module-level so the registry provider (registered once at module init) reads
+// stable precomputed counters WITHOUT touching gl.* or scanning the instance
+// maps. createScene mutates these via its own closures (loadMap sets the load
+// summary; placeUnit/placeDoodad and the viewer.on('error') handler bump the
+// failure counters). One canvas/scene per process is the norm; a second
+// createScene would just overwrite — acceptable, the editor only ever mounts
+// one viewport.
+//
+// CONTRACT (see diag-registry.ts): O(1), no gl.*, no instance-map scans. Every
+// field below is an integer/string already computed elsewhere. Failure
+// counters carry a *Fails/*Skipped suffix so the F9 overlay auto-red-tints
+// them. unitsPlaced/doodadsPlaced etc. live in `lastLoad`, set at the end of
+// loadMap from counters accumulated during the placement walk.
+const sceneDiag = {
+  // U5 scene-load stats.
+  loadingMap: false,       // true while a loadMap() is in flight
+  loadGeneration: 0,       // increments once per loadMap() start
+  loadMs: 0,               // wall-clock duration of the most recent loadMap()
+  terrainDrawCalls: 0,     // terrain mesh draw calls (integer, set on build)
+  lastLoad: {
+    unitsPlaced: 0,
+    unitsSkipped: 0,
+    doodadsPlaced: 0,
+    doodadsSkipped: 0,
+    pathBlockers: 0,
+    slocs: 0,
+    topSkipTypeIds: [] as string[],
+  },
+  // U6 swallowed-error counters (the real silent-failure sites).
+  unitModelFails: 0,       // placeUnit: viewer.load threw / no model
+  doodadModelFails: 0,     // placeDoodad: every candidate path failed
+  viewerErrors: 0,         // distinct viewer.on('error') events (deduped)
+  zeroGeosetModels: 0,     // placed but geosets==0 → invisible (see flogWarn)
+}
+registerDiag('scene', () => ({ ...sceneDiag }))
+
 // The previous version of this file ran a corrective re-patch here at module
 // load to fix a broken readAnimations override in mdx-parser-patch.ts (commit
 // dc0aaa0). That correction has been consolidated INTO mdx-parser-patch.ts
@@ -760,8 +799,13 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const url = (target as any)?.fetchUrl ?? '(no url)'
     const key = msg + ' :: ' + url
     if (seenErrors.has(key)) return
+    // Bump the diagnostics counter BEFORE the dedupe-gate so the FIRST
+    // occurrence of each distinct (msg, url) is counted once even though the
+    // log dedupes (the overlay wants "how many distinct asset failures", not
+    // the per-frame spam count).
+    sceneDiag.viewerErrors++
     seenErrors.add(key)
-    flog('[viewer error]', msg, 'url:', url)
+    flogWarn('[viewer error]', msg, 'url:', url)
   })
 
   let crashed = false
@@ -1254,10 +1298,20 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     try {
       model = await viewer.load(path, pathSolver)
     } catch (e) {
-      flog('[unit load fail]', unit.type_id, path, e instanceof Error ? e.message : String(e))
+      sceneDiag.unitModelFails++
+      flogWarn('[unit load fail]', unit.type_id, path, e instanceof Error ? e.message : String(e))
       return null
     }
-    if (!model || typeof model.addInstance !== 'function') return null
+    if (!model || typeof model.addInstance !== 'function') { sceneDiag.unitModelFails++; return null }
+
+    // Placed-but-invisible guard: a model that parsed but has zero geosets
+    // renders nothing yet counts as "placed". Bump a dedicated counter +
+    // flogWarn so a rash of these (e.g. a parser-patch regression) is visible
+    // in diagnostics rather than masked by a healthy placed=N.
+    if ((model.geosets?.length ?? -1) === 0) {
+      sceneDiag.zeroGeosetModels++
+      flogWarn('[unit zero-geoset]', unit.type_id, path)
+    }
 
     const inst = model.addInstance()
     inst.move([unit.position[0], unit.position[1], unit.position[2] + info.move_height])
@@ -1333,7 +1387,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (model && typeof model.addInstance === 'function') break
       try { model = await viewer.load(p, pathSolver); chosenPath = p } catch { /* swallow, try next */ }
     }
-    if (!model || typeof model.addInstance !== 'function') return null
+    if (!model || typeof model.addInstance !== 'function') { sceneDiag.doodadModelFails++; return null }
+
+    // Placed-but-invisible guard (same rationale as placeUnit): a doodad model
+    // that parsed with zero geosets renders nothing but counts as placed.
+    if ((model.geosets?.length ?? -1) === 0) {
+      sceneDiag.zeroGeosetModels++
+      flogWarn('[doodad zero-geoset]', d.type_id, chosenPath)
+    }
 
     // DIAGNOSTIC: print per-doodad geometry counts so we can correlate
     // "log says placed=N" with "user sees actual MDX on screen." If geosets
@@ -2481,6 +2542,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     },
     async loadMap(opts?: { keepCamera?: boolean }) {
       const keepCamera = !!opts?.keepCamera
+      // U5 scene-load stats: mark in-flight, bump generation, start the timer.
+      // loadMs / lastLoad are committed in the finally below so a thrown
+      // terrain/asset load still reports a (partial) duration + the placement
+      // tallies accumulated up to the failure point.
+      sceneDiag.loadingMap = true
+      sceneDiag.loadGeneration++
+      const loadStartTs = performance.now()
+      try {
       clearInstances()
       // Terrain first so it's visible even while units/doodads stream in.
       try {
@@ -2498,6 +2567,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         }
         const gl = (viewer as any).gl as WebGLRenderingContext
         terrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
+        sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
         if (terrain && !keepCamera) {
           // Frame the map. width/height in w3e are vertex counts; tile size
           // is 128, so playable span is roughly (width-1)*128 in each axis.
@@ -2712,21 +2782,38 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       // accurate in the same flog line.
       pathBlockers?.setMarkers(pathBlockerMarkers)
       flog(`[loadMap] units placed=${uPlaced} skipped=${uSkipped}, doodads placed=${dPlaced} skipped=${dSkipped} pathBlockers=${pathBlockerCount} doodad-bbox=x[${xmin.toFixed(0)},${xmax.toFixed(0)}] y[${ymin.toFixed(0)},${ymax.toFixed(0)}] slocs=${slocMarkers.length}`)
+      // Top skipped type-ids, sorted by skip count desc — same ordering the
+      // audit log uses, kept as a string[] for the diagnostics summary.
+      const topSkipTypeIds = [...skipReasons.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([id, n]) => `${id}×${n}`)
       if (skipReasons.size > 0) {
-        // Top 8 most-skipped type IDs so we can spot patterns in missing
-        // doodad assets without flooding the log.
-        const top = [...skipReasons.entries()]
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 8)
-          .map(([id, n]) => `${id}×${n}`)
-          .join(' ')
-        flog(`[doodad audit] skipped-type-ids: ${top}`)
+        flog(`[doodad audit] skipped-type-ids: ${topSkipTypeIds.join(' ')}`)
       }
       for (const line of sampleAudits) {
         flog(`[doodad audit] ${line}`)
       }
+      // U5: commit the scene-load summary so diagnostics.get / the F9 overlay
+      // can read the last load's placement tallies without re-walking anything.
+      sceneDiag.lastLoad = {
+        unitsPlaced: uPlaced,
+        unitsSkipped: uSkipped,
+        doodadsPlaced: dPlaced,
+        doodadsSkipped: dSkipped,
+        pathBlockers: pathBlockerCount,
+        slocs: slocMarkers.length,
+        topSkipTypeIds,
+      }
       // Build the ordered present-categories list for the View menu.
       recomputeDoodadCategories()
+      } finally {
+        // Always commit the timing + clear the in-flight flag, even if terrain
+        // or asset loading threw partway through, so the overlay never sticks
+        // at loadingMap=true.
+        sceneDiag.loadMs = Math.round(performance.now() - loadStartTs)
+        sceneDiag.loadingMap = false
+      }
     },
     clear() {
       clearInstances()

@@ -24,6 +24,7 @@
 // throws "Cannot read properties of undefined (reading 'Image')" and the
 // minimap shows "No minimap" even though Go returned the BLP bytes.
 import parsersModule from 'mdx-m3-viewer/dist/cjs/parsers'
+import { registerDiag } from './diag-registry'
 const parsers: any = (parsersModule as any)?.default ?? parsersModule
 
 // path -> data URL ("" once we've confirmed a 404 or decode failure, so
@@ -32,6 +33,22 @@ const cache = new Map<string, string>()
 // path -> in-flight promise so concurrent requests for the same asset
 // share a single fetch + decode pass.
 const inflight = new Map<string, Promise<string>>()
+
+// --- Diagnostics counters (U6) -------------------------------------------
+// Precomputed integers bumped at the silent-failure sites below (BEFORE any
+// negative-cache write, so a still-cached-as-"" failure is counted once on the
+// first miss). The "scene" registry surfaces them via diagnostics.get + the F9
+// overlay; the *Fails/*Miss suffix triggers the overlay's auto-red-tint.
+const iconDiag = {
+  decoded: 0,        // successful BLP/DDS/TGA decodes (non-empty data URL)
+  fetchFails: 0,     // network/404 (resp not ok, or fetch threw)
+  decodeFails: 0,    // got bytes but decode produced no image (bad magic, 0×0)
+  unknownMagicMiss: 0, // bytes didn't match BLP1/BLP2/DDS magic
+}
+registerDiag('icons', () => ({
+  ...iconDiag,
+  cached: cache.size,
+}))
 
 /**
  * Resolve an icon asset path to a Blob URL suitable for <img src=...>.
@@ -50,6 +67,7 @@ export function loadIconURL(assetPath: string): Promise<string> {
   if (existing) return existing
   const p = decodeIcon(assetPath)
     .then(url => {
+      if (url) iconDiag.decoded++
       cache.set(assetPath, url)
       inflight.delete(assetPath)
       return url
@@ -58,6 +76,9 @@ export function loadIconURL(assetPath: string): Promise<string> {
       // Log once-per-path so a missing icon doesn't spam the console for
       // every Explorer row that references it.
       // console.warn('icon decode failed:', assetPath, err)
+      // Count BEFORE the negative-cache write so the swallowed throw shows up
+      // in diagnostics.get instead of vanishing into cache.set('').
+      iconDiag.decodeFails++
       cache.set(assetPath, '')
       inflight.delete(assetPath)
       return ''
@@ -69,9 +90,9 @@ export function loadIconURL(assetPath: string): Promise<string> {
 async function decodeIcon(assetPath: string): Promise<string> {
   const url = '/asset/' + assetPath
   const resp = await fetch(url)
-  if (!resp.ok) return ''
+  if (!resp.ok) { iconDiag.fetchFails++; return '' }
   const buf = new Uint8Array(await resp.arrayBuffer())
-  if (buf.byteLength < 4) return ''
+  if (buf.byteLength < 4) { iconDiag.decodeFails++; return '' }
   // Magic-byte dispatch. The asset handler swaps BLP <-> DDS siblings on
   // miss, so what we asked for may not be what we got. Always sniff bytes.
   const magic = (buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24)) >>> 0
@@ -84,6 +105,7 @@ async function decodeIcon(assetPath: string): Promise<string> {
   if (magic === 0x20534444 /* 'DDS ' */) {
     return decodeDDS(buf)
   }
+  iconDiag.unknownMagicMiss++
   return ''
 }
 

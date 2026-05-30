@@ -29,8 +29,8 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3r"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wct"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wpm"
-	"github.com/StephenSHorton/wc3-forge/internal/formats/wts"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/wtg"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/wts"
 )
 
 // fileSource abstracts "where does a file's bytes come from" so the same
@@ -180,6 +180,10 @@ func (m *mpqSource) read(name string) ([]byte, bool, error) {
 	}
 	b, err := m.a.Read(name)
 	if err != nil {
+		// mapIO diagnostics: an archive read that failed (decompress / corrupt
+		// block). Previously surfaced only to the immediate caller; the counter
+		// makes a flaky source observable in diagnostics.get.
+		mapIODiag.mpqReadErrors.Add(1)
 		return nil, false, err
 	}
 	return b, true, nil
@@ -290,13 +294,13 @@ type Session struct {
 	// synthetic Map Header script entry's CustomText back into the script
 	// file. mapHeaderScriptName carries the chosen filename
 	// (war3map.lua | war3map.j).
-	triggerIsHandRolled    bool
-	mapHeaderScriptName    string
-	mapHeaderScriptDirty   bool
+	triggerIsHandRolled  bool
+	mapHeaderScriptName  string
+	mapHeaderScriptDirty bool
 
-	selection      SelectionState
-	listeners      []func(SelectionState)
-	mapListeners   []func(bool) // fired after Open/Close; bool = loaded
+	selection    SelectionState
+	listeners    []func(SelectionState)
+	mapListeners []func(bool) // fired after Open/Close; bool = loaded
 
 	// Dirty tracking — per-file granularity. Save iterates these and writes
 	// only the dirty files back through the source's write path. Open + Close
@@ -308,11 +312,11 @@ type Session struct {
 	// the files that actually changed. Mutator fires dirty=true on the
 	// 0→1 transition of (dirtyUnits || dirtyDoodads || dirtyInfo), Save
 	// fires dirty=false on the 1→0 transition.
-	dirtyUnits     bool
-	dirtyDoodads   bool
-	dirtyInfo      bool
-	dirtyTerrain   bool
-	dirtyGameplay  bool
+	dirtyUnits    bool
+	dirtyDoodads  bool
+	dirtyInfo     bool
+	dirtyTerrain  bool
+	dirtyGameplay bool
 	// dirtyXMods tracks pending edits to a per-map war3map.w3* shadow (the
 	// Object Editor's add-custom / delete-custom / set-field surface). Kept
 	// separate from dirtyUnits/dirtyDoodads (which track placed-instance .doo
@@ -334,7 +338,7 @@ type Session struct {
 	// edits). Save flushes both files atomically when set. Hand-rolled-script
 	// maps additionally bear mapHeaderScriptDirty for the script-source
 	// write path.
-	dirtyTriggers  bool
+	dirtyTriggers bool
 	// dirtyImports tracks pending edits to the war3map.imp import table from
 	// ImportModel (model + texture registration). The imported byte files
 	// themselves go through s.source.write directly (and so are already
@@ -462,6 +466,20 @@ var Current = &Session{}
 //
 // war3map.w3i is required; everything else is best-effort.
 func (s *Session) Open(path string) error {
+	// mapIO diagnostics: time the whole Open + collect a per-open manifest of
+	// the war3map.* files present and their sizes. recordOpenManifest captures
+	// the snapshot after a successful state swap; an error return before that
+	// bumps openFails so a failed open isn't silent. See mapio_diag.go.
+	openStart := time.Now()
+	manifest := &mapOpenManifest{}
+	opened := false // flipped true after the successful state swap below
+	defer func() {
+		// Any return before the swap (opened==false) is a failed open — count
+		// it so a map that won't load isn't silent in diagnostics.get.
+		if !opened {
+			mapIODiag.openFails.Add(1)
+		}
+	}()
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
@@ -470,12 +488,15 @@ func (s *Session) Open(path string) error {
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", abs, err)
 	}
+	manifest.Path = abs
 
 	var src fileSource
 	var rawMapBytes []byte
 	if fi.IsDir() {
+		manifest.SourceKind = "folder"
 		src = folderSource{root: abs}
 	} else {
+		manifest.SourceKind = "mpq"
 		// Read the whole .w3x into memory once. mdx-m3-viewer's
 		// War3MapViewer.loadMap wants the raw bytes, and we also want
 		// the archive open for per-file asset reads via pathSolver.
@@ -548,7 +569,11 @@ func (s *Session) Open(path string) error {
 			sm, perr := shd.Parse(shdBytes, int(terrain.Width), int(terrain.Height))
 			if perr != nil {
 				// Recoverable: shd.Parse returns a usable zero-fill File along
-				// with the warning. Log and proceed.
+				// with the warning. Previously this error was swallowed silently;
+				// surface it via mapIO diagnostics (count + last-error) and a
+				// [WARN] log so a recovered/failed shadow map is observable.
+				log.Printf("[WARN] Open: war3map.shd parse failed, recovering with zero-fill: %v", perr)
+				recordShadowMapFail(perr.Error())
 				if sm != nil {
 					shadowMap = sm
 				}
@@ -641,6 +666,19 @@ func (s *Session) Open(path string) error {
 	// hand-rolled-script synth picks the right script file when needed.
 	triggers, triggersWct, isHandRolled, scriptName := loadTriggersForOpenV2(src, info != nil && info.Lua)
 
+	// mapIO diagnostics: classify what trigger files actually resolved at Open
+	// (none / wtg-only / wtg+wct / error) so a map whose triggers silently
+	// failed to parse is visible. "error" means the .wtg/.wct were present but
+	// produced no usable tree (parse failure logged in loadTriggersForOpenV2);
+	// a hand-rolled-script synth counts as a wtg-equivalent ("wtg-only").
+	triggerLoadStatus := classifyTriggerLoadStatus(src, triggers, triggersWct)
+
+	// mapIO diagnostics: probe presence + size of the standard war3map.* files
+	// for the per-open manifest. Cheap re-read against the already-open source
+	// (folder: a stat+read; mpq: a buffered archive read). Done before the swap
+	// so a slow probe doesn't hold the session lock.
+	manifest.Files = collectMapFilePresence(src)
+
 	// Atomically swap state; close any previously-held source before stomping it.
 	s.mu.Lock()
 	prevSource := s.source
@@ -703,6 +741,13 @@ func (s *Session) Open(path string) error {
 	if prevSource != nil {
 		_ = prevSource.close()
 	}
+	// mapIO diagnostics: the swap succeeded — record the manifest + trigger
+	// status and mark this Open as successful so the deferred openFails guard
+	// is a no-op. recordOpenManifest copies the pointer pull-only; nothing here
+	// mutates manifest after this point.
+	manifest.OpenMs = time.Since(openStart).Milliseconds()
+	recordOpenManifest(manifest, triggerLoadStatus)
+	opened = true
 	s.notifySelection()
 	s.notifyMapChanged(true)
 	if wasDirty {
@@ -712,6 +757,56 @@ func (s *Session) Open(path string) error {
 		s.notifyHistoryChanged()
 	}
 	return nil
+}
+
+// collectMapFilePresence probes the standard war3map.* set against an open
+// source and returns each present file's name + uncompressed size, for the
+// mapIO per-open manifest. Absent files are omitted. read errors are skipped
+// (the manifest is best-effort observability, not a load gate).
+func collectMapFilePresence(src fileSource) []mapFilePresence {
+	names := []string{
+		"war3map.w3i", "war3map.w3e", "war3map.shd", "war3map.wpm",
+		"war3mapUnits.doo", "war3map.doo", "war3map.wts", "war3map.imp",
+		"war3map.w3d", "war3map.w3b", "war3map.w3u", "war3map.w3t",
+		"war3map.w3a", "war3map.w3h", "war3map.w3q",
+		"war3map.w3r", "war3map.w3c", "war3mapMisc.txt",
+		"war3map.wtg", "war3map.wct", "war3map.j", "war3map.lua",
+	}
+	out := make([]mapFilePresence, 0, len(names))
+	for _, n := range names {
+		b, ok, err := src.read(n)
+		if err != nil || !ok {
+			continue
+		}
+		out = append(out, mapFilePresence{Name: n, Bytes: len(b)})
+	}
+	return out
+}
+
+// classifyTriggerLoadStatus derives the triggerLoadStatus enum for the mapIO
+// manifest from the loaded trigger artefacts. Distinguishes the four cases an
+// agent cares about when "the Trigger Editor is empty": the map genuinely has
+// no triggers (none), a GUI tree loaded with/without its script blobs
+// (wtg-only / wtg+wct), or the .wtg/.wct were present but failed to parse into
+// a tree (error). A hand-rolled-script synth presents as a non-nil tree with no
+// wct, so it reports "wtg-only".
+func classifyTriggerLoadStatus(src fileSource, triggers *wtg.Triggers, wctFile *wct.File) string {
+	if triggers != nil {
+		if wctFile != nil {
+			return "wtg+wct"
+		}
+		return "wtg-only"
+	}
+	// No usable tree. If trigger files were present on disk, the loader failed
+	// to parse them — flag as "error" so the silent parse-failure path (logged
+	// in loadTriggersForOpenV2) is visible. Otherwise the map simply has none.
+	if _, hasWTG, _ := src.read("war3map.wtg"); hasWTG {
+		return "error"
+	}
+	if _, hasWCT, _ := src.read("war3map.wct"); hasWCT {
+		return "error"
+	}
+	return "none"
 }
 
 // readOpt fetches one optional file via src and runs its parser. Returns
@@ -2261,7 +2356,24 @@ func (s *Session) IsDirty() bool {
 // pure-Go MPQ writer (atomic temp-file + rename, so a failure never corrupts
 // the original). A clean (non-dirty) .w3x save takes the SAME repack path as a
 // dirty one — it does not falsely report success without writing.
-func (s *Session) Save() error {
+func (s *Session) Save() (err error) {
+	// mapIO diagnostics: trace every Save — its sequence id, which dirty files
+	// were written, total bytes, duration, and outcome. saveTrace.Written +
+	// .Bytes accumulate at each write site below; the deferred recorder snaps
+	// the final state (ok/error) regardless of which return fired. See
+	// mapio_diag.go. saveSeq is monotone so an agent can tell two saves apart.
+	saveStart := time.Now()
+	mapIODiag.saves.Add(1)
+	saveTrace := &mapSaveTrace{Seq: mapIODiag.saveSeq.Add(1)}
+	defer func() {
+		saveTrace.SaveMs = time.Since(saveStart).Milliseconds()
+		saveTrace.OK = err == nil
+		if err != nil {
+			saveTrace.Error = err.Error()
+		}
+		recordSaveTrace(saveTrace)
+	}()
+
 	s.mu.Lock()
 	if !s.loaded {
 		s.mu.Unlock()
@@ -2309,6 +2421,14 @@ func (s *Session) Save() error {
 		return fmt.Errorf("no source for writing")
 	}
 
+	// noteWrite records one successfully-written file into the mapIO save trace.
+	// Called immediately after each src.write succeeds so the trace lists only
+	// files that actually committed to the source buffer.
+	noteWrite := func(name string, n int) {
+		saveTrace.Written = append(saveTrace.Written, name)
+		saveTrace.Bytes += int64(n)
+	}
+
 	// Encode dirty files OUTSIDE the lock so the (potentially-slow) write
 	// doesn't block UI reads. Encode is pure over its inputs.
 	//
@@ -2324,6 +2444,7 @@ func (s *Session) Save() error {
 		if err := src.write("war3mapUnits.doo", data); err != nil {
 			return fmt.Errorf("write war3mapUnits.doo: %w", err)
 		}
+		noteWrite("war3mapUnits.doo", len(data))
 		s.mu.Lock()
 		s.dirtyUnits = false
 		s.mu.Unlock()
@@ -2336,6 +2457,7 @@ func (s *Session) Save() error {
 		if err := src.write("war3map.doo", data); err != nil {
 			return fmt.Errorf("write war3map.doo: %w", err)
 		}
+		noteWrite("war3map.doo", len(data))
 		s.mu.Lock()
 		s.dirtyDoodads = false
 		s.mu.Unlock()
@@ -2348,6 +2470,7 @@ func (s *Session) Save() error {
 		if err := src.write("war3map.w3i", data); err != nil {
 			return fmt.Errorf("write war3map.w3i: %w", err)
 		}
+		noteWrite("war3map.w3i", len(data))
 		s.mu.Lock()
 		s.dirtyInfo = false
 		s.mu.Unlock()
@@ -2360,6 +2483,7 @@ func (s *Session) Save() error {
 		if err := src.write("war3map.w3e", data); err != nil {
 			return fmt.Errorf("write war3map.w3e: %w", err)
 		}
+		noteWrite("war3map.w3e", len(data))
 		s.mu.Lock()
 		s.dirtyTerrain = false
 		s.mu.Unlock()
@@ -2386,6 +2510,7 @@ func (s *Session) Save() error {
 		if err := src.write("war3mapMisc.txt", data); err != nil {
 			return fmt.Errorf("write war3mapMisc.txt: %w", err)
 		}
+		noteWrite("war3mapMisc.txt", len(data))
 		s.mu.Lock()
 		s.dirtyGameplay = false
 		s.mu.Unlock()
@@ -2427,6 +2552,7 @@ func (s *Session) Save() error {
 			if err := src.write(scriptName, []byte(content)); err != nil {
 				return fmt.Errorf("write %s: %w", scriptName, err)
 			}
+			noteWrite(scriptName, len(content))
 			s.mu.Lock()
 			s.mapHeaderScriptDirty = false
 			s.mu.Unlock()
@@ -2447,6 +2573,7 @@ func (s *Session) Save() error {
 		if err := src.write("war3map.wtg", wtgData); err != nil {
 			return fmt.Errorf("write war3map.wtg: %w", err)
 		}
+		noteWrite("war3map.wtg", len(wtgData))
 		// wct is required for any map that has custom-script triggers OR
 		// a global JASS header. Allocate a default if the loaded map
 		// didn't ship one so newly-created script triggers persist.
@@ -2466,6 +2593,7 @@ func (s *Session) Save() error {
 		if err := src.write("war3map.wct", wctData); err != nil {
 			return fmt.Errorf("write war3map.wct: %w", err)
 		}
+		noteWrite("war3map.wct", len(wctData))
 		s.mu.Lock()
 		s.dirtyTriggers = false
 		s.triggersWct = wctFile
@@ -2483,9 +2611,11 @@ func (s *Session) Save() error {
 			// dirty flag, but never crash if a future path trips this.
 			impFile = &imp.File{Version: 1}
 		}
-		if err := src.write("war3map.imp", impFile.Encode()); err != nil {
+		impData := impFile.Encode()
+		if err := src.write("war3map.imp", impData); err != nil {
 			return fmt.Errorf("write war3map.imp: %w", err)
 		}
+		noteWrite("war3map.imp", len(impData))
 		s.mu.Lock()
 		s.dirtyImports = false
 		s.mu.Unlock()
@@ -2515,6 +2645,7 @@ func (s *Session) Save() error {
 		if err := src.write(scriptName, updated); err != nil {
 			return fmt.Errorf("write %s: %w", scriptName, err)
 		}
+		noteWrite(scriptName, len(updated))
 		s.mu.Lock()
 		s.pendingSkyModel = nil
 		s.mu.Unlock()
