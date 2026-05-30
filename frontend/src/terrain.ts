@@ -65,7 +65,26 @@
 // Drawn between viewer.startFrame() and viewer.render() so it lands in the
 // depth buffer before unit instances.
 
-import { flog } from './debuglog'
+import { flog, flogWarn } from './debuglog'
+import { registerDiag } from './diag-registry'
+
+// --- Diagnostics counters (U6 + U5) --------------------------------------
+// Terrain build has several quiet silent-failure sites: a palette .dds that
+// 404s (cell falls back to flat color), an FBO-incomplete atlas blit (whole
+// terrain aborts to null → invisible ground), and a dim/heights mismatch.
+// These currently only flog. Surface them as precomputed integers + a small
+// status string so diagnostics.get / the F9 overlay can flag a map whose
+// terrain silently failed. *Fails suffix → overlay auto-red-tint. terrain
+// atlasStatus is the U5 "scene-load stats" health field for the atlas blit.
+const terrainDiag = {
+  atlasStatus: 'none' as 'none' | 'ok' | 'fbo-incomplete' | 'failed',
+  lastPalettes: 0,
+  lastAtlasW: 0,
+  lastAtlasH: 0,
+  paletteFails: 0,    // cumulative: palette textures that failed to load
+  fboIncompleteFails: 0, // cumulative: atlas FBO came back incomplete
+}
+registerDiag('terrain', () => ({ ...terrainDiag }))
 
 // Matches the JSON shape App.GetTerrain returns. Field names are snake_case
 // because the Go side carries `json:"..."` struct tags (Wails honors those
@@ -344,7 +363,9 @@ function buildAtlas(
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, atlas, 0)
   const fbStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
   if (fbStatus !== gl.FRAMEBUFFER_COMPLETE) {
-    flog(`[terrain atlas] FBO incomplete: 0x${fbStatus.toString(16)}`)
+    terrainDiag.atlasStatus = 'fbo-incomplete'
+    terrainDiag.fboIncompleteFails++
+    flogWarn(`[terrain atlas] FBO incomplete: 0x${fbStatus.toString(16)}`)
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
     gl.deleteFramebuffer(fbo)
     gl.deleteTexture(atlas)
@@ -490,6 +511,10 @@ void main() {
   gl.bindTexture(gl.TEXTURE_2D, atlas)
   gl.generateMipmap(gl.TEXTURE_2D)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR)
+  terrainDiag.atlasStatus = 'ok'
+  terrainDiag.lastPalettes = numPalettes
+  terrainDiag.lastAtlasW = atlasW
+  terrainDiag.lastAtlasH = atlasH
   flog(`[terrain atlas] built ${atlasW}×${atlasH} (data ${atlasH_data}, padded=${padded}); mipmaps on, MIN=LINEAR_MIPMAP_LINEAR`)
 
   return { atlas, atlasW, atlasH, rows }
@@ -548,7 +573,8 @@ export async function buildTerrain(
     palettePromises.push(
       viewer.load(path, pathSolver).then((res: any) => {
         if (!res || !res.webglResource) {
-          flog(`[terrain] palette[${p}] (${t.palette[p]}) failed to load: ${path}`)
+          terrainDiag.paletteFails++
+          flogWarn(`[terrain] palette[${p}] (${t.palette[p]}) failed to load: ${path}`)
           return
         }
         const w = res.width as number
@@ -560,7 +586,8 @@ export async function buildTerrain(
         }
         flog(`[terrain] palette[${p}] (${t.palette[p]}) loaded ${w}×${h} extended=${extended} from ${path}`)
       }).catch((e: unknown) => {
-        flog(`[terrain] palette[${p}] (${t.palette[p]}) load threw:`,
+        terrainDiag.paletteFails++
+        flogWarn(`[terrain] palette[${p}] (${t.palette[p]}) load threw:`,
           e instanceof Error ? e.message : String(e))
       }),
     )
@@ -570,7 +597,11 @@ export async function buildTerrain(
   // ---- Composite atlas ----
   const atlasInfo = buildAtlas(gl, paletteTextures)
   if (!atlasInfo) {
-    flog('[terrain] atlas build failed; aborting')
+    // buildAtlas already set atlasStatus to 'fbo-incomplete' on the FBO path;
+    // mark the generic failure otherwise so the overlay shows SOMETHING went
+    // wrong rather than a stale 'ok' from a prior map.
+    if (terrainDiag.atlasStatus !== 'fbo-incomplete') terrainDiag.atlasStatus = 'failed'
+    flogWarn('[terrain] atlas build failed; aborting')
     return null
   }
   const { atlas, atlasW, atlasH, rows } = atlasInfo
