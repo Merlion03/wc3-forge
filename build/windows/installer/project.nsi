@@ -88,6 +88,14 @@ Section
 
     !insertmacro wails.files
 
+    # The wails.files macro only installs the binary. wc3-forge also needs the
+    # vendored CASC DLLs next to the exe (internal/casc loads CascLib.dll, which
+    # depends on zlib1.dll) — without them the CASC mount fails and maps render
+    # black. The postBuildHook (scripts/postbuild-copy-dlls.ps1) stages these
+    # into build/bin before the installer is built, so pull them from there.
+    File "..\..\bin\CascLib.dll"
+    File "..\..\bin\zlib1.dll"
+
     CreateShortcut "$SMPROGRAMS\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
     CreateShortCut "$DESKTOP\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
 
