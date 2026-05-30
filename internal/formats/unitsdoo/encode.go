@@ -36,8 +36,25 @@ func Encode(f *File) ([]byte, error) {
 	w.writeU32(f.SubVersion)
 	w.writeU32(uint32(len(f.Entities)))
 
+	// skin_id presence is a FILE-level property, not a per-entity one: WC3's
+	// parser (and ours) reads skin_id under a single uniform policy for the whole
+	// record stream. A file must therefore be encoded with EVERY entity agreeing
+	// on whether it carries a skin_id chunk — otherwise no uniform re-parse can
+	// consume the stream and Parse misaligns (the classic symptom is entity 0
+	// blowing up on a bogus drop_set[N], because a downstream entity's missing/
+	// extra 4 bytes shifts every subsequent read).
+	//
+	// The danger case: a file that was Parsed (so its entities carry the resolved
+	// per-file skinIDPresent decision) and then had a freshly-constructed unit
+	// APPENDED (parsed == false). The subversion alone does NOT determine skin_id
+	// presence (sub-9 Reforged re-saves carry it; some sub-11 maps omit it), so a
+	// hand-constructed entity that fell back to the subversion rule could disagree
+	// with the parsed entities around it. We resolve presence once, file-wide,
+	// from the parsed entities (the authoritative on-disk evidence) and apply it
+	// to every entity below. See fileSkinIDPolicy.
+	emitSkin := fileSkinIDPolicy(f)
 	for i, e := range f.Entities {
-		if err := writeEntity(w, &e, f.SubVersion); err != nil {
+		if err := writeEntity(w, &e, f.SubVersion, emitSkin); err != nil {
 			return nil, fmt.Errorf("entity %d: %w", i, err)
 		}
 	}
@@ -45,7 +62,35 @@ func Encode(f *File) ([]byte, error) {
 	return w.bytes(), nil
 }
 
-func writeEntity(w *writer, e *Entity, subversion uint32) error {
+// fileSkinIDPolicy decides, for the whole file, whether every entity's skin_id
+// chunk is emitted. It learns the answer from PARSED entities (those carry the
+// authoritative per-file presence decision Parse resolved by trial); a single
+// parsed entity with skinIDPresent == true means the on-disk file carried
+// skin_id, so all entities — including freshly-appended hand-constructed ones —
+// must emit it to keep the stream uniformly parseable.
+//
+// When the file has NO parsed entities to learn from (a fully hand-constructed
+// File), it falls back to the subversion rule (>= 11 emits, < 11 omits), which
+// matches the historical CreateUnit-then-save behavior for brand-new maps.
+func fileSkinIDPolicy(f *File) bool {
+	sawParsed := false
+	for i := range f.Entities {
+		if f.Entities[i].parsed {
+			sawParsed = true
+			if f.Entities[i].skinIDPresent {
+				return true
+			}
+		}
+	}
+	if sawParsed {
+		// Every parsed entity agreed skin_id is absent on disk; honor that even
+		// at subversion >= 11 (e.g. Green Circle TD).
+		return false
+	}
+	return f.SubVersion >= 11
+}
+
+func writeEntity(w *writer, e *Entity, subversion uint32, emitSkinID bool) error {
 	// type_id: 4 bytes, exactly.
 	if len(e.TypeID) != 4 {
 		return fmt.Errorf("type_id %q must be exactly 4 bytes", e.TypeID)
@@ -71,25 +116,15 @@ func writeEntity(w *writer, e *Entity, subversion uint32) error {
 		}
 	}
 
-	// skin_id: present whenever the original on-disk record carried it.
-	//
-	// skin_id presence is NOT a reliable function of the subversion (a
-	// subversion-11 map may omit it entirely — e.g. Green Circle TD — and a
-	// subversion-9 Reforged re-save may include it). Parse therefore resolves
-	// presence per-file by trial and records the result in skinIDPresent.
-	//
-	//   - PARSED entities (e.parsed): trust skinIDPresent verbatim so the
-	//     round-trip is byte-faithful regardless of subversion.
-	//   - HAND-CONSTRUCTED entities (CreateUnit etc., e.parsed == false):
-	//     skinIDPresent is meaningless, so fall back to the subversion rule
-	//     (>= 11 emits a chunk, < 11 omits it). CreateUnit defaults SkinID to
-	//     the TypeID, which keeps subversion-11 saves valid.
-	var emitSkinID bool
-	if e.parsed {
-		emitSkinID = e.skinIDPresent
-	} else {
-		emitSkinID = subversion >= 11
-	}
+	// skin_id: present whenever the FILE carries it. emitSkinID is the single
+	// file-wide decision resolved by fileSkinIDPolicy (see Encode) — every entity
+	// in a file MUST agree, because the parser reads skin_id under one uniform
+	// policy for the whole record stream. Per-entity disagreement (e.g. a parsed
+	// sub-9 Reforged re-save that carries skin_id, with a freshly-appended unit
+	// that the old subversion rule would have omitted it for) produces a stream
+	// no uniform re-parse can consume, misaligning every entity after the first
+	// divergence. Resolving presence file-wide is what keeps the append-a-unit
+	// save round-trippable.
 	if emitSkinID {
 		if len(e.SkinID) != 4 {
 			return fmt.Errorf("skin_id %q must be exactly 4 bytes when emitted", e.SkinID)
