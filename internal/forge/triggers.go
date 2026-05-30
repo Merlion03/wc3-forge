@@ -287,6 +287,7 @@ func synthesizeHandRolledScriptTriggers(scriptName, scriptText string) *wtg.Trig
 func (s *Session) GenerateTriggerScript() (string, error) {
 	s.mu.RLock()
 	src := s.source
+	handRolled := s.triggerIsHandRolled
 	in := CodegenInputs{
 		Triggers: s.triggers,
 		Units:    s.units,
@@ -300,28 +301,49 @@ func (s *Session) GenerateTriggerScript() (string, error) {
 	if s.triggersWct != nil {
 		in.GlobalJASS = s.triggersWct.GlobalJASS
 	}
+	// Snapshot the hand-rolled Map Header text under the lock so we can return
+	// it verbatim without holding the lock across codegen.
+	var handRolledText string
+	if handRolled && s.triggers != nil && len(s.triggers.Triggers) > 0 {
+		handRolledText = s.triggers.Triggers[0].CustomText
+	}
 	loaded := s.loaded
 	s.mu.RUnlock()
 	if !loaded {
 		return "", fmt.Errorf("no map loaded")
 	}
-	if in.Info != nil && !in.Info.Lua {
-		return "", ErrLuaOnly
+
+	// Hand-rolled-script maps have no GUI tree to lower — the script file IS the
+	// source of truth. Return its current (possibly-edited) text verbatim,
+	// regardless of language. This is the native-JASS passthrough path.
+	if handRolled {
+		return handRolledText, nil
 	}
-	// Preserve-marker peek. Reading the existing war3map.lua under the
-	// source's read path covers both folder + MPQ backed sessions.
+
+	isLua := in.Info == nil || in.Info.Lua
+
+	// Pick the language-appropriate script file + preserve marker.
+	scriptFile, marker := "war3map.lua", PreserveScriptMarker
+	if !isLua {
+		scriptFile, marker = "war3map.j", PreserveScriptMarkerJASS
+	}
+	// Preserve-marker peek. Reading the existing script under the source's read
+	// path covers both folder + MPQ backed sessions.
 	if src != nil {
-		if b, ok, _ := src.read("war3map.lua"); ok && len(b) > 0 {
+		if b, ok, _ := src.read(scriptFile); ok && len(b) > 0 {
 			first := string(b)
 			if i := strings.IndexByte(first, '\n'); i >= 0 {
 				first = first[:i]
 			}
-			if strings.TrimSpace(first) == PreserveScriptMarker {
+			if strings.TrimSpace(first) == marker {
 				return "", ErrPreserveScript
 			}
 		}
 	}
-	return GenerateLuaScript(in)
+	if isLua {
+		return GenerateLuaScript(in)
+	}
+	return GenerateJASSScript(in)
 }
 
 // SaveTriggerScript generates the Lua script and writes it to war3map.lua
@@ -338,12 +360,25 @@ func (s *Session) SaveTriggerScript() (int, error) {
 	}
 	s.mu.RLock()
 	src := s.source
+	isLua := s.info == nil || s.info.Lua
+	handRolled := s.triggerIsHandRolled
+	scriptName := s.mapHeaderScriptName
 	s.mu.RUnlock()
 	if src == nil {
 		return 0, fmt.Errorf("no source for writing")
 	}
-	if err := src.write("war3map.lua", []byte(text)); err != nil {
-		return 0, fmt.Errorf("write war3map.lua: %w", err)
+	// JASS maps write war3map.j; Lua maps write war3map.lua.
+	scriptFile := "war3map.lua"
+	if !isLua {
+		scriptFile = "war3map.j"
+	}
+	// Hand-rolled maps remember the exact file they loaded from (Reforged
+	// occasionally mislabels the w3i Lua flag); honor that over the flag.
+	if handRolled && scriptName != "" {
+		scriptFile = scriptName
+	}
+	if err := src.write(scriptFile, []byte(text)); err != nil {
+		return 0, fmt.Errorf("write %s: %w", scriptFile, err)
 	}
 	return len(text), nil
 }
@@ -365,9 +400,18 @@ func (s *Session) TestMap() error {
 	if err := s.Save(); err != nil {
 		return fmt.Errorf("save pending edits: %w", err)
 	}
-	// 2. Regenerate + save the script.
-	if _, err := s.SaveTriggerScript(); err != nil {
-		return fmt.Errorf("regen war3map.lua: %w", err)
+	// 2. Regenerate + save the script — but ONLY for GUI-backed maps. A
+	//    hand-rolled-script map has no GUI tree to lower; its script was
+	//    already persisted to war3map.j/.lua by Save() (the Map Header edit
+	//    path). Regenerating would emit a fresh scaffold (globals/main/config)
+	//    that collides with the hand-authored script. Skip it.
+	s.mu.RLock()
+	handRolled := s.triggerIsHandRolled
+	s.mu.RUnlock()
+	if !handRolled {
+		if _, err := s.SaveTriggerScript(); err != nil {
+			return fmt.Errorf("regen script: %w", err)
+		}
 	}
 	// 3. Launch WC3 with the map. Folder-backed sessions error out here
 	//    (LaunchWithMap rejects paths that aren't files); MPQ-backed
