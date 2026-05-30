@@ -2,6 +2,7 @@ package forge
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -162,6 +163,49 @@ func (m *mpqSource) flushLocked(force bool) error {
 
 	if len(keep) == 0 && len(named) == 0 {
 		return fmt.Errorf("%w: refusing to write an empty archive (no files collected)", ErrMPQRepackFailed)
+	}
+
+	// mapIO diagnostics: guard the historical import-drop class (a 240-file
+	// custom .w3x silently repacking down to 14 — feedback_wc3_forge_mpq_writer_listfile).
+	// Expected file count = source blocks (minus the source listfile, which the
+	// writer regenerates) plus any brand-new pending files that didn't replace a
+	// raw entry, minus tombstones that DID match a raw entry. We compute it from
+	// the same hash-match bookkeeping the copy-through used and compare to what
+	// we're about to write (keep + named). A divergence increments a COUNTER
+	// only — no blocking re-parse on the save path (per U9 spec). The counter
+	// makes the regression observable in diagnostics.get if it ever recurs.
+	srcBlockCount := 0
+	for _, re := range rawEntries {
+		if re.HashA == lfA && re.HashB == lfB {
+			continue // source listfile — not a user file, writer regenerates
+		}
+		srcBlockCount++
+	}
+	// Count edits that ADD a file with no matching raw entry (net +1 each) and
+	// tombstones that REMOVE a matched raw entry (net -1 each). A pending edit
+	// that replaces a matched raw entry is net 0 (dropped from keep, re-added
+	// via named). This yields the count we *expect* to write.
+	expected := srcBlockCount
+	for i := range edits {
+		matched := false
+		for _, re := range rawEntries {
+			if edits[i].hA == re.HashA && edits[i].hB == re.HashB {
+				matched = true
+				break
+			}
+		}
+		switch {
+		case edits[i].deleted && matched:
+			expected-- // tombstone removed an existing file
+		case !edits[i].deleted && !matched:
+			expected++ // brand-new file
+		}
+	}
+	written := len(keep) + len(named)
+	if written != expected {
+		mapIODiag.repackFileMismatch.Add(1)
+		log.Printf("[WARN] mpq flush %q: file-count mismatch (writing %d, expected %d from %d source blocks) — possible import drop",
+			m.path, written, expected, srcBlockCount)
 	}
 
 	// Capture the source's hash-table size + sector-size shift BEFORE closing —
