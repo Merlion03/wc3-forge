@@ -7,7 +7,8 @@
     GetSelection, SetSelection, GetUnit,
     GetReforgedMode, SetReforgedMode,
     GetUnitTypeIndex, GetDoodadTypeIndex,
-    MoveUnit, MoveDoodad, IsDirty, SaveMap,
+    NewMapDialog as NewMapSaveDialog, CreateNewMap, WriteNewMap, ReportDiagnostics,
+    MoveUnit, MoveDoodad, CreateDoodad, IsDirty, SaveMap,
     LaunchInWC3,
     Undo, Redo, CanUndo, CanRedo, HistoryList,
     CheckConvertToLua,
@@ -25,6 +26,7 @@
   import ViewMenu from './ViewMenu.svelte'
   import AssetPreview from './AssetPreview.svelte'
   import MapInfoEditor from './MapInfoEditor.svelte'
+  import NewMapDialog from './NewMapDialog.svelte'
   import ObjectEditor from './ObjectEditor.svelte'
   import TriggerEditor from './TriggerEditor.svelte'
   import SwapTilesetDialog from './SwapTilesetDialog.svelte'
@@ -34,9 +36,11 @@
   import GameplayConstantsEditor from './GameplayConstantsEditor.svelte'
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
+  import DoodadPalette from './DoodadPalette.svelte'
   import CameraOrbitGizmo from './CameraOrbitGizmo.svelte'
+  import DiagnosticsOverlay from './DiagnosticsOverlay.svelte'
   import { showToast } from './toast'
-  import { flog } from './debuglog'
+  import { flog, setLogLevel } from './debuglog'
   import { loadIconURL } from './icon-loader'
   import { TEAM_COLORS_RGB } from './sloc-markers'
   import { Button } from '$lib/components/ui/button'
@@ -90,6 +94,35 @@
   // user explicitly clicks elsewhere on terrain to update.
   let terrainPickModeOn: boolean = $state(false)
   let terrainCell: TerrainCellInfo | null = $state(null)
+
+  // Doodad-placement state. When a type_id is armed (from the Doodad Palette),
+  // the scene is in placement mode and the next map click drops that doodad.
+  // null = nothing armed. Owned here; mirrored to the scene via
+  // scene.setPlacementMode and read by the palette to highlight the armed icon.
+  let armedDoodadType: string | null = $state(null)
+
+  // Diagnostics: top-left overlay + in-canvas heartbeat (F9). Verbose logging
+  // drops the log threshold to 'debug' so per-frame/per-asset traces are
+  // written. Both persist to localStorage so a debugging session survives
+  // reloads. Applied to the scene/logger in onMount once they exist.
+  let diagnosticsOn: boolean = $state(
+    (() => { try { return localStorage.getItem('wc3-forge:diagnostics') === '1' } catch { return false } })(),
+  )
+  let verboseLogging: boolean = $state(
+    (() => { try { return localStorage.getItem('wc3-forge:verbose-log') === '1' } catch { return false } })(),
+  )
+  let diagReportTimer = 0
+  function toggleDiagnostics() {
+    diagnosticsOn = !diagnosticsOn
+    scene?.setDiagnosticsMode(diagnosticsOn)
+    try { localStorage.setItem('wc3-forge:diagnostics', diagnosticsOn ? '1' : '0') } catch { /* ignore */ }
+  }
+  function toggleVerboseLogging() {
+    verboseLogging = !verboseLogging
+    setLogLevel(verboseLogging ? 'debug' : 'info')
+    try { localStorage.setItem('wc3-forge:verbose-log', verboseLogging ? '1' : '0') } catch { /* ignore */ }
+    flog(`[diag] verbose logging ${verboseLogging ? 'ON' : 'OFF'}`)
+  }
 
   // Gizmo mode (Phase C). Mirrors scene.getGizmoMode() — the source of truth
   // lives in gizmo.ts; this is the reactive shadow that drives the header
@@ -289,6 +322,41 @@
   }
   function closeSwapTileset() {
     showSwapTileset = false
+  }
+
+  // ----- New Map modal -----
+  // Collects starter-map config (name/size/tileset), then the create flow
+  // (Save-location picker + Go CreateNewMap) runs in handleCreateNewMap.
+  let showNewMap: boolean = $state(false)
+  let newMapBusy: boolean = $state(false)
+  function openNewMap() {
+    showNewMap = true
+  }
+  // Run the create flow: pick a .w3x destination, write the map, then open it.
+  // When a map is already loaded we don't clobber the current session — write
+  // the file and open it in a fresh window instead (mirrors how Open Map File
+  // behaves with a map already open).
+  async function handleCreateNewMap(cfg: { name: string; width: number; height: number; tileset: string }) {
+    newMapBusy = true
+    try {
+      const path = await NewMapSaveDialog(cfg.name)
+      if (!path) { newMapBusy = false; return }
+      const params = { name: cfg.name, width: cfg.width, height: cfg.height, tileset: cfg.tileset, path }
+      if (status.loaded) {
+        await WriteNewMap(params)
+        await OpenMapInNewWindow(path)
+      } else {
+        status = await CreateNewMap(params)
+        mapLoadGen += 1
+        await reloadMap()
+        showToast('Created ' + cfg.name, 'success')
+      }
+      showNewMap = false
+    } catch (e) {
+      showToast('New map failed: ' + String(e), 'error')
+    } finally {
+      newMapBusy = false
+    }
   }
 
   // ----- Import 3D Model modal -----
@@ -531,7 +599,30 @@
       scene.setPathingVisible(pathingVisible)
       scene.onPick(handlePick)
       scene.onTerrainPick(handleTerrainPick)
+      scene.onPlacementPick(handlePlacementPick)
+      // Re-apply persisted diagnostics / verbose-logging settings now that the
+      // scene + logger exist.
+      scene.setDiagnosticsMode(diagnosticsOn)
+      if (verboseLogging) setLogLevel('debug')
       ;(window as any).__scene = scene
+      // Push diagnostics to Go ~5Hz so the diagnostics.get MCP tool can peek at
+      // the live viewport numbers without a screenshot — runs regardless of the
+      // overlay toggle. Cheap: getDiagnostics reads counters; one small JSON.
+      diagReportTimer = window.setInterval(() => {
+        try {
+          const snap = scene?.getDiagnostics?.()
+          if (!snap) return
+          ReportDiagnostics(JSON.stringify({
+            ...snap,
+            doc: {
+              visibility: document.visibilityState,
+              focused: document.hasFocus(),
+              hidden: document.hidden,
+            },
+            map: { name: status.name, path: status.path, loaded: status.loaded },
+          }))
+        } catch { /* ignore */ }
+      }, 200)
       ;(window as any).__showToast = showToast
     } catch (e) {
       error = 'scene init failed: ' + (e instanceof Error ? (e.stack || e.message) : String(e))
@@ -577,6 +668,10 @@
         primaryDoodad = null
         terrainCell = null
         doodadCategoriesPresent = []
+        // Map closed — disarm any doodad-placement brush so the scene doesn't
+        // sit in placement mode with the palette (now unmounted) gone.
+        armedDoodadType = null
+        scene?.setPlacementMode(false)
       }
     })
     EventsOn(DEV_ANIM_EVENT, (payload: { creation_number: number; anim_name: string }) => {
@@ -926,6 +1021,12 @@
       e.preventDefault()
       setGizmoMode(next)
     }
+    // Diagnostics overlay toggle: F9. No input-focus gate needed (function
+    // keys aren't text input), no modifiers.
+    if (e.key === 'F9' && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+      e.preventDefault()
+      toggleDiagnostics()
+    }
     // Frame-selected hotkey: bare 'f'. Centers the camera on the current
     // selection's centroid and zooms in to fit. Matches the Blender / Maya
     // / Unity muscle memory. Same input-focus gate as 'M' so typing in the
@@ -1112,6 +1213,53 @@
     }
   }
 
+  // Arm (or disarm) a doodad type for click-to-place. Called by the palette
+  // when the user picks an icon (typeId) or cancels (null). Arming a type with
+  // no map loaded is a no-op with a hint — placement needs a target map.
+  function armDoodad(typeId: string | null) {
+    if (typeId && !status.loaded) {
+      showToast('Open a map before placing doodads', 'error')
+      return
+    }
+    armedDoodadType = typeId
+    scene?.setPlacementMode(!!typeId)
+  }
+
+  // Place the armed doodad at a clicked ground point. The scene gives us the
+  // ground intersection (worldX/worldY) plus the terrain height (z) it sampled,
+  // so the doodad lands flush with the surface. We create it on the Go side
+  // (which allocates a creation_number, records undo history, marks dirty),
+  // then add the rendered instance live and reflect it in our doodads array —
+  // no full map reload. A null hit means the user cancelled (Escape): disarm.
+  async function handlePlacementPick(hit: { worldX: number; worldY: number; z: number } | null) {
+    if (!hit) { armDoodad(null); return }
+    const typeId = armedDoodadType
+    if (!typeId) return
+    try {
+      const cn = await CreateDoodad(typeId, hit.worldX, hit.worldY, hit.z, 0, 1, 0)
+      // Mirror what the Go session built so the live add + Explorer row match
+      // (CreateDoodad defaults: rotation 0, uniform scale 1, variation 0).
+      const dto = {
+        creation_number: cn,
+        type_id: typeId,
+        skin_id: '',
+        position: [hit.worldX, hit.worldY, hit.z],
+        rotation: 0,
+        scale: [1, 1, 1],
+        variation: 0,
+        life: 100,
+        flags: 2,
+      } as unknown as main.DoodadDTO
+      await scene?.addDoodadLive(dto, doodadTypes as unknown as Record<string, any>)
+      doodads = [...doodads, dto]
+      // A doodad in a not-yet-present category should appear in the View menu.
+      doodadCategoriesPresent = scene?.getDoodadCategories() ?? doodadCategoriesPresent
+      dirty = true
+    } catch (e) {
+      showToast('Place doodad failed: ' + String(e), 'error')
+    }
+  }
+
   function composeSelection(
     current: main.SelectionItemDTO[],
     hits: PickHit[],
@@ -1144,6 +1292,7 @@
   }
 
   onDestroy(() => {
+    if (diagReportTimer) clearInterval(diagReportTimer)
     EventsOff(SEL_EVENT)
     EventsOff(MAP_EVENT)
     EventsOff(DIRTY_EVENT)
@@ -1206,6 +1355,10 @@
   }
 
   async function reloadMap(opts?: { keepCamera?: boolean }) {
+    // A fresh/reloaded map invalidates any armed placement brush — the armed
+    // type may not even exist in the new map's catalog. Disarm defensively.
+    armedDoodadType = null
+    scene?.setPlacementMode(false)
     units = await ListUnits()
     doodads = await ListDoodads()
     try { unitTypes = (await GetUnitTypeIndex()) as unknown as Record<string, UnitTypeInfo> } catch { unitTypes = {} }
@@ -1251,10 +1404,18 @@
       if (checked !== showMinimap) toggleMinimap()
     } else if (id === 'agent-console') {
       if (checked !== bridgeConsoleOpen) toggleBridgeConsole()
+    } else if (id === 'diagnostics') {
+      if (checked !== diagnosticsOn) toggleDiagnostics()
+    } else if (id === 'verbose-log') {
+      if (checked !== verboseLogging) toggleVerboseLogging()
     }
   }
 
   function toggleTerrainPickMode() {
+    // Entering terrain mode disarms any in-progress doodad placement so the
+    // two click-routing modes don't fight over the canvas (placement wins in
+    // the scene's click handler, which would otherwise swallow terrain clicks).
+    if (!terrainPickModeOn && armedDoodadType) armDoodad(null)
     terrainPickModeOn = !terrainPickModeOn
     scene?.setTerrainPickMode(terrainPickModeOn)
     if (!terrainPickModeOn) {
@@ -1660,6 +1821,13 @@
       </DropdownMenu.Trigger>
       <DropdownMenu.Content class="min-w-[220px]" align="start">
         <DropdownMenu.Item
+          onSelect={runMenuAction(openNewMap)}
+          disabled={busy || newMapBusy}
+          title="Create a new blank map (flat terrain, no units or doodads)."
+        >
+          <span class="flex-1">New Map…</span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Item
           onSelect={runMenuAction(newWindow)}
           disabled={busy}
           title="Launch a new wc3-forge editor window with no map loaded."
@@ -1795,6 +1963,10 @@
                   title: 'Toggle the minimap overlay (bottom-right of viewport). Shortcut: M' },
                 { id: 'agent-console', label: 'Agent Console', checked: bridgeConsoleOpen,
                   title: 'Toggle the Agent Console (Ctrl+`) — live stream of every MCP bridge call.' },
+                { id: 'diagnostics', label: 'Diagnostics Overlay', checked: diagnosticsOn,
+                  title: 'Toggle the diagnostics overlay (top-left) + in-canvas heartbeat. Shortcut: F9' },
+                { id: 'verbose-log', label: 'Verbose Logging', checked: verboseLogging,
+                  title: 'Write debug-level traces (per-frame/per-asset) to wc3-forge.log.' },
               ]}
               theme={theme}
               onToggle={onViewToggle}
@@ -1930,7 +2102,18 @@
            window-globals. Only mounts when scene exists so the camera
            handle is guaranteed non-null. -->
       {#if scene}
+        {#if diagnosticsOn}
+          <DiagnosticsOverlay {scene} mapName={status.name} mapPath={status.path} />
+        {/if}
         <CameraOrbitGizmo camera={scene.getCamera()} />
+      {/if}
+      <!-- Doodad palette: floating "+" launcher (bottom-left) + panel. Owns
+           its own open state; reports the armed type via onArm so App drives
+           the scene's placement mode and the click-to-place flow. Only mounts
+           with a map loaded — there's nothing to place doodads onto otherwise,
+           and unmounting also disarms/closes it on map close. -->
+      {#if status.loaded}
+        <DoodadPalette armedTypeId={armedDoodadType} {reforged} onArm={armDoodad} />
       {/if}
     </section>
 
@@ -2275,6 +2458,15 @@
   {/if}
   {#if showTriggerEditor}
     <TriggerEditor bind:open={showTriggerEditor} initialId={triggerEditorInitialId} onClose={closeTriggerEditor} isLuaMap={status.lua} />
+  {/if}
+
+  {#if showNewMap}
+    <NewMapDialog
+      bind:open={showNewMap}
+      busy={newMapBusy}
+      onClose={() => (showNewMap = false)}
+      onCreate={handleCreateNewMap}
+    />
   {/if}
 
   {#if showSwapTileset}

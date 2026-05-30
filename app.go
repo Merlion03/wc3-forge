@@ -1346,6 +1346,28 @@ func (a *App) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 	return forge.Current.MoveDoodad(creationNumber, x, y, z)
 }
 
+// ReportDiagnostics receives the frontend's live render/camera/GL diagnostics
+// snapshot (raw JSON) and caches it on the session so the diagnostics.get MCP
+// handler can read it back. Called a few times a second by the viewport so an
+// agent can peek at the running editor's actual numbers without a screenshot.
+func (a *App) ReportDiagnostics(snapshot string) {
+	forge.Current.SetDiagnostics(snapshot)
+}
+
+// CreateDoodad places a new doodad of the given type at the supplied game
+// coordinates and returns its freshly-allocated creation_number. Mirrors the
+// MCP doodads.create wire contract (handlers_entities.go): rotation is radians
+// about Z, scale is a uniform multiplier (0 → 1.0 in the session mutator), and
+// variation selects among the type's model variations (0 when out of range).
+// The Doodad Palette panel calls this on a click-to-place in the viewport.
+//
+// The session mutator records the command for undo/redo and emits an
+// entity-changed event with Field "created"; the viewport adds the rendered
+// instance directly from the returned creation_number (no map reload needed).
+func (a *App) CreateDoodad(typeID string, x, y, z, rotation, scale float32, variation uint32) (uint32, error) {
+	return forge.Current.CreateDoodad(typeID, [3]float32{x, y, z}, rotation, scale, variation)
+}
+
 // RotateUnit sets the facing angle (radians, Z-axis only) of the unit with the
 // given creation_number. The gizmo's rotate-handle commits via this method.
 // Mirrors MoveUnit's error-handling shape: no-op on same value, dirty-flip on

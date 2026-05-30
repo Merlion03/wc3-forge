@@ -28,7 +28,7 @@
 //   Wails map-changed event fires.
 
 import * as MV_ns from 'mdx-m3-viewer'
-import { flog } from './debuglog'
+import { flog, flogDebug } from './debuglog'
 import { patchMdxParser } from './mdx-parser-patch'
 import {
   ListUnits, ListDoodads, GetUnitTypeIndex, GetDoodadTypeIndex, GetTerrain,
@@ -426,6 +426,15 @@ import { pickTerrainCell, rayGroundPlane, type TerrainCellInfo } from './terrain
 export type { TerrainCellInfo } from './terrain-picker'
 export type TerrainPickCallback = (cell: TerrainCellInfo | null) => void
 /**
+ * A click-to-place hit while placement mode is armed. `worldX`/`worldY` are
+ * the game-coordinate intersection of the click ray with the ground, and `z`
+ * is the terrain height sampled (bilinearly) at that point so a newly-placed
+ * doodad sits on the surface instead of at sea level. `null` signals the user
+ * cancelled placement (Escape) — the caller should disarm.
+ */
+export interface PlacementHit { worldX: number; worldY: number; z: number }
+export type PlacementPickCallback = (hit: PlacementHit | null) => void
+/**
  * How a pick result combines with the current selection.
  *   - 'set'    — replace selection with hits (plain click; empty hits clears)
  *   - 'add'    — union hits into the current selection (shift+click, rubber-band)
@@ -504,6 +513,30 @@ export interface SceneAPI {
    */
   getCamera(): RTSCamera
   /**
+   * Toggle the diagnostics heartbeat: a bright bar drawn directly into the
+   * canvas each frame so we can SEE whether the canvas is being presented.
+   */
+  setDiagnosticsMode(on: boolean): void
+  /** Snapshot of live render + camera + GL state for the diagnostics overlay. */
+  getDiagnostics(): {
+    frame: number
+    fps: number
+    crashed: boolean
+    doodads: number
+    units: number
+    visible: number
+    terrainWidth: number
+    terrainHeight: number
+    centerOffset: [number, number]
+    hasSky: boolean
+    hasWater: boolean
+    hasTerrain: boolean
+    glRenderer: string
+    lastGlError: number
+    glErrStage: string
+    camera: { eye: [number, number, number]; pivot: [number, number, number]; distance: number; yaw: number; pitch: number }
+  }
+  /**
    * Re-position an already-placed unit instance to (x, y, z) in game-space
    * coordinates (the same coords stored in war3map.doo / GetUnit's Position).
    * Applies the type's move_height Z offset internally to match what placeUnit
@@ -545,6 +578,30 @@ export interface SceneAPI {
    * sky background or outside the map's bounds).
    */
   onTerrainPick(cb: TerrainPickCallback): void
+  /**
+   * Toggle doodad-placement mode. When active, a plain LMB click on the canvas
+   * fires the onPlacementPick callback with the ground-plane intersection and
+   * sampled terrain height (instead of entity ray-pick or terrain inspect).
+   * Takes priority over terrain-pick mode. Cursor shows crosshair. Camera pan
+   * (RMB/MMB drag) still works; Escape fires the callback with null so the
+   * caller can disarm. Stays armed across placements so the user can drop
+   * several doodads without re-selecting from the palette each time.
+   */
+  setPlacementMode(active: boolean): void
+  /** Current placement-mode flag — for UI display. */
+  isPlacementMode(): boolean
+  /** Register the placement callback (see setPlacementMode / PlacementHit). */
+  onPlacementPick(cb: PlacementPickCallback): void
+  /**
+   * Add a single doodad to the live scene from its DTO, without a full map
+   * reload. Used by the Doodad Palette after CreateDoodad allocates a
+   * creation_number: the caller pushes the DTO into its own doodads array and
+   * calls this to render the new instance immediately. Resolves to true when
+   * the MDX was placed (false when the type has no model / failed to load).
+   * Refreshes the present-categories list so a doodad in a not-yet-present
+   * category becomes toggleable in the View menu.
+   */
+  addDoodadLive(d: any, types: Record<string, DoodadTypeInfo>): Promise<boolean>
   /**
    * Set the currently-highlighted terrain cell (yellow wireframe overlay).
    * `null` clears the highlight. The cell persists across frames until
@@ -780,6 +837,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   let terrainPickMode = false
   let terrainPickCallback: TerrainPickCallback | null = null
   let cachedTerrainDTO: any = null
+  // Doodad-placement mode state. When true, plain LMB clicks fire the
+  // placement callback (with the ground intersection + sampled terrain Z)
+  // instead of entity-pick / terrain-inspect. Checked BEFORE terrainPickMode
+  // in the click handler so an armed palette brush wins over terrain mode.
+  let placementMode = false
+  let placementCallback: PlacementPickCallback | null = null
   // Doodad instances whose model has at least one 'stand' sequence AND that
   // sequence may end (either non-looping, or multi-variation where we want
   // to re-roll a new variation when the current one ends). These need
@@ -898,6 +961,29 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // to disable; bump it to 250 for finer-grained debugging.
   let lastCullLogTs = performance.now()
   ;(window as any).__wc3ForgeCullLogMs = 5000
+
+  // --- Diagnostics instrumentation -----------------------------------------
+  // frameCount increments once per render-loop body execution (i.e. once per
+  // RAF tick the loop actually ran). fps is a smoothed estimate. These feed the
+  // DiagnosticsOverlay so we can see whether the loop is advancing AND, via the
+  // in-canvas heartbeat below, whether those frames are actually being
+  // PRESENTED to screen — the crux of the "frozen viewport" investigation.
+  let frameCount = 0
+  let fps = 0
+  let diagnosticsMode = false
+  let lastGlError = 0
+  // Records the FIRST render stage that produced a GL error this frame, e.g.
+  // "render:0x502". Populated by glChk() probes interleaved in the loop while
+  // diagnosticsMode is on, so we can pinpoint which pass is faulting.
+  let glErrStage = ''
+  let glRenderer = ''
+  try {
+    const gldbg = (viewer as any).gl as WebGLRenderingContext
+    const ext = gldbg.getExtension('WEBGL_debug_renderer_info')
+    glRenderer = ext ? String(gldbg.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : String(gldbg.getParameter(gldbg.RENDERER))
+  } catch { glRenderer = '' }
+
+
   const loop = () => {
     if (!crashed) {
       try {
@@ -921,18 +1007,33 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         const nowTs = performance.now()
         const dtMs = Math.min(MAX_DT_MS, Math.max(0, nowTs - lastFrameTs))
         lastFrameTs = nowTs
+        // Diagnostics: count frames + smooth an fps estimate.
+        frameCount++
+        if (dtMs > 0) fps = fps === 0 ? 1000 / dtMs : fps * 0.9 + (1000 / dtMs) * 0.1
         // Stash canvas height on the camera for the per-instance LOD path
         // (the patched ModelInstance.isVisible reads this to compute pixel-
         // radius without walking scene.viewport for every instance) and
         // reset per-frame culling counters so DevTools snapshots reflect
         // the most recent frame.
         ;(scene.camera as any).__wc3ForgeCanvasH = canvas.height
+        // GL-error stage probe (diagnostics only). Records the first pass whose
+        // getError() returns non-zero. Clears the error each call so the stage
+        // that ORIGINATES it is attributed, not a later one inheriting it.
+        // GL-error stage probing is gated on diagnosticsMode: each getError()
+        // forces a GPU sync, so we don't pay it in normal use. Toggle F9 to arm.
+        glErrStage = ''
+        const glChk = (stage: string) => {
+          if (!diagnosticsMode || glErrStage) return
+          const e = gl.getError()
+          if (e) glErrStage = `${stage}:0x${e.toString(16)}`
+        }
+        if (diagnosticsMode) gl.getError() // clear any stale error from last frame
         // Log the previous frame's culling tally (before resetting) so the
         // snapshot reflects what was just rendered, not zero.
         const cullLogIntervalMs = (window as any).__wc3ForgeCullLogMs || 0
         if (cullLogIntervalMs > 0 && (nowTs - lastCullLogTs) >= cullLogIntervalMs) {
           lastCullLogTs = nowTs
-          flog(`[culling] ${JSON.stringify(cullingSnapshot())}`)
+          flogDebug(`[culling] ${JSON.stringify(cullingSnapshot())}`)
         }
         resetCullingCounters()
         viewer.update(dtMs)
@@ -964,14 +1065,18 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         //      it covers pixels; gradient remains visible at the edges /
         //      below the horizon for skies that are dome-only.
         // Both passes leave depth state restored for terrain (next).
+        glChk('clear')
         if (skyGradient) skyGradient.draw(scene)
         if (sky) sky.draw(dtMs)
+        glChk('sky')
         if (terrain) terrain.draw(scene.camera.viewProjectionMatrix)
+        glChk('terrain')
         // Cliffs render AFTER terrain (so terrain's depth buffer is up so cliff
         // back-faces clip correctly) but BEFORE viewer.render() (so MDX units
         // depth-test correctly against cliff faces). Like terrain, this is a
         // custom-shader pass — the cache-invalidation below covers both.
         if (cliffs) cliffs.draw(scene.camera.viewProjectionMatrix)
+        glChk('cliffs')
         // **CRITICAL**: terrain.draw calls gl.useProgram(terrainProg) directly,
         // bypassing mdx-m3-viewer's webgl.useShader() state cache. The cache
         // still thinks the LAST-USED MDX shader is bound. On the next frame,
@@ -988,6 +1093,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // is invisible on second frame onward" bug — see commit log.
         ;(viewer as any).webgl.currentShader = null
         viewer.render()
+        glChk('render')
         // Sloc markers go AFTER viewer.render() and BEFORE water so they're
         // opaque-on-top-of-units but still get alpha-blended water in front.
         // Slocs are small and rare (typically 2-12 per map), so drawing N
@@ -1013,6 +1119,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // of terrain + cliffs + opaque model passes. The lib's translucent
         // pass already ran inside viewer.render(); water sits above that.
         if (water) water.draw(scene.camera.viewProjectionMatrix)
+        glChk('water')
         // Cell-highlight overlay (yellow wireframe quad for picked cell).
         // Drawn LAST before the gizmo so the wireframe sits visually on top
         // of every other layer including water.
@@ -1035,7 +1142,37 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
             camera.getEye(),
           )
         }
+        glChk('gizmo')
         updateAxisLabels()
+        // Capture the SCENE's accumulated GL error for this frame BEFORE the
+        // heartbeat does any GL of its own — so lastGlError reflects the real
+        // render pipeline (terrain/units/gizmo), not our diagnostic draw. Gated
+        // on diagnosticsMode: getError forces a GPU sync.
+        if (diagnosticsMode) lastGlError = gl.getError()
+        // Diagnostics heartbeat — drawn DIRECTLY into the main canvas (not the
+        // DOM) so it proves whether the canvas is being PRESENTED to screen. A
+        // bright bar sweeps left→right across the bottom edge, advancing with
+        // frameCount. If the DiagnosticsOverlay's frame counter (DOM) keeps
+        // climbing but this bar is frozen, the loop is running but the canvas
+        // isn't presenting → present-stall. If the bar sweeps, the canvas IS
+        // presenting and the "frozen" view is a camera/content issue instead.
+        // Also samples gl.getError() (only while diagnostics is on, since it
+        // forces a GPU sync) so the overlay can surface silent GL failures.
+        if (diagnosticsMode) {
+          const w = canvas.width, h = canvas.height
+          const barW = 60
+          const x = (frameCount * 8) % Math.max(1, w)
+          gl.enable(gl.SCISSOR_TEST)
+          gl.scissor(0, 0, w, 8)
+          gl.clearColor(0.1, 0.0, 0.15, 1)
+          gl.clear(gl.COLOR_BUFFER_BIT)
+          gl.scissor(x, 0, barW, 8)
+          gl.clearColor((frameCount % 30) / 30, 1, (frameCount % 60) / 60, 1)
+          gl.clear(gl.COLOR_BUFFER_BIT)
+          gl.scissor(0, 0, w, h)
+          gl.disable(gl.SCISSOR_TEST)
+          void h
+        }
       } catch (e) {
         crashed = true
         flog('[render-loop crash]', e instanceof Error ? e.stack : String(e))
@@ -1264,6 +1401,59 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       inst.setVertexColor(SELECT_TINT)
     }
     return inst
+  }
+
+  // Sample the terrain surface height at a game-coord (worldX, worldY) by
+  // bilinearly interpolating the four surrounding vertex heights from the
+  // cached TerrainDTO. Mirrors pickTerrainCell's grid math: vertex (0,0) sits
+  // at center_offset, cells are 128 studs. Returns 0 when no terrain is cached
+  // or the point is outside the vertex grid (placement at sea level is a sane
+  // fallback — the doodad still lands, just not snapped to a slope). The
+  // `heights` array is FinalZ per-vertex (see app.go GetTerrain), which is the
+  // same Z the terrain mesh is drawn at, so a doodad placed here renders flush
+  // with the ground in the viewport.
+  function sampleTerrainHeight(worldX: number, worldY: number): number {
+    const t = cachedTerrainDTO
+    if (!t || !t.heights || !t.center_offset) return 0
+    const W = t.width as number
+    const H = t.height as number
+    if (!(W > 1) || !(H > 1)) return 0
+    const fx = (worldX - t.center_offset[0]) / 128
+    const fy = (worldY - t.center_offset[1]) / 128
+    let col = Math.floor(fx)
+    let row = Math.floor(fy)
+    if (col < 0) col = 0; else if (col > W - 2) col = W - 2
+    if (row < 0) row = 0; else if (row > H - 2) row = H - 2
+    const tx = Math.min(1, Math.max(0, fx - col))
+    const ty = Math.min(1, Math.max(0, fy - row))
+    const heights = t.heights as ArrayLike<number>
+    const bl = heights[row * W + col] ?? 0
+    const br = heights[row * W + col + 1] ?? bl
+    const tl = heights[(row + 1) * W + col] ?? bl
+    const tr = heights[(row + 1) * W + col + 1] ?? bl
+    const bottom = bl + (br - bl) * tx
+    const top = tl + (tr - tl) * tx
+    return bottom + (top - bottom) * ty
+  }
+
+  // Rebuild the ordered present-categories list (View menu) from the current
+  // doodadCategoryByCn tags. Curated DOODAD_CAT_ORDER first, then remaining
+  // categories alphabetized with "Uncategorized" pinned last. Called after a
+  // full loadMap and after a single live add so the menu stays in sync.
+  function recomputeDoodadCategories(): void {
+    const presentSet = new Set<string>()
+    for (const c of doodadCategoryByCn.values()) presentSet.add(c)
+    const ordered: string[] = []
+    for (const c of DOODAD_CAT_ORDER) {
+      if (presentSet.has(c)) { ordered.push(c); presentSet.delete(c) }
+    }
+    const rest = [...presentSet].sort((a, b) => {
+      if (a === 'Uncategorized') return 1
+      if (b === 'Uncategorized') return -1
+      return a.localeCompare(b)
+    })
+    ordered.push(...rest)
+    doodadCategoriesPresent = ordered
   }
 
   function clearInstances() {
@@ -1923,6 +2113,24 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const dist = Math.hypot(e.clientX - d.clientX, e.clientY - d.clientY)
     if (dist > CLICK_PIXEL_THRESHOLD) return
 
+    // Doodad-placement mode takes over plain clicks BEFORE terrain-pick.
+    // We pick the terrain cell (for the ground intersection), sample the
+    // surface height there so the doodad lands on the ground, and hand both
+    // to the placement callback. A click that misses the map is a no-op
+    // (no callback) — placement stays armed for the next click. Modifier-held
+    // clicks fall through to entity-pick so the user can briefly select an
+    // existing entity without disarming the brush.
+    if (placementMode && !d.shift && !d.ctrl) {
+      if (placementCallback && cachedTerrainDTO) {
+        const cell = pickTerrainCell(d.x, d.y, canvas, scene, cachedTerrainDTO)
+        if (cell) {
+          const z = sampleTerrainHeight(cell.worldX, cell.worldY)
+          placementCallback({ worldX: cell.worldX, worldY: cell.worldY, z })
+        }
+      }
+      return
+    }
+
     // Terrain-pick mode takes over plain clicks. Modifier-held clicks are
     // intentionally still entity-pick / no-op so users can briefly pop out
     // of terrain-pick to add/remove an entity from selection without leaving
@@ -1960,6 +2168,13 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       const tag = a.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (a.isContentEditable) return
+    }
+    // Placement mode Escape: disarm the palette brush (callback handles the
+    // UI-side disarm). Takes priority over selection-clear so a user mid-place
+    // who hits Escape exits placement rather than wiping their selection.
+    if (placementMode) {
+      placementCallback?.(null)
+      return
     }
     // Mid-drag Escape: cancel any active drag without committing.
     // For gizmo drags: restore original positions. For entity drags: snap back.
@@ -2026,7 +2241,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // there; it picks a terrain cell or null. Without this short-circuit the
     // hover-pick below would flip the cursor to "pointer" / "move" any time
     // the user passed over an entity, which is misleading.
-    if (terrainPickMode) {
+    // Placement mode owns the cursor for the same reason terrain-pick does —
+    // a crosshair signals "click to drop here" regardless of what's underneath.
+    if (placementMode || terrainPickMode) {
       if (canvas.style.cursor !== 'crosshair') canvas.style.cursor = 'crosshair'
       return
     }
@@ -2472,22 +2689,8 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       for (const line of sampleAudits) {
         flog(`[doodad audit] ${line}`)
       }
-      // Build the ordered present-categories list for the View menu. Curated
-      // first (mirrors App.svelte's DOODAD_CAT_ORDER), then remaining cats
-      // alphabetized, "Uncategorized" pinned last.
-      const presentSet = new Set<string>()
-      for (const c of doodadCategoryByCn.values()) presentSet.add(c)
-      const ordered: string[] = []
-      for (const c of DOODAD_CAT_ORDER) {
-        if (presentSet.has(c)) { ordered.push(c); presentSet.delete(c) }
-      }
-      const rest = [...presentSet].sort((a, b) => {
-        if (a === 'Uncategorized') return 1
-        if (b === 'Uncategorized') return -1
-        return a.localeCompare(b)
-      })
-      ordered.push(...rest)
-      doodadCategoriesPresent = ordered
+      // Build the ordered present-categories list for the View menu.
+      recomputeDoodadCategories()
     },
     clear() {
       clearInstances()
@@ -2648,6 +2851,30 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     getCamera() {
       return camera
     },
+    setDiagnosticsMode(on: boolean) {
+      diagnosticsMode = on
+    },
+    getDiagnostics() {
+      const t = cachedTerrainDTO
+      return {
+        frame: frameCount,
+        fps: Math.round(fps),
+        crashed,
+        doodads: doodadInstances.size,
+        units: unitInstances.size,
+        visible: cullingSnapshot().visibleCount,
+        terrainWidth: t ? Number(t.width) : 0,
+        terrainHeight: t ? Number(t.height) : 0,
+        centerOffset: t ? [Number(t.center_offset?.[0] ?? 0), Number(t.center_offset?.[1] ?? 0)] as [number, number] : [0, 0] as [number, number],
+        hasSky: !!sky,
+        hasWater: !!water,
+        hasTerrain: !!terrain,
+        glRenderer,
+        lastGlError,
+        glErrStage,
+        camera: camera.getState(),
+      }
+    },
     focusSelection(): boolean {
       // Build a list of world positions for everything in the current
       // selection. Units (including sloc MDX instances, which the sloc
@@ -2745,6 +2972,31 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     isTerrainPickMode() { return terrainPickMode },
     onTerrainPick(cb: TerrainPickCallback) {
       terrainPickCallback = cb
+    },
+    setPlacementMode(active: boolean) {
+      if (active === placementMode) return
+      placementMode = active
+      // Same cursor handling as terrain-pick. Don't stomp terrain-pick's
+      // crosshair on the way out — only clear when terrain-pick isn't also
+      // claiming it (both modes can't visually conflict, but the disarm path
+      // shouldn't reset a cursor terrain mode still wants).
+      if (active) canvas.style.cursor = 'crosshair'
+      else if (!terrainPickMode) canvas.style.cursor = ''
+    },
+    isPlacementMode() { return placementMode },
+    onPlacementPick(cb: PlacementPickCallback) {
+      placementCallback = cb
+    },
+    async addDoodadLive(d: any, types: Record<string, DoodadTypeInfo>) {
+      const inst = await placeDoodad(d, types)
+      if (!inst) return false
+      doodadInstances.set(d.creation_number, inst)
+      // placeDoodad already tagged doodadCategoryByCn for this cn; refresh the
+      // present-categories list so a doodad in a not-yet-present category shows
+      // up (toggleable) in the View menu. Reuses the same curated-first ordering
+      // loadMap builds.
+      recomputeDoodadCategories()
+      return true
     },
     setHighlightedCell(cell: { col: number; row: number } | null) {
       cellHighlight?.setCell(cell)

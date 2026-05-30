@@ -50,6 +50,10 @@ export function CreateCustomObject(arg1:string,arg2:string,arg3:string):Promise<
 
 export function CreateCustomUnit(arg1:string,arg2:string):Promise<main.CreateCustomUnitResult>;
 
+export function CreateDoodad(arg1:string,arg2:number,arg3:number,arg4:number,arg5:number,arg6:number,arg7:number):Promise<number>;
+
+export function CreateNewMap(arg1:main.NewMapParams):Promise<main.MapStatus>;
+
 export function DeleteCustomObject(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteCustomUnit(arg1:string):Promise<void>;
@@ -160,6 +164,8 @@ export function MoveTriggerNode(arg1:number,arg2:number):Promise<main.TriggerMut
 
 export function MoveUnit(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
+export function NewMapDialog(arg1:string):Promise<string>;
+
 export function NewWindow():Promise<void>;
 
 export function OpenMap(arg1:string):Promise<main.MapStatus>;
@@ -173,6 +179,8 @@ export function OpenMapInNewWindow(arg1:string):Promise<void>;
 export function Redo():Promise<void>;
 
 export function RenameTriggerNode(arg1:number,arg2:string):Promise<main.TriggerMutationResultDTO>;
+
+export function ReportDiagnostics(arg1:string):Promise<void>;
 
 export function RotateDoodad(arg1:number,arg2:number):Promise<void>;
 
@@ -237,3 +245,5 @@ export function Undo():Promise<void>;
 export function UndoTo(arg1:number):Promise<void>;
 
 export function WC3InstallStatus():Promise<main.WC3InstallStatusDTO>;
+
+export function WriteNewMap(arg1:main.NewMapParams):Promise<void>;

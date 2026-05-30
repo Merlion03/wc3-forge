@@ -16,11 +16,37 @@ function fmt(args: unknown[]): string {
     .join(' ')
 }
 
-export function flog(...args: unknown[]) {
-  try { LogJS(fmt(args)) } catch { /* ignore */ }
-  // also surface to dev-mode console if available
-  try { console.log(...args) } catch { /* ignore */ }
+// Log levels, low→high verbosity. The active threshold gates which calls
+// actually emit: a message is emitted when its level is <= the current
+// threshold. Default is 'info' (error+warn+info); 'debug' (Verbose Logging
+// toggle) additionally lets the noisy per-frame/per-asset traces through.
+export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
+const LEVELS: Record<LogLevel, number> = { error: 0, warn: 1, info: 2, debug: 3 }
+let threshold = LEVELS.info
+
+export function setLogLevel(level: LogLevel) {
+  threshold = LEVELS[level] ?? LEVELS.info
+  ;(window as any).__wc3ForgeLogLevel = level
 }
+export function getLogLevel(): LogLevel {
+  return (Object.keys(LEVELS) as LogLevel[]).find(k => LEVELS[k] === threshold) ?? 'info'
+}
+
+function emit(level: LogLevel, tag: string, args: unknown[]) {
+  if (LEVELS[level] > threshold) return
+  const msg = tag ? `${tag} ${fmt(args)}` : fmt(args)
+  try { LogJS(msg) } catch { /* ignore */ }
+  try { console.log(...(tag ? [tag, ...args] : args)) } catch { /* ignore */ }
+}
+
+// flog stays info-level for backwards compatibility with existing call sites.
+export function flog(...args: unknown[]) { emit('info', '', args) }
+export function flogError(...args: unknown[]) { emit('error', '[ERROR]', args) }
+export function flogWarn(...args: unknown[]) { emit('warn', '[WARN]', args) }
+export function flogInfo(...args: unknown[]) { emit('info', '', args) }
+// Debug-level: silent unless Verbose Logging is on. Use for per-frame / per-
+// asset traces that would otherwise flood the log.
+export function flogDebug(...args: unknown[]) { emit('debug', '[DEBUG]', args) }
 
 // Catch otherwise-silent module-load / runtime errors.
 if (typeof window !== 'undefined') {

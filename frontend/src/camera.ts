@@ -59,6 +59,18 @@ export interface RTSCamera {
   dispose(): void
   /** World-space eye position. Used by the gizmo to compute fixed-screen-space handle scale. */
   getEye(): [number, number, number]
+  /**
+   * Snapshot of the full camera state for display/diagnostics: the eye (camera
+   * world position), the pivot it orbits/looks at, the orbit distance, and the
+   * orbit angles. Read-only; cheap enough to poll per frame.
+   */
+  getState(): {
+    eye: [number, number, number]
+    pivot: [number, number, number]
+    distance: number
+    yaw: number
+    pitch: number
+  }
   /** Current orbit angles. yaw: any radians; pitch: radians below horizon, clamped to [PITCH_MIN, PITCH_MAX]. */
   getOrbit(): { yaw: number; pitch: number }
   /** Absolute orbit setter. Pitch is clamped; yaw is taken as-is. */
@@ -191,7 +203,23 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
     e.preventDefault()
     zoom(e.deltaY > 0 ? WHEEL_ZOOM_STEP : 1 / WHEEL_ZOOM_STEP)
   }
-  function onKeyDown(e: KeyboardEvent) { keysDown.add(e.key.toLowerCase()) }
+  // True when a text-entry element has focus, so the WASD/arrow pan keys don't
+  // fire while the user is typing into a field (e.g. the doodad palette's
+  // search box, the Map Info name field, any inline editor). Without this,
+  // typing a doodad name like "wall" or "stand" pans the camera thousands of
+  // units into the void — every w/a/s/d keypress is also a pan command, since
+  // these listeners are window-level. Mirrors the input-focus skip the global
+  // hotkeys in App.svelte already use.
+  function typingInField(): boolean {
+    const a = document.activeElement as HTMLElement | null
+    if (!a) return false
+    const tag = a.tagName
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || a.isContentEditable
+  }
+  function onKeyDown(e: KeyboardEvent) {
+    if (typingInField()) return
+    keysDown.add(e.key.toLowerCase())
+  }
   function onKeyUp(e: KeyboardEvent) { keysDown.delete(e.key.toLowerCase()) }
   // If the window loses focus (alt-tab, click on another app) while a pan
   // key is held, the keyup never reaches us and the camera drifts forever.
@@ -285,6 +313,15 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
     },
     getEye(): [number, number, number] {
       return [currentEye[0], currentEye[1], currentEye[2]]
+    },
+    getState() {
+      return {
+        eye: [currentEye[0], currentEye[1], currentEye[2]] as [number, number, number],
+        pivot: [pivot[0], pivot[1], pivot[2]] as [number, number, number],
+        distance,
+        yaw,
+        pitch,
+      }
     },
     getOrbit() {
       return { yaw, pitch }
