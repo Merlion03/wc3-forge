@@ -524,3 +524,25 @@ endfunction`, "", false},
 		})
 	}
 }
+
+// TestTranspile_MultiLineStringLiteral covers World-Editor multi-line strings:
+// quest/description/tooltip text embeds raw newlines inside the "..." literal
+// (the WC3 engine accepts them, often written via the `/*<NL>*/` block-comment
+// idiom to hide the source newline). The lexer must keep scanning across the
+// newline rather than aborting the whole section as "unterminated string";
+// luaStringLit re-escapes the embedded newline to \n for valid Lua.
+func TestTranspile_MultiLineStringLiteral(t *testing.T) {
+	jass := "function A takes nothing returns nothing\n" +
+		"    call BJDebugMsg(\"line one\nline two\")\n" +
+		"endfunction\n"
+	got, err := TranspileScript(jass)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if strings.Contains(got, "jass2lua failed") {
+		t.Fatalf("multi-line string should not error the section:\n%s", got)
+	}
+	if !strings.Contains(got, `"line one\nline two"`) {
+		t.Errorf("expected multi-line string emitted with \n escape, got:\n%s", got)
+	}
+}

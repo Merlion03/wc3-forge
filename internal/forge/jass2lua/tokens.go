@@ -279,10 +279,12 @@ func (l *lexer) lexString(startLine, startCol int) (Token, error) {
 			l.advance()
 			continue
 		}
-		if c == '\n' {
-			// Unterminated string — JASS strings can't span newlines.
-			return Token{}, fmt.Errorf("jass2lua: lex error at line %d col %d: unterminated string", startLine, startCol)
-		}
+		// A literal newline inside a string is ALLOWED: the World Editor
+		// embeds raw newlines in quest/description/tooltip strings (e.g.
+		// `call SetMapDescription("line1<NL>line2")`) and the WC3 engine
+		// accepts them, so we must too. The byte is kept verbatim (luaStringLit
+		// re-escapes it to \n on emit). Only a string that runs to EOF without
+		// a closing quote is genuinely unterminated.
 		b.WriteByte(c)
 		l.advance()
 	}
