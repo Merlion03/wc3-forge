@@ -14,9 +14,10 @@
     CheckConvertToLua,
     ForceQuit,
     WC3InstallStatus,
+    GetAppVersion, CheckForUpdate, DownloadAndRunInstaller,
   } from '../wailsjs/go/main/App.js'
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
-  import type { main, unitsdoo } from '../wailsjs/go/models'
+  import type { main, unitsdoo, update } from '../wailsjs/go/models'
   import {
     createScene,
     type SceneAPI, type PickHit, type SelectMode, type TerrainCellInfo,
@@ -37,6 +38,7 @@
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
   import DoodadPalette from './DoodadPalette.svelte'
+  import UpdateDialog from './UpdateDialog.svelte'
   import CameraOrbitGizmo from './CameraOrbitGizmo.svelte'
   import DiagnosticsOverlay from './DiagnosticsOverlay.svelte'
   import { showToast } from './toast'
@@ -397,6 +399,99 @@
     showGameplayConstantsEditor = false
   }
 
+  // ----- In-app updater -----
+  // Auto-checks GitHub Releases on launch (opt-out) and offers a one-click
+  // download-and-install of the NSIS installer. Prefs persist in localStorage,
+  // matching the app's other settings (theme, minimap, …). Default: auto-check
+  // ON, auto-install OFF (running an installer unprompted is an explicit
+  // opt-in). The Go side (update_app.go) owns the GitHub query + download +
+  // elevated relaunch; this drives the UI and the dirty-state guard.
+  let appVersion: string = $state('dev')
+  let showUpdateDialog: boolean = $state(false)
+  let updateResult: update.CheckResult | null = $state(null)
+  let updateError: string = $state('')
+  let updateDownloading: boolean = $state(false)
+  let updateDownloadPct: number = $state(0)
+  let autoCheckUpdates: boolean = $state(localStorage.getItem('wc3-forge:auto-check-updates') !== '0')
+  let autoInstallUpdates: boolean = $state(localStorage.getItem('wc3-forge:auto-install-updates') === '1')
+
+  // Persist the toggles whenever the user flips them in the dialog.
+  $effect(() => {
+    localStorage.setItem('wc3-forge:auto-check-updates', autoCheckUpdates ? '1' : '0')
+  })
+  $effect(() => {
+    localStorage.setItem('wc3-forge:auto-install-updates', autoInstallUpdates ? '1' : '0')
+  })
+
+  // Silent check fired on startup. Only surfaces something when an update
+  // exists: opens the dialog, or — if the user opted into auto-install —
+  // begins the download immediately (still gated on saving unsaved work).
+  async function autoCheckForUpdate() {
+    if (!autoCheckUpdates) return
+    try {
+      const res = await CheckForUpdate()
+      if (!res?.isNewer || !res.release?.installer) return
+      updateResult = res
+      updateError = ''
+      if (autoInstallUpdates) {
+        await startUpdate()
+      } else {
+        showUpdateDialog = true
+      }
+    } catch (e) {
+      // Network hiccup / rate limit on a background check is non-fatal and
+      // shouldn't nag — log it and stay quiet.
+      flogDebug('auto update check failed: ' + String(e))
+    }
+  }
+
+  // Manual check from the menu — always opens the dialog so the user gets
+  // feedback either way ("update available" or "you're up to date").
+  async function checkForUpdatesManual() {
+    updateError = ''
+    updateResult = null
+    updateDownloading = false
+    updateDownloadPct = 0
+    showUpdateDialog = true
+    try {
+      updateResult = await CheckForUpdate()
+    } catch (e) {
+      updateError = String(e)
+    }
+  }
+
+  // Download + run the installer. Guards unsaved work first: the installer
+  // closes wc3-forge, so a dirty map would lose edits. We prompt to save.
+  async function startUpdate() {
+    const url = updateResult?.release?.installer?.url
+    if (!url) return
+    if (await IsDirty()) {
+      const choice = confirm(
+        'You have unsaved changes. Save before updating?\n\n' +
+          'OK = save and continue, Cancel = abort update.',
+      )
+      if (!choice) return
+      try {
+        await SaveMap()
+      } catch (e) {
+        showToast('Save failed — update aborted: ' + String(e), 'error')
+        return
+      }
+    }
+    updateDownloading = true
+    updateDownloadPct = 0
+    if (!showUpdateDialog) showUpdateDialog = true
+    try {
+      // Resolves by quitting the app (the installer takes over); if it
+      // returns an error the download/launch failed and we recover.
+      await DownloadAndRunInstaller(url)
+    } catch (e) {
+      updateDownloading = false
+      updateError = String(e)
+      showToast('Update failed: ' + String(e), 'error')
+    }
+  }
+
   // ----- Minimap overlay (bottom-right of viewport) -----
   //
   // Shows the map's BAKED minimap image (war3mapMap.blp / .dds / TGA fallback)
@@ -691,6 +786,14 @@
         }
       })
       .catch(() => {})
+    // Stamp the running version (shown in the menu) and run the opt-out
+    // auto update check in the background.
+    GetAppVersion().then((v) => { appVersion = v }).catch(() => {})
+    autoCheckForUpdate()
+    // Installer-download progress → the update dialog's bar.
+    EventsOn('wc3-forge:update-progress', (p: { pct?: number }) => {
+      if (typeof p?.pct === 'number') updateDownloadPct = p.pct
+    })
     // Live CASC remount (user located their WC3 install at runtime): the
     // viewer cached the stock assets that 404'd against the old missing
     // install as empty/failed, so purge that cache and reload the scene to
@@ -1998,6 +2101,14 @@
         <DropdownMenu.Item onSelect={runMenuAction(close)} disabled={!status.loaded || busy}>
           <span class="flex-1">Close</span>
         </DropdownMenu.Item>
+        <DropdownMenu.Separator />
+        <DropdownMenu.Item
+          onSelect={runMenuAction(checkForUpdatesManual)}
+          title="Check GitHub for a newer wc3-forge release."
+        >
+          <span class="flex-1">Check for Updates…</span>
+          <DropdownMenu.Shortcut>v{appVersion}</DropdownMenu.Shortcut>
+        </DropdownMenu.Item>
       </DropdownMenu.Content>
     </DropdownMenu.Root>
 
@@ -2583,6 +2694,20 @@
     <GameplayConstantsEditor
       bind:open={showGameplayConstantsEditor}
       onClose={closeGameplayConstantsEditor}
+    />
+  {/if}
+
+  {#if showUpdateDialog}
+    <UpdateDialog
+      bind:open={showUpdateDialog}
+      result={updateResult}
+      current={appVersion}
+      downloading={updateDownloading}
+      downloadPct={updateDownloadPct}
+      error={updateError}
+      bind:autoCheck={autoCheckUpdates}
+      bind:autoInstall={autoInstallUpdates}
+      onUpdate={startUpdate}
     />
   {/if}
 

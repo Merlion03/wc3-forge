@@ -63,6 +63,10 @@ const (
 	// previous (missing/invalid) install get re-fetched through the new mount
 	// — no restart needed.
 	eventCASCRemounted    = "wc3-forge:casc-remounted"
+	// eventUpdateProgress streams installer-download progress during
+	// DownloadAndRunInstaller. Payload: {received, total int64, pct float64}.
+	// App.svelte subscribes to drive the update banner's progress bar.
+	eventUpdateProgress   = "wc3-forge:update-progress"
 )
 
 // App is the Wails-bindable surface exposed to the frontend. Every method

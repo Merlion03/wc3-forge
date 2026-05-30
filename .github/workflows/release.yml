@@ -56,7 +56,9 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Build (binary + NSIS installer)
-        run: wails build -platform windows/amd64 -nsis -clean -ldflags "-s -w"
+        # -X main.AppVersion stamps the running binary so the in-app updater
+        # knows what it is and can compare against the latest GitHub release.
+        run: wails build -platform windows/amd64 -nsis -clean -ldflags "-s -w -X main.AppVersion=${{ steps.ver.outputs.version }}"
 
       - name: Package portable zip
         shell: pwsh
