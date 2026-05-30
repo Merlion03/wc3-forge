@@ -126,6 +126,58 @@ func TestCliffBrush_RaiseAndUndo(t *testing.T) {
 	}
 }
 
+// TestBrushSaveRoundTrip paints a tile + raises a cliff, saves the map, reopens
+// it from disk, and asserts both edits survived the .w3e Encode/Parse round-trip
+// — the end-to-end path the GUI brush + Save button exercise.
+func TestBrushSaveRoundTrip(t *testing.T) {
+	tmp := copyFixtureToTemp(t, fixtureExtracted)
+	s := &Session{}
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tr := s.Terrain()
+	if len(tr.GroundTilesets) < 2 {
+		t.Skipf("fixture ground palette has <2 tiles; can't paint a different tile")
+	}
+	col, row := centerCorner(t, s)
+	w := int(tr.Width)
+	center := row*w + col
+
+	curIdx := tr.Tiles[center].GroundTexture
+	targetIdx := uint8(0)
+	if curIdx == 0 {
+		targetIdx = 1
+	}
+	target := tr.GroundTilesets[targetIdx]
+	origLayer := tr.Tiles[center].LayerHeight
+	if origLayer >= maxLayerHeight {
+		t.Skipf("center corner already at max layer")
+	}
+
+	if err := s.PaintTileBrush(col, row, 0, "circle", target); err != nil {
+		t.Fatalf("PaintTileBrush: %v", err)
+	}
+	if err := s.CliffBrush(col, row, 0, "circle", "raise", 0, ""); err != nil {
+		t.Fatalf("CliffBrush: %v", err)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Reopen from disk and confirm persistence.
+	s2 := &Session{}
+	if err := s2.Open(tmp); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got := s2.Terrain().Tiles[center]
+	if got.GroundTexture != targetIdx {
+		t.Errorf("persisted ground tex = %d, want %d", got.GroundTexture, targetIdx)
+	}
+	if got.LayerHeight != origLayer+1 {
+		t.Errorf("persisted layer = %d, want %d", got.LayerHeight, origLayer+1)
+	}
+}
+
 // TestBrushFootprint_CircleVsSquare checks the two shapes produce the expected
 // corner counts for a radius-2 brush well inside the grid: a square is the full
 // (2r+1)² block; a circle drops the four extreme corners.
