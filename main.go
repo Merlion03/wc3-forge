@@ -11,6 +11,7 @@ import (
 
 	"github.com/StephenSHorton/wc3-forge/internal/bridge"
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
+	"github.com/StephenSHorton/wc3-forge/internal/mcpserver"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -51,9 +52,25 @@ func main() {
 	flag.StringVar(&cameraSpec, "camera", "", "initial camera spec 'x,y,z,distance' (z+distance optional)")
 	var pickSelfTest bool
 	flag.BoolVar(&pickSelfTest, "pick-self-test", false, "run a pick-correctness self-test after map load (logs to wc3-forge.log)")
+	var mcpMode bool
+	flag.BoolVar(&mcpMode, "mcp", false, "run as an MCP stdio server that proxies to a running wc3-forge; no GUI, no bridge of its own")
 	flag.Parse()
 	startupCameraSpec = cameraSpec
 	startupPickSelfTest = pickSelfTest
+
+	// --mcp: act as the MCP stdio server (the in-binary replacement for the Node
+	// server in mcp/). This is a *client* of a separately-running editor — it
+	// must NOT start the TCP bridge, write a lockfile, open CASC, or launch the
+	// GUI, and nothing may write to stdout (the MCP channel). Branch before any
+	// of that setup. Logs already go to wc3-forge.log via log.SetOutput below;
+	// here we route fatals to stderr so they never corrupt the protocol stream.
+	if mcpMode {
+		if err := mcpserver.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "wc3-forge --mcp: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if startReforged {
 		reforgedMode.Store(true)

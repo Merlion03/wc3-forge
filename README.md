@@ -50,7 +50,34 @@ The macOS build is arm64 by default (matches the host); cross-build with
 `wails build -platform darwin/amd64` after running the casclib script on
 a matching arch.
 
-**2. Build + register the MCP server.** It lives in this repo at [`mcp/`](mcp/):
+**2. Register the MCP server.** The MCP server is built into the wc3-forge
+binary — `--mcp` makes it run as an MCP stdio server (a thin proxy to a running
+editor instance). No Node, no extra install: point Claude Code at the same
+executable you launch.
+
+On **Windows** (PowerShell), pointing at an installed/built binary:
+
+```powershell
+claude mcp add wc3-forge --scope user -- "C:\Program Files\wc3-forge\wc3-forge.exe" --mcp
+# or a local build:
+claude mcp add wc3-forge --scope user -- "$PWD\build\bin\wc3-forge.exe" --mcp
+```
+
+On **macOS**:
+
+```bash
+claude mcp add wc3-forge --scope user -- "/Applications/wc3-forge.app/Contents/MacOS/wc3-forge" --mcp
+```
+
+(`--scope` must come before `--`; everything after `--` is the command Claude
+launches.) Verify with `claude mcp list` — `wc3-forge` should show ✓ Connected.
+
+<details>
+<summary>Legacy / dev: the standalone Node server</summary>
+
+The original MCP server still lives in [`mcp/`](mcp/) and is the source of truth
+for the tool catalog (the Go `--mcp` mode embeds a catalog generated from it via
+`npm run gen:tools`). To run it directly instead of `--mcp`:
 
 ```powershell
 cd mcp
@@ -59,7 +86,10 @@ npm run build
 claude mcp add wc3-forge --scope user -- node "$PWD\dist\index.js"
 ```
 
-(`--scope` must come before `--` or it gets forwarded to node.) Verify with `claude mcp list` — `wc3-forge` should show ✓ Connected.
+Both servers speak the identical wire protocol and tool set, and discover running
+editor instances the same way (per-pid lockfiles), so they're interchangeable.
+
+</details>
 
 **3. Launch wc3-forge and talk to it.** Open the editor (`build/bin/wc3-forge.exe`), load a map (`File → Open Map…`), then in Claude Code:
 
