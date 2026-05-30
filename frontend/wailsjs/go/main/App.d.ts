@@ -36,6 +36,8 @@ export function ClearTriggerParamSubFunction(arg1:number,arg2:Array<number>,arg3
 
 export function CloseMap():Promise<main.MapStatus>;
 
+export function ConvertAndImportModel(arg1:main.ImportModelOptions):Promise<main.ImportModelResult>;
+
 export function ConvertMapToLua():Promise<main.ConvertToLuaResultDTO>;
 
 export function ConvertMapToLuaWithEdits(arg1:boolean,arg2:Array<main.SectionOverride>):Promise<main.ConvertToLuaResultDTO>;

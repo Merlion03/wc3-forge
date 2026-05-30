@@ -29,6 +29,7 @@
   import TriggerEditor from './TriggerEditor.svelte'
   import SwapTilesetDialog from './SwapTilesetDialog.svelte'
   import ConvertToLuaDialog from './ConvertToLuaDialog.svelte'
+  import ImportModelDialog from './ImportModelDialog.svelte'
   import WC3InstallDialog from './WC3InstallDialog.svelte'
   import GameplayConstantsEditor from './GameplayConstantsEditor.svelte'
   import BridgeConsole from './BridgeConsole.svelte'
@@ -288,6 +289,25 @@
   }
   function closeSwapTileset() {
     showSwapTileset = false
+  }
+
+  // ----- Import 3D Model modal -----
+  // Mount-on-demand like Swap Tileset. The Go method opens the native file
+  // dialog itself, converts the mesh to .mdx (+ textures), and imports it into
+  // the current map's archive. On a successful import we run the same asset
+  // refresh the open-map flow uses (reloadMap with keepCamera) so the new
+  // in-archive file resolves and the viewport repaints without losing the
+  // user's camera.
+  let showImportModel: boolean = $state(false)
+  function openImportModel() {
+    if (!status.loaded) return
+    showImportModel = true
+  }
+  function closeImportModel() {
+    showImportModel = false
+  }
+  async function onModelImported() {
+    if (status.loaded) await reloadMap({ keepCamera: true })
   }
 
   // ----- Gameplay Constants Editor modal -----
@@ -1686,6 +1706,13 @@
           <span class="flex-1">Swap Tileset</span>
         </DropdownMenu.Item>
         <DropdownMenu.Item
+          onSelect={runMenuAction(openImportModel)}
+          disabled={!status.loaded}
+          title="Convert an external .obj / .gltf / .glb / .stl mesh to a WC3 .mdx and import it into the current map."
+        >
+          <span class="flex-1">Import 3D Model…</span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Item
           onSelect={runMenuAction(openGameplayConstantsEditor)}
           disabled={!status.loaded}
           title="Edit per-map gameplay constants (war3mapMisc.txt)."
@@ -2254,6 +2281,15 @@
     <SwapTilesetDialog
       bind:open={showSwapTileset}
       onClose={closeSwapTileset}
+    />
+  {/if}
+
+  {#if showImportModel}
+    <ImportModelDialog
+      bind:open={showImportModel}
+      {reforged}
+      onClose={closeImportModel}
+      onImported={onModelImported}
     />
   {/if}
 
