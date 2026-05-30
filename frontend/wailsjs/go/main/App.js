@@ -50,6 +50,10 @@ export function CheckConvertToLua() {
   return window['go']['main']['App']['CheckConvertToLua']();
 }
 
+export function CheckForUpdate() {
+  return window['go']['main']['App']['CheckForUpdate']();
+}
+
 export function ClearSelection() {
   return window['go']['main']['App']['ClearSelection']();
 }
@@ -118,6 +122,10 @@ export function DiscardTo(arg1) {
   return window['go']['main']['App']['DiscardTo'](arg1);
 }
 
+export function DownloadAndRunInstaller(arg1) {
+  return window['go']['main']['App']['DownloadAndRunInstaller'](arg1);
+}
+
 export function EmitTestCommand(arg1) {
   return window['go']['main']['App']['EmitTestCommand'](arg1);
 }
@@ -140,6 +148,10 @@ export function GameplayConstantsGet() {
 
 export function GenerateTriggerScript() {
   return window['go']['main']['App']['GenerateTriggerScript']();
+}
+
+export function GetAppVersion() {
+  return window['go']['main']['App']['GetAppVersion']();
 }
 
 export function GetBridgeInfo() {

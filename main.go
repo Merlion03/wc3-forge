@@ -34,6 +34,12 @@ var startupCameraSpec string
 // the test against its own state. Defaults to false.
 var startupPickSelfTest bool
 
+// AppVersion is the release version of this binary, injected at build time
+// via -ldflags "-X main.AppVersion=<version>" (see .github/workflows/release.yml).
+// It is empty for local/dev builds; GetAppVersion() reports "dev" in that case.
+// The in-app updater compares this against the latest GitHub release.
+var AppVersion string
+
 func main() {
 	var headless bool
 	var noBridge bool
