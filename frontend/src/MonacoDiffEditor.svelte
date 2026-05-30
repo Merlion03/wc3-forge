@@ -4,9 +4,10 @@
   // shares the same module-level Monaco bootstrap (loadMonaco /
   // ensureJassRegistered) so we don't pay the 3MB import twice.
   //
-  // Both panes are READ-ONLY by design. The Convert-to-Lua flow is opinionated:
-  // no per-section skip, no hand-editing in the diff. Users can only commit
-  // the whole conversion or cancel.
+  // The original (left) pane is always READ-ONLY. The modified (right) pane is
+  // read-only by default, but the Convert-to-Lua dialog opts it into editing
+  // (modifiedEditable) so the user can hand-fix the proposed Lua; edits are
+  // reported via onModifiedChange.
 
   import { onDestroy, onMount } from 'svelte'
   import { loadMonaco, ensureJassRegistered } from './MonacoEditor.svelte'
@@ -18,13 +19,22 @@
     originalLanguage = 'jass' as 'jass' | 'lua' | 'plaintext',
     modifiedLanguage = 'lua' as 'jass' | 'lua' | 'plaintext',
     theme = 'vs-dark' as 'vs-dark' | 'vs',
+    modifiedEditable = false,
+    onModifiedChange = (_v: string) => {},
   }: {
     originalValue?: string
     modifiedValue?: string
     originalLanguage?: 'jass' | 'lua' | 'plaintext'
     modifiedLanguage?: 'jass' | 'lua' | 'plaintext'
     theme?: 'vs-dark' | 'vs'
+    modifiedEditable?: boolean
+    onModifiedChange?: (v: string) => void
   } = $props()
+
+  // Guards the modified-content listener from firing during a programmatic
+  // setValue (section switch), so only genuine user keystrokes report edits.
+  let suppressChange = false
+  let changeListener: import('monaco-editor').IDisposable | null = null
 
   let container: HTMLDivElement | null = $state(null)
   let isLoading = $state(true)
@@ -46,6 +56,8 @@
     disposed = true
     resizeObs?.disconnect()
     resizeObs = null
+    changeListener?.dispose()
+    changeListener = null
     diffEditor?.dispose()
     diffEditor = null
     originalModel?.dispose()
@@ -65,7 +77,7 @@
       modifiedModel = mod.editor.createModel(modifiedValue ?? '', modifiedLanguage)
       diffEditor = mod.editor.createDiffEditor(container, {
         theme,
-        readOnly: true,
+        readOnly: !modifiedEditable,
         originalEditable: false,
         automaticLayout: false,
         renderSideBySide: true,
@@ -76,6 +88,12 @@
         renderOverviewRuler: false,
       })
       diffEditor.setModel({ original: originalModel, modified: modifiedModel })
+      if (modifiedEditable) {
+        changeListener = modifiedModel.onDidChangeContent(() => {
+          if (suppressChange || !modifiedModel) return
+          onModifiedChange(modifiedModel.getValue())
+        })
+      }
       resizeObs = new ResizeObserver(() => diffEditor?.layout())
       resizeObs.observe(container)
       isLoading = false
@@ -94,12 +112,16 @@
     originalModel.setValue(v)
   })
 
-  // Sync external modifiedValue → model.
+  // Sync external modifiedValue → model. Wrapped in suppressChange so the
+  // programmatic setValue (e.g. switching sections) doesn't get reported back
+  // as a user edit.
   $effect(() => {
     const v = modifiedValue ?? ''
     if (!modifiedModel) return
     if (modifiedModel.getValue() === v) return
+    suppressChange = true
     modifiedModel.setValue(v)
+    suppressChange = false
   })
 
   // Language swaps.

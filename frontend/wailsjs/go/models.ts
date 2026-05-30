@@ -504,6 +504,20 @@ export namespace main {
 	        this.cells = source["cells"];
 	    }
 	}
+	export class SectionOverride {
+	    id: number;
+	    lua: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SectionOverride(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.lua = source["lua"];
+	    }
+	}
 	export class SelectionItemDTO {
 	    kind: string;
 	    id: number;
