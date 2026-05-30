@@ -38,6 +38,16 @@
     "method": "camera.set_view"
   },
   {
+    "name": "diagnostics_get",
+    "description": "Read the running viewport's live render diagnostics (pushed ~5Hz from the frontend): frame counter, fps, camera eye/pivot/distance/yaw/pitch, doodad/unit/visible counts, terrain dimensions + center offset, sky/water flags, last GL error + the faulting render stage, GPU renderer string, and document focus/visibility. The response also carries age_ms (snapshot staleness); a large age_ms means the render loop or reporting has stalled. Lets an agent inspect the editor's actual on-screen state without a screenshot. No params.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "method": "diagnostics.get"
+  },
+  {
     "name": "doodads_create",
     "description": "Create a new placed doodad/destructable in war3map.doo. x/y are WC3 world units (origin = map center). Returns { creation_number }. Undo-aware; emits the standard change events.",
     "inputSchema": {
