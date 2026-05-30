@@ -118,6 +118,10 @@
   let terrainBrushChain: Promise<unknown> = Promise.resolve()
   // Flatten target Z, captured on stroke start (the height under the first dab).
   let terrainFlattenTarget = 0
+  // True between BeginUndoGroup and EndUndoGroup so 'end' always closes the
+  // group even if the brush was disarmed mid-stroke (which would otherwise leak
+  // an open group and wedge undo).
+  let terrainStrokeOpen = false
 
   // Diagnostics: top-left overlay + in-canvas heartbeat (F9). Verbose logging
   // drops the log threshold to 'debug' so per-frame/per-asset traces are
@@ -1447,16 +1451,23 @@
   // the group. Calls are chained on terrainBrushChain so they apply in order
   // (BeginUndoGroup must land before any dab, EndUndoGroup after the last).
   function handleTerrainBrushStroke(cell: TerrainCellInfo | null, phase: 'start' | 'paint' | 'end') {
-    const b = terrainBrush
-    if (!b) return
+    // 'end' must always close an open group, even if the brush was disarmed
+    // mid-stroke (so undo never wedges on a dangling group).
     if (phase === 'end') {
+      if (!terrainStrokeOpen) return
+      terrainStrokeOpen = false
       terrainBrushChain = terrainBrushChain.then(() => EndUndoGroup()).catch(() => {})
       return
     }
-    if (!cell) return
+    const b = terrainBrush
+    if (!b) return
     if (phase === 'start') {
+      // Always open the group (even on an off-map click) so every dab in the
+      // stroke is grouped; an empty group is dropped by EndUndoGroup.
+      terrainStrokeOpen = true
+      terrainBrushChain = terrainBrushChain.then(() => BeginUndoGroup(brushLabel(b.tool)))
+      if (!cell) return
       terrainBrushChain = terrainBrushChain
-        .then(() => BeginUndoGroup(brushLabel(b.tool)))
         .then(async () => {
           // Flatten needs the height under the first dab as its target level.
           if (b.tool === 'flatten') {
@@ -1468,6 +1479,7 @@
       return
     }
     // phase === 'paint'
+    if (!cell) return
     terrainBrushChain = terrainBrushChain.then(() => applyBrushDab(b, cell)).catch(() => {})
   }
 
