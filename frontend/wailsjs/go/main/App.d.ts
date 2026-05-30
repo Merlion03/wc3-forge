@@ -38,6 +38,8 @@ export function CloseMap():Promise<main.MapStatus>;
 
 export function ConvertMapToLua():Promise<main.ConvertToLuaResultDTO>;
 
+export function ConvertMapToLuaWithEdits(arg1:boolean,arg2:Array<main.SectionOverride>):Promise<main.ConvertToLuaResultDTO>;
+
 export function ConvertMapToLuaWithOptions(arg1:boolean):Promise<main.ConvertToLuaResultDTO>;
 
 export function ConvertObject(arg1:string,arg2:string,arg3:string):Promise<main.ConvertObjectResult>;

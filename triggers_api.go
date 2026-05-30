@@ -715,7 +715,31 @@ func (a *App) ConvertMapToLua() (*ConvertToLuaResultDTO, error) {
 // is the only knob today; defaults are baked into ConvertToLuaOptions on the
 // Go side.
 func (a *App) ConvertMapToLuaWithOptions(backup bool) (*ConvertToLuaResultDTO, error) {
-	res, err := forge.Current.ConvertToLuaWithOptions(forge.ConvertToLuaOptions{Backup: backup})
+	return a.ConvertMapToLuaWithEdits(backup, nil)
+}
+
+// SectionOverride is one user-edited section from the convert dialog: the
+// section's ID (a trigger ID, or -1 for the GlobalJASS header) and the Lua the
+// user hand-fixed. Passed as a slice rather than a map so the JSON wire shape is
+// unambiguous about the int32 keys.
+type SectionOverride struct {
+	ID  int32  `json:"id"`
+	Lua string `json:"lua"`
+}
+
+// ConvertMapToLuaWithEdits is the convert-flow entry that honors per-section
+// user edits. `overrides` carries sections the user hand-fixed in the review
+// dialog; for each, the supplied Lua is written verbatim instead of the
+// transpiler's output. Pass nil/empty for a plain auto-conversion.
+func (a *App) ConvertMapToLuaWithEdits(backup bool, overrides []SectionOverride) (*ConvertToLuaResultDTO, error) {
+	var ovMap map[int32]string
+	if len(overrides) > 0 {
+		ovMap = make(map[int32]string, len(overrides))
+		for _, o := range overrides {
+			ovMap[o.ID] = o.Lua
+		}
+	}
+	res, err := forge.Current.ConvertToLuaWithOptions(forge.ConvertToLuaOptions{Backup: backup, Overrides: ovMap})
 	if err != nil {
 		if errors.Is(err, forge.ErrConvertBlocked) {
 			return convertResultToDTO(res), nil

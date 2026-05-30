@@ -66,6 +66,10 @@ export function ConvertMapToLua() {
   return window['go']['main']['App']['ConvertMapToLua']();
 }
 
+export function ConvertMapToLuaWithEdits(arg1, arg2) {
+  return window['go']['main']['App']['ConvertMapToLuaWithEdits'](arg1, arg2);
+}
+
 export function ConvertMapToLuaWithOptions(arg1) {
   return window['go']['main']['App']['ConvertMapToLuaWithOptions'](arg1);
 }

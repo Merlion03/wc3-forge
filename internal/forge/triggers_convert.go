@@ -647,6 +647,14 @@ func structWarningsToStrings(errs []jass2lua.StructError) []string {
 // happens; on backup failure the operation refuses (no half-baked state).
 type ConvertToLuaOptions struct {
 	Backup bool `json:"backup"`
+	// Overrides maps a section ID (a trigger ID for script/custom_text/
+	// map_header sections, or -1 for the war3map.wct GlobalJASS header) to
+	// user-edited Lua. When present for a section, that text is written verbatim
+	// instead of the transpiler's output — this is how the convert dialog lets
+	// the user hand-fix sections the transpiler couldn't translate cleanly. The
+	// section's library/struct init metadata is still derived from the original
+	// source, so cross-section init ordering is unaffected by an edit.
+	Overrides map[int32]string `json:"overrides,omitempty"`
 }
 
 // ConvertToLua is the legacy wrapper (backup defaults to true). New callers
@@ -787,6 +795,9 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 				lua, _ = jass2lua.TranspileFunction(tr.Name+"_CustomText", st.Expanded)
 			}
 			lua = jass2lua.SpliceStructLua(lua, st)
+			if ov, ok := opts.Overrides[tr.ID]; ok {
+				lua = ov // user hand-edited this section in the convert dialog
+			}
 			customTextsLua[tr.ID] = lua
 		}
 	}
@@ -817,6 +828,9 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 		in.StructInits = append(in.StructInits, st.Inits...)
 		lua, _ := jass2lua.TranspileScript(st.Expanded)
 		lua = jass2lua.SpliceStructLua(lua, st)
+		if ov, ok := opts.Overrides[-1]; ok {
+			lua = ov // user hand-edited the GlobalJASS section (id -1)
+		}
 		in.GlobalJASS = lua
 	}
 
