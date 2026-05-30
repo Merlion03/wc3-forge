@@ -14,7 +14,7 @@
 
 wc3-forge is a native Warcraft III map editor (Go + TypeScript, single [Wails](https://wails.io) binary) with an embedded MCP server. The GUI and Claude Code talk to the same editor session — every edit you make by hand can also be made by an agent, and vice versa, and they share one undo stack.
 
-**Status:** alpha. Read+write across most surfaces, wired through both the GUI and MCP: placed units and doodads (move / rotate / scale, plus create + delete), terrain (tile + height), a full Object Editor for all 7 definition kinds (units, items, abilities, buffs, destructables, doodads, upgrades — read + write custom and stock objects), and a complete Trigger Editor (GUI tree + Monaco code view + WC3 IntelliSense + GUI→Lua codegen + Convert-Map-to-Lua + Test Map). Maps save in place, including packaged `.w3x` / MPQ archives. Some rough edges remain.
+**Status:** alpha. Read+write across most surfaces, wired through both the GUI and MCP: placed units and doodads (move / rotate / scale, plus create + delete), terrain (tile + height), a full Object Editor for all 7 definition kinds (units, items, abilities, buffs, destructables, doodads, upgrades — read + write custom and stock objects), and a complete Trigger Editor (GUI tree + Monaco code view + WC3 IntelliSense + GUI→Lua/JASS codegen + native JASS-map editing + Convert-Map-to-Lua + Test Map). Older JASS maps open, edit, save, and Test Map directly — no conversion required. Maps save in place, including packaged `.w3x` / MPQ archives. Some rough edges remain.
 
 ## Get started with Claude Code
 
