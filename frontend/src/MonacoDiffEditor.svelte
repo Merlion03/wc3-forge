@@ -79,7 +79,7 @@
         theme,
         readOnly: !modifiedEditable,
         originalEditable: false,
-        automaticLayout: false,
+        automaticLayout: true,
         renderSideBySide: true,
         useInlineViewWhenSpaceIsLimited: false,
         scrollBeyondLastLine: false,

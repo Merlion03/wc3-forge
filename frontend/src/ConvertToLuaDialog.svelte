@@ -261,7 +261,7 @@
           Lua first (or delete them), then retry.
         </p>
         <div class="flex flex-col gap-1.5 mt-2">
-          {#each blockers as b (b.trigger_id + '|' + b.kind)}
+          {#each blockers as b, bi (b.trigger_id + '|' + b.kind + '|' + bi)}
             <div class="rounded-md border border-amber-500/40 bg-amber-500/5 p-2.5">
               <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-2 min-w-0">
@@ -293,7 +293,7 @@
         <Button onclick={onCancel}>Close</Button>
       </Dialog.Footer>
     {:else}
-      <div class="flex flex-col p-0 max-h-[calc(100vh-8rem)] min-h-[480px]">
+      <div class="flex-1 flex flex-col p-0 min-h-0">
         <!-- Warning panel -->
         <div class="px-5 py-3 border-b bg-amber-500/5 flex flex-col gap-2">
           <p class="text-sm font-medium">Permanent change</p>
@@ -335,7 +335,7 @@
                   ⚠ Needs attention ({failedSections.length})
                 </div>
                 <ul class="pb-1">
-                  {#each failedSections as section, i (section.id + '|' + section.kind)}
+                  {#each failedSections as section, i (section.id + '|' + section.kind + '|f' + i)}
                     {@const gi = i}
                     <li>
                       <button
@@ -360,7 +360,7 @@
                   ✓ Clean ({cleanSections.length})
                 </div>
                 <ul class="pb-1">
-                  {#each cleanSections as section, j (section.id + '|' + section.kind)}
+                  {#each cleanSections as section, j (section.id + '|' + section.kind + '|c' + j)}
                     {@const gi = failedCount + j}
                     <li>
                       <button
@@ -429,7 +429,7 @@
                     </button>
                     {#if warningsExpanded}
                       <ul class="mt-1.5 pl-5 list-disc space-y-0.5 max-h-24 overflow-y-auto">
-                        {#each currentSection.preprocess_warnings as w (w)}
+                        {#each currentSection.preprocess_warnings as w, wi (wi)}
                           <li class="font-mono break-all opacity-90">{w}</li>
                         {/each}
                       </ul>
@@ -452,7 +452,7 @@
                     </button>
                     {#if libscopeWarningsExpanded}
                       <ul class="mt-1.5 pl-5 list-disc space-y-0.5 max-h-24 overflow-y-auto">
-                        {#each currentSection.libscope_warnings as w (w)}
+                        {#each currentSection.libscope_warnings as w, wi (wi)}
                           <li class="font-mono break-all opacity-90">{w}</li>
                         {/each}
                       </ul>
@@ -475,7 +475,7 @@
                     </button>
                     {#if moduleWarningsExpanded}
                       <ul class="mt-1.5 pl-5 list-disc space-y-0.5 max-h-24 overflow-y-auto">
-                        {#each currentSection.module_warnings as w (w)}
+                        {#each currentSection.module_warnings as w, wi (wi)}
                           <li class="font-mono break-all opacity-90">{w}</li>
                         {/each}
                       </ul>
@@ -498,7 +498,7 @@
                     </button>
                     {#if structWarningsExpanded}
                       <ul class="mt-1.5 pl-5 list-disc space-y-0.5 max-h-24 overflow-y-auto">
-                        {#each currentSection.struct_warnings as w (w)}
+                        {#each currentSection.struct_warnings as w, wi (wi)}
                           <li class="font-mono break-all opacity-90">{w}</li>
                         {/each}
                       </ul>
@@ -506,7 +506,7 @@
                   </div>
                 {/if}
                 <div class="flex-1 min-h-0">
-                  {#key currentSection.id + '|' + currentSection.kind}
+                  {#key selectedSectionIdx}
                     <MonacoDiffEditor
                       originalValue={currentSection.original}
                       modifiedValue={currentModified}
@@ -521,7 +521,7 @@
                   <div class="px-4 py-2 border-t bg-red-500/10 text-xs text-red-300 max-h-32 overflow-y-auto">
                     <p class="font-medium mb-1">Transpiler diagnostics:</p>
                     <ul class="list-disc list-inside space-y-0.5">
-                      {#each currentSection.errors as err (err)}
+                      {#each currentSection.errors as err, ei (ei)}
                         <li class="font-mono break-all">{err}</li>
                       {/each}
                     </ul>
