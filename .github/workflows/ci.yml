@@ -12,8 +12,25 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
+    # Cap Go build/compile parallelism. `go test ./...` otherwise fans out one
+    # compiler per core; the wails/webview2/casc dependency tree then reserves
+    # enough address space across those concurrent processes to blow the
+    # windows-latest commitment limit (errno=1455 / "out of memory allocating
+    # heap arena map"). -p=2 halves the concurrent compiles; combined with the
+    # enlarged pagefile below this keeps the suite under the runner's limit.
+    env:
+      GOFLAGS: -p=2
     steps:
       - uses: actions/checkout@v4
+
+      # Enlarge the Windows pagefile so the Go compiler's large address-space
+      # reservations don't hit ERROR_COMMITMENT_LIMIT (errno=1455) on the
+      # memory-constrained windows-latest runner. Pinned to the v1.4 commit.
+      - name: Configure pagefile
+        uses: al-cheb/configure-pagefile-action@a3b6ebd6b634da88790d9c58d4b37a7f4a7b8708 # v1.4
+        with:
+          minimum-size: 8GB
+          maximum-size: 16GB
 
       - uses: actions/setup-go@v5
         with:
