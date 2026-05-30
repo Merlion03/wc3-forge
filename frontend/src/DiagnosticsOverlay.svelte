@@ -38,6 +38,38 @@
 
   const n = (v: number) => Math.round(v)
   const n2 = (v: number) => (Math.round(v * 100) / 100).toFixed(2)
+
+  // The hand-laid hot fields above are rendered explicitly; everything else in
+  // the snapshot is a registry namespace (an object from collectDiag) that we
+  // render generically below, so new subsystem signals appear with no overlay
+  // edit. KNOWN excludes the explicit fields from the generic pass.
+  const KNOWN = new Set([
+    'frame', 'fps', 'crashed', 'crashReason', 'crashAtFrame', 'diagnosticsArmed',
+    'logLevel', 'doodads', 'units', 'visible', 'terrainWidth', 'terrainHeight',
+    'centerOffset', 'hasSky', 'hasWater', 'hasTerrain', 'glRenderer',
+    'lastGlError', 'glErrFrame', 'glErrStage', 'camera',
+  ])
+  let regSections = $derived.by(() => {
+    const out: Array<{ ns: string; rows: Array<[string, unknown]> }> = []
+    if (!d) return out
+    for (const [k, v] of Object.entries(d as Record<string, unknown>)) {
+      if (KNOWN.has(k)) continue
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        out.push({ ns: k, rows: Object.entries(v as Record<string, unknown>) })
+      }
+    }
+    return out
+  })
+  // Standardized visual alerting: any numeric field whose name ends in
+  // Fails/Errors/Skipped/Miss(es) that's > 0 tints red — subsystems opt in for
+  // free by naming their failure counters that way.
+  const isAlert = (key: string, val: unknown) =>
+    typeof val === 'number' && val > 0 && /(?:Fails?|Errors?|Errs?|Skipped|Miss(?:es)?)$/i.test(key)
+  const fmtVal = (v: unknown): string =>
+    v == null ? '–'
+      : typeof v === 'number' ? (Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100))
+      : typeof v === 'object' ? JSON.stringify(v)
+      : String(v)
 </script>
 
 <div class="diag" aria-hidden="true">
@@ -47,7 +79,9 @@
       <span class="k">frame</span><span class="v hi">{d.frame}</span>
       <span class="k">fps</span><span class="v">{d.fps}</span>
       <span class="k">heartbeat</span><span class="v dim">bar sweeps ↓ canvas bottom</span>
+      <span class="k">armed / log</span><span class="v {d.diagnosticsArmed ? '' : 'warn'}">{d.diagnosticsArmed ? 'ARMED' : 'off'} / {d.logLevel}</span>
       <span class="k">crashed</span><span class="v {d.crashed ? 'err' : ''}">{d.crashed}</span>
+      {#if d.crashed}<span class="k">crash</span><span class="v err small">{d.crashReason} @f{d.crashAtFrame}</span>{/if}
       <span class="k">doc</span><span class="v {docState.includes('BLUR') || docState.includes('hidden') ? 'warn' : ''}">{docState}</span>
 
       <span class="k sec">cam eye</span><span class="v">{n(d.camera.eye[0])}, {n(d.camera.eye[1])}, {n(d.camera.eye[2])}</span>
@@ -67,6 +101,15 @@
 
       <span class="k sec">map</span><span class="v dim small">{mapName || '(untitled)'}</span>
       {#if mapPath}<span class="k">path</span><span class="v dim small break">{mapPath}</span>{/if}
+
+      <!-- Generic registry sections — one block per subsystem namespace, no
+           per-field overlay edits. Failure-counter fields auto-tint red. -->
+      {#each regSections as section (section.ns)}
+        <span class="k sec nsh">▾ {section.ns}</span><span class="v dim"></span>
+        {#each section.rows as [key, val] (key)}
+          <span class="k small">{key}</span><span class="v small {isAlert(key, val) ? 'err' : (key === '_providerError' || key === '_armedError' ? 'err' : '')}">{fmtVal(val)}</span>
+        {/each}
+      {/each}
     </div>
   {:else}
     <div class="hdr">DIAGNOSTICS — no scene</div>
@@ -95,6 +138,7 @@
   .grid { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; }
   .k { color: var(--muted-foreground); white-space: nowrap; }
   .k.sec { margin-top: 4px; }
+  .k.nsh { color: #7dd3fc; font-weight: 600; margin-top: 5px; }
   .v { text-align: right; word-break: break-word; }
   .v.hi { color: #86efac; font-weight: 700; }
   .v.err { color: #fca5a5; font-weight: 700; }

@@ -354,6 +354,12 @@ export function registerTools(server: McpServer): void {
     {},
     wrap("diagnostics.get")
   );
+  server.tool(
+    "diagnostics_arm",
+    "Arm or disarm the viewport's diagnostics mode remotely (same as pressing F9). When armed, the per-frame GL-error stage attribution and other expensive probes run, and the diagnostics overlay shows. Typical flow: arm → reproduce the issue → diagnostics_get → disarm. Pass { on: true } to arm, { on: false } to disarm.",
+    { on: z.boolean().describe("true to arm diagnostics mode, false to disarm") },
+    wrap("diagnostics.arm")
+  );
 
   // --- window -------------------------------------------------------------
   server.tool(

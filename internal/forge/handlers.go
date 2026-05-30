@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -93,6 +95,7 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("view.set_doodad_category_visible", handleViewSetDoodadCategoryVisible)
 	reg("camera.set_view", handleCameraSetView)
 	reg("diagnostics.get", handleDiagnosticsGet)
+	reg("diagnostics.arm", handleDiagnosticsArm)
 	// window.set_title — connected agent labels its wc3-forge window so the
 	// user can tell parallel instances apart in the taskbar/alt-tab list.
 	// Free-form short string; the App layer composes it into the OS title as
@@ -179,22 +182,39 @@ func handleUISendCommand(params json.RawMessage) (any, error) {
 const bridgeCallSummaryCap = 120
 
 func instrumented(method string, h bridge.Handler) bridge.Handler {
-	return func(params json.RawMessage) (any, error) {
+	return func(params json.RawMessage) (result any, err error) {
+		bridgeStats.calls.Add(1)
 		start := time.Now()
-		result, err := h(params)
-		dur := time.Since(start)
-		ev := BridgeCallEvent{
-			Timestamp:      start.UTC(),
-			Method:         method,
-			ParamsSummary:  summarizeJSON(params),
-			DurationMicros: dur.Microseconds(),
-		}
-		if err != nil {
-			ev.Error = err.Error()
-		} else {
-			ev.Result = summarizeResult(result)
-		}
-		Current.NotifyBridgeCall(ev)
+		// Track this call as in-flight so the "bridge" diag provider can list
+		// any dispatch wedged past bridgeSlowCall (deadlock visibility).
+		seq := bridgeStats.inflightSeq.Add(1)
+		bridgeStats.inflight.Store(seq, inflightCall{method: method, start: start})
+		defer bridgeStats.inflight.Delete(seq)
+		// Recover a panicking handler: before this, a panic unwound past the
+		// bridge and silently dropped the connection. Now it becomes a normal
+		// JSON-RPC error, is counted, and logs a stack — while STILL firing the
+		// bridge-call event below so the Agent Console shows the failure.
+		defer func() {
+			if r := recover(); r != nil {
+				bridgeStats.panics.Add(1)
+				log.Printf("[ERROR] bridge handler %q panicked: %v\n%s", method, r, debug.Stack())
+				result, err = nil, fmt.Errorf("internal handler panic: %v", r)
+			}
+			dur := time.Since(start)
+			ev := BridgeCallEvent{
+				Timestamp:      start.UTC(),
+				Method:         method,
+				ParamsSummary:  summarizeJSON(params),
+				DurationMicros: dur.Microseconds(),
+			}
+			if err != nil {
+				ev.Error = err.Error()
+			} else {
+				ev.Result = summarizeResult(result)
+			}
+			Current.NotifyBridgeCall(ev)
+		}()
+		result, err = h(params)
 		return result, err
 	}
 }
@@ -301,10 +321,10 @@ func handleMapStatus(_ json.RawMessage) (any, error) {
 }
 
 type mapStatusResponse struct {
-	Loaded   bool   `json:"loaded"`
-	Path     string `json:"path,omitempty"`
-	Name     string `json:"name,omitempty"`
-	UnitCount int   `json:"unit_count,omitempty"`
+	Loaded    bool   `json:"loaded"`
+	Path      string `json:"path,omitempty"`
+	Name      string `json:"name,omitempty"`
+	UnitCount int    `json:"unit_count,omitempty"`
 }
 
 func mapStatusResult() mapStatusResponse {
@@ -1225,8 +1245,8 @@ func handleViewSetMode(params json.RawMessage) (any, error) {
 // loop will see the value oscillate, but the single-call case (the common
 // one) lands correctly.
 type viewSetDoodadCategoryVisibleParams struct {
-	Category string `json:"category"`           // "Trees/Destructibles", "Structures", … or "*" for all
-	Visible  bool   `json:"visible"`            // informational; the underlying JS handler toggles
+	Category string `json:"category"` // "Trees/Destructibles", "Structures", … or "*" for all
+	Visible  bool   `json:"visible"`  // informational; the underlying JS handler toggles
 }
 
 func handleViewSetDoodadCategoryVisible(params json.RawMessage) (any, error) {
@@ -1264,16 +1284,61 @@ type cameraSetViewParams struct {
 // early startup). A large `age_ms` means the render loop or reporting has
 // stalled.
 func handleDiagnosticsGet(_ json.RawMessage) (any, error) {
+	// Go-side providers (asset/CASC/bridge/map-IO counters) are pulled fresh on
+	// every call under the "go" key — pull-only, never echoed through the 5Hz
+	// frontend push. Collected first so even a "no frontend yet" response still
+	// carries Go health.
+	goDiag := collectGoDiag()
+
 	snapshot, ageMs, ok := Current.Diagnostics()
 	if !ok {
-		return map[string]any{"ok": false, "reason": "no diagnostics reported yet"}, nil
+		return map[string]any{"ok": false, "reason": "no diagnostics reported yet", "go": goDiag}, nil
 	}
+	resp := map[string]any{"ok": true, "age_ms": ageMs, "age_class": diagAgeClass(ageMs), "go": goDiag}
 	var parsed any
 	if err := json.Unmarshal([]byte(snapshot), &parsed); err != nil {
 		// Surface the raw string if it somehow isn't valid JSON.
-		return map[string]any{"ok": true, "age_ms": ageMs, "raw": snapshot}, nil
+		resp["raw"] = snapshot
+	} else {
+		resp["diagnostics"] = parsed
 	}
-	return map[string]any{"ok": true, "age_ms": ageMs, "diagnostics": parsed}, nil
+	return resp, nil
+}
+
+type diagnosticsArmParams struct {
+	On bool `json:"on"`
+}
+
+// handleDiagnosticsArm toggles the viewport's diagnostics mode remotely so an
+// MCP agent can arm the expensive per-frame probes (GL-error stage attribution,
+// armed-only audits), reproduce an issue, read diagnostics.get, then disarm —
+// without the human pressing F9. Routes through the UI-command bus like
+// camera.set_view; the frontend flips diagnosticsMode + the overlay.
+func handleDiagnosticsArm(params json.RawMessage) (any, error) {
+	var p diagnosticsArmParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	state := "off"
+	if p.On {
+		state = "on"
+	}
+	Current.EmitUICommand("diagnostics.arm " + state)
+	return map[string]any{"ok": true, "armed": p.On}, nil
+}
+
+// diagAgeClass buckets snapshot staleness so an agent can tell at a glance
+// whether the frontend pump is healthy. The pump runs every 200ms, so anything
+// past a few seconds means the render loop or the reporter stalled.
+func diagAgeClass(ageMs int64) string {
+	switch {
+	case ageMs < 500:
+		return "fresh"
+	case ageMs < 3000:
+		return "stale"
+	default:
+		return "stalled"
+	}
 }
 
 func handleCameraSetView(params json.RawMessage) (any, error) {

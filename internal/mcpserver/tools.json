@@ -38,6 +38,24 @@
     "method": "camera.set_view"
   },
   {
+    "name": "diagnostics_arm",
+    "description": "Arm or disarm the viewport's diagnostics mode remotely (same as pressing F9). When armed, the per-frame GL-error stage attribution and other expensive probes run, and the diagnostics overlay shows. Typical flow: arm → reproduce the issue → diagnostics_get → disarm. Pass { on: true } to arm, { on: false } to disarm.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "on": {
+          "type": "boolean",
+          "description": "true to arm diagnostics mode, false to disarm"
+        }
+      },
+      "required": [
+        "on"
+      ],
+      "additionalProperties": false
+    },
+    "method": "diagnostics.arm"
+  },
+  {
     "name": "diagnostics_get",
     "description": "Read the running viewport's live render diagnostics (pushed ~5Hz from the frontend): frame counter, fps, camera eye/pivot/distance/yaw/pitch, doodad/unit/visible counts, terrain dimensions + center offset, sky/water flags, last GL error + the faulting render stage, GPU renderer string, and document focus/visibility. The response also carries age_ms (snapshot staleness); a large age_ms means the render loop or reporting has stalled. Lets an agent inspect the editor's actual on-screen state without a screenshot. No params.",
     "inputSchema": {

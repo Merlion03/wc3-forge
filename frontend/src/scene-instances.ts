@@ -28,7 +28,8 @@
 //   Wails map-changed event fires.
 
 import * as MV_ns from 'mdx-m3-viewer'
-import { flog, flogDebug } from './debuglog'
+import { flog, flogDebug, flogError, getLogLevel } from './debuglog'
+import { collectDiag } from './diag-registry'
 import { patchMdxParser } from './mdx-parser-patch'
 import {
   ListUnits, ListDoodads, GetUnitTypeIndex, GetDoodadTypeIndex, GetTerrain,
@@ -522,6 +523,10 @@ export interface SceneAPI {
     frame: number
     fps: number
     crashed: boolean
+    crashReason: string
+    crashAtFrame: number
+    diagnosticsArmed: boolean
+    logLevel: string
     doodads: number
     units: number
     visible: number
@@ -533,9 +538,10 @@ export interface SceneAPI {
     hasTerrain: boolean
     glRenderer: string
     lastGlError: number
+    glErrFrame: number
     glErrStage: string
     camera: { eye: [number, number, number]; pivot: [number, number, number]; distance: number; yaw: number; pitch: number }
-  }
+  } & Record<string, unknown> // registry namespaces (collectDiag) spread in at runtime
   /**
    * Re-position an already-placed unit instance to (x, y, z) in game-space
    * coordinates (the same coords stored in war3map.doo / GetUnit's Position).
@@ -954,6 +960,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // `std::clamp(delta, 0.0, 0.5)` on the seconds path.
   let lastFrameTs = performance.now()
   const MAX_DT_MS = 250
+  // How often the always-on GL-error sample runs (ms). ~5Hz matches the
+  // diagnostics push cadence and keeps the getError sync cost negligible.
+  const GL_SAMPLE_MS = 200
   // Throttled culling-counters log. Emits a snapshot of the per-frame
   // tested/visible/frustum-culled/lod-culled counts every 5 seconds so we
   // can observe the cull/LOD pipeline working without spamming the log.
@@ -971,7 +980,17 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   let frameCount = 0
   let fps = 0
   let diagnosticsMode = false
+  // GL error, SAMPLED at ~5Hz from the render loop (not per-frame — getError
+  // forces a CPU↔GPU sync). glErrFrame is the frame the non-zero error was last
+  // seen on; lastGlSampleTs paces the sampling.
   let lastGlError = 0
+  let glErrFrame = 0
+  let lastGlSampleTs = 0
+  // Crash detail: when the render-loop body throws, we latch crashed=true plus
+  // the reason + frame so diagnostics.get explains a frozen viewport instead of
+  // just reporting frame-not-advancing.
+  let crashReason = ''
+  let crashAtFrame = 0
   // Records the FIRST render stage that produced a GL error this frame, e.g.
   // "render:0x502". Populated by glChk() probes interleaved in the loop while
   // diagnosticsMode is on, so we can pinpoint which pass is faulting.
@@ -1020,14 +1039,17 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // getError() returns non-zero. Clears the error each call so the stage
         // that ORIGINATES it is attributed, not a later one inheriting it.
         // GL-error stage probing is gated on diagnosticsMode: each getError()
-        // forces a GPU sync, so we don't pay it in normal use. Toggle F9 to arm.
+        // forces a GPU sync, so we don't pay it per-stage in normal use. When
+        // armed, glChk attributes the FIRST faulting stage AND feeds the
+        // always-on lastGlError/glErrFrame (so the armed and 5Hz-sampled paths
+        // report the same field). Toggle F9 / diagnostics.arm to arm.
         glErrStage = ''
         const glChk = (stage: string) => {
           if (!diagnosticsMode || glErrStage) return
           const e = gl.getError()
-          if (e) glErrStage = `${stage}:0x${e.toString(16)}`
+          if (e) { glErrStage = `${stage}:0x${e.toString(16)}`; lastGlError = e; glErrFrame = frameCount }
         }
-        if (diagnosticsMode) gl.getError() // clear any stale error from last frame
+        if (diagnosticsMode) { gl.getError(); lastGlError = 0 } // clear stale; armed path reports per-frame
         // Log the previous frame's culling tally (before resetting) so the
         // snapshot reflects what was just rendered, not zero.
         const cullLogIntervalMs = (window as any).__wc3ForgeCullLogMs || 0
@@ -1144,11 +1166,17 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         }
         glChk('gizmo')
         updateAxisLabels()
-        // Capture the SCENE's accumulated GL error for this frame BEFORE the
-        // heartbeat does any GL of its own — so lastGlError reflects the real
-        // render pipeline (terrain/units/gizmo), not our diagnostic draw. Gated
-        // on diagnosticsMode: getError forces a GPU sync.
-        if (diagnosticsMode) lastGlError = gl.getError()
+        // GL-error capture, ALWAYS-ON but SAMPLED at ~5Hz so it never costs a
+        // per-frame GPU sync (getError flushes the pipeline; the loop runs at
+        // 60–240fps). The armed path (glChk above) already fed lastGlError this
+        // frame, so only sample when NOT armed. This is the always-available
+        // signal that caught the sky-gradient 0x502 stall.
+        if (!diagnosticsMode && nowTs - lastGlSampleTs >= GL_SAMPLE_MS) {
+          lastGlSampleTs = nowTs
+          const e = gl.getError()
+          lastGlError = e
+          if (e) glErrFrame = frameCount
+        }
         // Diagnostics heartbeat — drawn DIRECTLY into the main canvas (not the
         // DOM) so it proves whether the canvas is being PRESENTED to screen. A
         // bright bar sweeps left→right across the bottom edge, advancing with
@@ -1174,8 +1202,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
           void h
         }
       } catch (e) {
-        crashed = true
-        flog('[render-loop crash]', e instanceof Error ? e.stack : String(e))
+        // Latch crash detail so diagnostics.get explains a frozen viewport
+        // ("crashed: true, crashReason, crashAtFrame") rather than leaving an
+        // agent to infer it from a non-advancing frame counter. Only record the
+        // FIRST crash (frameCount stops advancing anyway once crashed).
+        if (!crashed) {
+          crashed = true
+          crashReason = e instanceof Error ? `${e.name}: ${e.message}` : String(e)
+          crashAtFrame = frameCount
+          flogError('[render-loop crash]', e instanceof Error ? e.stack : String(e))
+        }
       }
     }
     rafId = requestAnimationFrame(loop)
@@ -2860,6 +2896,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         frame: frameCount,
         fps: Math.round(fps),
         crashed,
+        crashReason,
+        crashAtFrame,
+        diagnosticsArmed: diagnosticsMode,
+        logLevel: getLogLevel(),
         doodads: doodadInstances.size,
         units: unitInstances.size,
         visible: cullingSnapshot().visibleCount,
@@ -2870,9 +2910,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         hasWater: !!water,
         hasTerrain: !!terrain,
         glRenderer,
+        // 5Hz-sampled (see render loop) — never a per-frame getError sync.
         lastGlError,
+        glErrFrame,
         glErrStage,
         camera: camera.getState(),
+        // Registry namespaces from every subsystem that called registerDiag().
+        // Armed providers only run when diagnostics mode is on.
+        ...collectDiag(diagnosticsMode),
       }
     },
     focusSelection(): boolean {

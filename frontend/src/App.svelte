@@ -40,7 +40,8 @@
   import CameraOrbitGizmo from './CameraOrbitGizmo.svelte'
   import DiagnosticsOverlay from './DiagnosticsOverlay.svelte'
   import { showToast } from './toast'
-  import { flog, setLogLevel } from './debuglog'
+  import { flog, flogError, setLogLevel } from './debuglog'
+  import { registerDiag } from './diag-registry'
   import { loadIconURL } from './icon-loader'
   import { TEAM_COLORS_RGB } from './sloc-markers'
   import { Button } from '$lib/components/ui/button'
@@ -112,6 +113,11 @@
     (() => { try { return localStorage.getItem('wc3-forge:verbose-log') === '1' } catch { return false } })(),
   )
   let diagReportTimer = 0
+  // Diagnostics-pump self-health, surfaced via the 'pump' registry provider.
+  // reportFail (auto-red in the overlay) catches a silently-failing reporter;
+  // framesAdvanced distinguishes a render-loop stall from a present-stall.
+  const pumpHealth = { framesAdvanced: 0, reportOk: 0, reportFail: 0, lastError: '' }
+  let pumpLastFrame = 0
   function toggleDiagnostics() {
     diagnosticsOn = !diagnosticsOn
     scene?.setDiagnosticsMode(diagnosticsOn)
@@ -604,6 +610,8 @@
       // scene + logger exist.
       scene.setDiagnosticsMode(diagnosticsOn)
       if (verboseLogging) setLogLevel('debug')
+      // Pump-health provider — appears in both the overlay and diagnostics.get.
+      registerDiag('pump', () => ({ ...pumpHealth }))
       ;(window as any).__scene = scene
       // Push diagnostics to Go ~5Hz so the diagnostics.get MCP tool can peek at
       // the live viewport numbers without a screenshot — runs regardless of the
@@ -611,7 +619,15 @@
       diagReportTimer = window.setInterval(() => {
         try {
           const snap = scene?.getDiagnostics?.()
-          if (!snap) return
+          if (!snap) { pumpHealth.reportFail++; pumpHealth.lastError = 'no scene snapshot'; return }
+          // framesAdvanced: how many render-loop frames elapsed since the last
+          // pump tick (~200ms). 0 over a tick = the render LOOP stalled/crashed;
+          // a healthy nonzero count while the viewport looks frozen = a PRESENT
+          // stall (loop runs, canvas not shown) — the exact distinction that
+          // took hours to pin down on the sky-gradient bug. Read by the 'pump'
+          // registry provider so it appears in the overlay AND diagnostics.get.
+          pumpHealth.framesAdvanced = snap.frame - pumpLastFrame
+          pumpLastFrame = snap.frame
           ReportDiagnostics(JSON.stringify({
             ...snap,
             doc: {
@@ -621,11 +637,16 @@
             },
             map: { name: status.name, path: status.path, loaded: status.loaded },
           }))
-        } catch { /* ignore */ }
+          pumpHealth.reportOk++
+        } catch (e) {
+          pumpHealth.reportFail++
+          pumpHealth.lastError = e instanceof Error ? e.message : String(e)
+        }
       }, 200)
       ;(window as any).__showToast = showToast
     } catch (e) {
       error = 'scene init failed: ' + (e instanceof Error ? (e.stack || e.message) : String(e))
+      flogError('[scene-init]', e instanceof Error ? e.stack : String(e))
       console.error(e)
     }
     // Non-blocking: warn if no Warcraft III install (CASC root) is resolvable.
@@ -796,6 +817,13 @@
       const cmd = payload?.cmd || ''
       const [op, ...args] = cmd.trim().split(/\s+/)
       switch (op) {
+        case 'diagnostics.arm': {
+          // Remote arm/disarm from the diagnostics.arm MCP tool. Sets the
+          // diagnostics overlay + armed probes to the requested state (idempotent).
+          const want = args[0] !== 'off'
+          if (want !== diagnosticsOn) toggleDiagnostics()
+          break
+        }
         case 'terrain.toggle':
           toggleTerrainPickMode()
           break
