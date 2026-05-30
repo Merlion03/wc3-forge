@@ -551,13 +551,116 @@ func inlineImplements(structName string, bodyLines []string, modules map[string]
 			out = append(out, fmt.Sprintf("// jass2lua: implement %s — module not found; pasting empty body\n", modName))
 			continue
 		}
-		// Paste the module's raw body verbatim. Each implementing struct
-		// gets its own copy.
+		// Paste the module's body. Each implementing struct gets its own copy.
+		// The body is SANITIZED first: a module body can legally contain
+		// constructs that are NOT valid struct members (top-level globals /
+		// functions / interfaces / nested structs) and — in interface-style
+		// "documentation" modules — bodyless method signatures and valueless
+		// constant decls that describe what an implementer SHOULD write. Pasted
+		// verbatim into a struct those derail the struct body parser (a bodyless
+		// `static method onX takes … returns …` makes collectMethodBody
+		// over-collect every following declaration as its "body", which the
+		// statement parser then rejects token-by-token). sanitizeModuleBodyForPaste
+		// drops those so a well-formed module inlines cleanly and a
+		// documentation module degrades to comments instead of an error cascade.
 		out = append(out, fmt.Sprintf("// jass2lua: implement %s — module body pasted\n", modName))
-		paste := splitLinesKeepEnd(mod.Raw)
-		out = append(out, paste...)
+		out = append(out, sanitizeModuleBodyForPaste(mod.Raw)...)
 	}
 	return out
+}
+
+// Helpers for sanitizeModuleBodyForPaste: openers/closers for the top-level
+// constructs a module body may contain that are NOT valid inside a struct body.
+var (
+	moduleGlobalsOpenerRe   = regexp.MustCompile(`^\s*globals\s*$`)
+	moduleGlobalsCloserRe   = regexp.MustCompile(`^\s*endglobals\s*$`)
+	moduleFunctionOpenerRe  = regexp.MustCompile(`^\s*(?:private\s+|public\s+|constant\s+)*function\s+[A-Za-z_]`)
+	moduleFunctionCloserRe  = regexp.MustCompile(`^\s*endfunction\s*$`)
+	moduleInterfaceOpenerRe = regexp.MustCompile(`^\s*interface\s+[A-Za-z_]`)
+	moduleInterfaceCloserRe = regexp.MustCompile(`^\s*endinterface\s*$`)
+	// valuelessConstantRe matches an interface-style constant DECLARATION with
+	// no initializer (`constant real Foo_BAR`). A real `constant x = v` field
+	// has an `=` and is left for parseStructBody (it handles static constants).
+	valuelessConstantRe = regexp.MustCompile(`^\s*constant\s+[A-Za-z_][A-Za-z0-9_]*\s+[A-Za-z_][A-Za-z0-9_]*\s*$`)
+)
+
+// sanitizeModuleBodyForPaste cleans a module's raw body so it can be pasted
+// into a struct body without derailing parseStructBody / the statement parser.
+// It drops constructs that are invalid as struct members — top-level
+// globals/function/interface/nested-struct blocks, bodyless method signatures
+// (no endmethod before the next opener), and valueless constant declarations —
+// replacing each with a marker comment. Well-formed methods (opener … body …
+// endmethod) and real field declarations pass through untouched.
+func sanitizeModuleBodyForPaste(raw string) []string {
+	lines := splitLinesKeepEnd(raw)
+	var out []string
+	i := 0
+	for i < len(lines) {
+		t := strings.TrimSpace(stripInlineComment(strings.TrimRight(lines[i], "\r\n")))
+		switch {
+		case t == "" || strings.HasPrefix(t, "//"):
+			out = append(out, lines[i])
+			i++
+		case moduleGlobalsOpenerRe.MatchString(t):
+			i = skipModuleBlock(lines, i+1, moduleGlobalsCloserRe)
+			out = append(out, "\t// jass2lua: module globals block dropped from struct paste\n")
+		case moduleInterfaceOpenerRe.MatchString(t):
+			i = skipModuleBlock(lines, i+1, moduleInterfaceCloserRe)
+			out = append(out, "\t// jass2lua: module interface block dropped from struct paste\n")
+		case moduleFunctionOpenerRe.MatchString(t):
+			i = skipModuleBlock(lines, i+1, moduleFunctionCloserRe)
+			out = append(out, "\t// jass2lua: module free function dropped from struct paste\n")
+		case structOpenerRe.MatchString(t):
+			i = skipModuleBlock(lines, i+1, structCloserRe)
+			out = append(out, "\t// jass2lua: nested struct dropped from struct paste\n")
+		case methodOpenerRe.MatchString(t) || operatorOpenerRe.MatchString(t):
+			if end := moduleMethodBodyEnd(lines, i+1); end >= 0 {
+				out = append(out, lines[i:end+1]...) // opener … endmethod inclusive
+				i = end + 1
+			} else {
+				out = append(out, "\t// jass2lua: bodyless interface method signature dropped from struct paste\n")
+				i++
+			}
+		case valuelessConstantRe.MatchString(t):
+			out = append(out, "\t// jass2lua: bodyless constant declaration dropped from struct paste\n")
+			i++
+		default:
+			out = append(out, lines[i])
+			i++
+		}
+	}
+	return out
+}
+
+// skipModuleBlock returns the index just past the first line matching closer,
+// starting the scan at start. If no closer is found the whole remainder is
+// consumed (a malformed block can't be safely pasted anyway).
+func skipModuleBlock(lines []string, start int, closer *regexp.Regexp) int {
+	for j := start; j < len(lines); j++ {
+		if closer.MatchString(strings.TrimSpace(lines[j])) {
+			return j + 1
+		}
+	}
+	return len(lines)
+}
+
+// moduleMethodBodyEnd returns the index of the endmethod closing a method whose
+// opener sits just before start, or -1 if the method is bodyless — i.e. another
+// method/operator opener or the struct closer appears before any endmethod
+// (the hallmark of an interface-style signature-only declaration). Method
+// bodies hold only statements, which never match a method opener, so this scan
+// is unambiguous.
+func moduleMethodBodyEnd(lines []string, start int) int {
+	for j := start; j < len(lines); j++ {
+		t := strings.TrimSpace(stripInlineComment(lines[j]))
+		if methodCloserRe.MatchString(t) {
+			return j
+		}
+		if methodOpenerRe.MatchString(t) || operatorOpenerRe.MatchString(t) || structCloserRe.MatchString(t) {
+			return -1
+		}
+	}
+	return -1
 }
 
 // stripStaticIf walks bodyLines and removes `static if SOMETHING …

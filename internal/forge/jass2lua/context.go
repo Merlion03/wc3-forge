@@ -149,17 +149,25 @@ func (c *GlobalContext) MacrosFor() map[string]Macro {
 // global context is nil, the section-local map is returned unchanged so the
 // isolated path behaves exactly as before.
 //
-// CAUTION — DO NOT use this on the production convert path. Inlining a module
-// body that was defined in ANOTHER section is semantically what JassHelper
-// does, but in practice it surfaces a SEPARATE, pre-existing weakness in the
-// struct method-body transpiler (`set this.x = …` → "expected lhs" recovery):
-// pasting a foreign module's method bodies into a struct turns those bodies'
-// own transpile failures into newly-reported errors on a section that was
-// previously clean (it never inlined the body, so the failure stayed hidden).
-// Measured on the Enfo map this regressed previously-clean sections and added
-// ~852 inline errors. The convert path therefore uses ModulesForSection
-// (local-only). ModulesFor is retained for tests + future use once the struct
-// method-body recovery is hardened (then it becomes safe to enable globally).
+// This IS the production convert path: a struct's `implement Foo` inlines Foo's
+// body even when Foo lives in another section (cross-trigger vJASS). Enabling
+// it naively used to regress the Enfo map 514 → 1,366 (+852) because the only
+// resolvable cross-section module there (MisssileStruct) is a 1,080-line
+// interface/documentation module — bodyless `static method` signatures and
+// valueless `constant` decls describing what an implementer SHOULD write.
+// Pasted verbatim, the bodyless signatures made the struct parser over-collect
+// every following declaration as a method "body", which the statement parser
+// then rejected token-by-token. Two fixes made global inlining safe (Enfo now
+// 513, BELOW the 514 baseline):
+//
+//   1. inlineImplements sanitizes the pasted body (sanitizeModuleBodyForPaste
+//      in structs.go) — dropping bodyless signatures, top-level globals/
+//      function/interface/nested-struct blocks, and valueless constants — so a
+//      documentation module degrades to comments and a well-formed module
+//      inlines cleanly.
+//   2. parseSet accepts a call-expression assignment target
+//      (`set ThisType(i).field = v`), which `extends array` allocator methods
+//      emit; this also fixed 3 pre-existing baseline errors.
 func (c *GlobalContext) ModulesFor(local map[string]ModuleDef) map[string]ModuleDef {
 	if c == nil || len(c.Modules) == 0 {
 		return local
@@ -174,16 +182,11 @@ func (c *GlobalContext) ModulesFor(local map[string]ModuleDef) map[string]Module
 	return out
 }
 
-// ModulesForSection returns the SECTION-LOCAL module table unchanged. This is
-// the DO-NO-HARM default the production convert path uses: cross-section
-// `implement` inlining is deliberately NOT performed here (see ModulesFor's
-// caution). Cross-section visibility for textmacros (MacrosFor) and struct /
-// library names (KnownNamesFor) IS safe and is what we ship; module body
-// inlining across sections waits on the struct method-body transpiler.
-//
-// Kept as a method (rather than passing `local` directly at the call site) so
-// the convert path reads symmetrically with MacrosFor/KnownNamesFor and the
-// intent is documented at one place.
+// ModulesForSection returns the SECTION-LOCAL module table unchanged, i.e.
+// cross-section `implement` inlining is NOT performed. The production convert
+// path now uses ModulesFor (global) — see its doc for why that became safe.
+// This local-only variant is retained for callers that explicitly want module
+// isolation and for the tests that contrast the two behaviors.
 func (c *GlobalContext) ModulesForSection(local map[string]ModuleDef) map[string]ModuleDef {
 	return local
 }

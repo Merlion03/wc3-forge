@@ -391,10 +391,11 @@ func transpileSectionScript(id int32, label, kind, src string, ctx *jass2lua.Glo
 	// (cross-section struct names + library publics) so the struct ref-rewriter
 	// treats a struct defined elsewhere as dot (static) not colon (instance).
 	known := ctx.KnownNamesFor(jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil))
-	// Pass the section-local module table (ModulesForSection is local-only:
-	// cross-section `implement` body inlining is deliberately NOT performed —
-	// see GlobalContext.ModulesFor's caution).
-	st := jass2lua.PreprocessStructs(withoutDefines, ctx.ModulesForSection(mods.Modules), known)
+	// Pass the GLOBAL module table so a struct's `implement Foo` inlines Foo's
+	// body even when Foo is defined in another section (cross-trigger vJASS).
+	// inlineImplements sanitizes the pasted body so interface/documentation
+	// modules degrade gracefully instead of cascading — see ModulesFor.
+	st := jass2lua.PreprocessStructs(withoutDefines, ctx.ModulesFor(mods.Modules), known)
 	// P0#2: a "script" section whose post-preprocess body has no top-level
 	// function/globals decl is a bare statement list (a GUI-style custom-script
 	// trigger body), not a full JASS file. Feeding such a body to the top-level
@@ -467,7 +468,7 @@ func transpileSectionCustomText(id int32, triggerName, src string, ctx *jass2lua
 	withoutIfaces := jass2lua.PreprocessInterfaces(mods.Expanded)
 	withoutDefines := jass2lua.PreprocessDefines(withoutIfaces)
 	known := ctx.KnownNamesFor(jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil))
-	st := jass2lua.PreprocessStructs(withoutDefines, ctx.ModulesForSection(mods.Modules), known)
+	st := jass2lua.PreprocessStructs(withoutDefines, ctx.ModulesFor(mods.Modules), known)
 	lua, parseErrs, lexErr := jass2lua.TranspileFunctionWithErrors(triggerName+"_CustomText", st.Expanded)
 	// P0#1 completion: also surface struct method-body transpile errors produced
 	// during the splice (see transpileSectionScript for the full rationale).
@@ -770,7 +771,7 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 			withoutIfaces := jass2lua.PreprocessInterfaces(mods.Expanded)
 			withoutDefines := jass2lua.PreprocessDefines(withoutIfaces)
 			known := convertCtx.KnownNamesFor(jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil))
-			st := jass2lua.PreprocessStructs(withoutDefines, convertCtx.ModulesForSection(mods.Modules), known)
+			st := jass2lua.PreprocessStructs(withoutDefines, convertCtx.ModulesFor(mods.Modules), known)
 			libInits = append(libInits, ls.InitOrder...)
 			structInits = append(structInits, st.Inits...)
 			var lua string
@@ -811,7 +812,7 @@ func (s *Session) ConvertToLuaWithOptions(opts ConvertToLuaOptions) (*ConvertToL
 		withoutIfaces := jass2lua.PreprocessInterfaces(mods.Expanded)
 		withoutDefines := jass2lua.PreprocessDefines(withoutIfaces)
 		known := convertCtx.KnownNamesFor(jass2lua.CollectTopLevelNames(withoutDefines, ls.PublicNames, nil))
-		st := jass2lua.PreprocessStructs(withoutDefines, convertCtx.ModulesForSection(mods.Modules), known)
+		st := jass2lua.PreprocessStructs(withoutDefines, convertCtx.ModulesFor(mods.Modules), known)
 		in.LibInits = append(in.LibInits, ls.InitOrder...)
 		in.StructInits = append(in.StructInits, st.Inits...)
 		lua, _ := jass2lua.TranspileScript(st.Expanded)
