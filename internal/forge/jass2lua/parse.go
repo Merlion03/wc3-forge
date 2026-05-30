@@ -776,6 +776,42 @@ func (p *parser) parseSet() (*SetStmt, error) {
 	}
 	name := p.advance().Value
 	var lhs Lhs = &Ident{Name: name}
+	// vJASS type-cast receiver: `set ThisType(i).field = v` (and the indexed
+	// variant). `extends array` structs allocate via casts like
+	// `set ReffineCorruption(0)._first = self`, so the assignment target's base
+	// is a CALL expression, not a bare ident. The read side already parses this
+	// (via parsePrimary), so reuse the same call + member-chain machinery here.
+	// This branch was previously a hard parse error (a `(` after the name fell
+	// through to the `=` expectation), so handling it is strictly additive — it
+	// can only turn former errors into valid assignments, never change an
+	// existing successful parse.
+	if p.peek().Kind == TokOp && p.peek().Value == "(" {
+		p.advance()
+		args, err := p.parseArgList()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TokOp, ")"); err != nil {
+			return nil, err
+		}
+		chained, err := p.parseMemberChain(&CallExpr{Func: name, Args: args})
+		if err != nil {
+			return nil, err
+		}
+		target, ok := chained.(Lhs)
+		if !ok {
+			return nil, fmt.Errorf("invalid assignment target at line %d:%d", p.peek().Line, p.peek().Col)
+		}
+		if _, err := p.expect(TokOp, "="); err != nil {
+			return nil, err
+		}
+		val, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		p.skipToEOL()
+		return &SetStmt{Target: target, Value: val}, nil
+	}
 	// Optional array index: name[expr]
 	if p.peek().Kind == TokOp && p.peek().Value == "[" {
 		p.advance()

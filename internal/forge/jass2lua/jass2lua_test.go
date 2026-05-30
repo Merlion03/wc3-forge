@@ -311,6 +311,27 @@ endfunction
 	}
 }
 
+// TestTranspile_SetCallExprTarget covers the parseSet call-expression target:
+// `extends array` struct allocators assign through a type-cast receiver, e.g.
+// `set ThisType(0)._first = self`. The read side already parsed this; parseSet
+// must accept it as an lvalue too (previously a hard "expected op =" error).
+func TestTranspile_SetCallExprTarget(t *testing.T) {
+	jass := `function A takes nothing returns nothing
+    set Foo(0)._first = 7
+endfunction
+`
+	got, err := TranspileScript(jass)
+	if err != nil {
+		t.Fatalf("transpile err: %v", err)
+	}
+	if strings.Contains(got, "jass2lua failed") {
+		t.Fatalf("unexpected inline error marker:\n%s", got)
+	}
+	if !strings.Contains(got, "Foo(0)._first = 7") {
+		t.Errorf("expected call-expr assignment target, got:\n%s", got)
+	}
+}
+
 // TestTranspileFunction_BodyOnly checks the auto-wrap path used for per-trigger
 // custom_text blocks that are just statements.
 func TestTranspileFunction_BodyOnly(t *testing.T) {

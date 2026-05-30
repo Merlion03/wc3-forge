@@ -952,3 +952,50 @@ endstruct
 		t.Errorf("explicit receiver wrongly got `self` injected:\n%s", lua)
 	}
 }
+
+// TestSanitizeModuleBodyForPaste covers the cross-trigger inliner's body
+// sanitizer: a module body pasted into a struct must shed constructs that are
+// invalid as struct members (top-level globals/function/interface/nested-struct
+// blocks), interface-style bodyless method signatures (no endmethod before the
+// next opener), and valueless constant declarations — while keeping real
+// methods (opener..endmethod) and real field declarations. Without this, a
+// documentation/interface module (e.g. Enfo's 1080-line MisssileStruct) makes
+// the struct parser over-collect and cascade errors.
+func TestSanitizeModuleBodyForPaste(t *testing.T) {
+	raw := "static method onCollide takes integer m, integer u returns boolean\n" + // bodyless interface sig -> dropped
+		"static method launch takes integer m returns nothing\n" + // real method ...
+		"call doThing()\n" +
+		"endmethod\n" + // ... opener..endmethod kept
+		"constant real FOO\n" + // valueless constant decl -> dropped
+		"integer count = 0\n" + // real field -> kept
+		"globals\n" + // top-level block -> dropped whole
+		"integer g = 1\n" +
+		"endglobals\n" +
+		"function helper takes nothing returns nothing\n" + // free function -> dropped whole
+		"call x()\n" +
+		"endfunction\n"
+
+	out := strings.Join(sanitizeModuleBodyForPaste(raw), "")
+
+	// Dropped:
+	if strings.Contains(out, "onCollide") {
+		t.Errorf("bodyless interface method signature should be dropped:\n%s", out)
+	}
+	if strings.Contains(out, "constant real FOO") {
+		t.Errorf("valueless constant decl should be dropped:\n%s", out)
+	}
+	if strings.Contains(out, "endglobals") || strings.Contains(out, "integer g = 1") {
+		t.Errorf("top-level globals block should be dropped:\n%s", out)
+	}
+	if strings.Contains(out, "function helper") || strings.Contains(out, "call x()") {
+		t.Errorf("module free function should be dropped:\n%s", out)
+	}
+
+	// Kept:
+	if !strings.Contains(out, "method launch") || !strings.Contains(out, "call doThing()") {
+		t.Errorf("real method (opener..endmethod) should be kept:\n%s", out)
+	}
+	if !strings.Contains(out, "integer count = 0") {
+		t.Errorf("real field declaration should be kept:\n%s", out)
+	}
+}
