@@ -1000,4 +1000,61 @@ function registerContractTools(server: McpServer): void {
     },
     wrap("terrain.get_tile")
   );
+  // --- Terrain brushes (footprint edits; the GUI Terrain Palette engine) ---
+  // col/row are the footprint CENTER. radius is in corner units (0 = single
+  // corner, 1 = 3x3, ...). shape: "circle" (euclidean) or "square" (chebyshev).
+  // Each call is one undo step; bracket a series with history_begin_group /
+  // history_end_group to collapse a multi-dab edit into one.
+  server.tool(
+    "terrain_paint_tile",
+    "Paint a ground texture (tile) over a brush footprint of terrain corners. col/row are the footprint center (0-based corner indices). radius is in corner units (0 = single corner). shape is 'circle' or 'square'. ground_tile_id is a 4-char FourCC that must be in the map's ground palette. Returns { ok: true }. Undo-aware (one step per call).",
+    {
+      col: z.number().int().describe("footprint center column (0-based corner)"),
+      row: z.number().int().describe("footprint center row (0-based corner)"),
+      radius: z.number().int().optional().describe("brush radius in corner units (0 = single corner)"),
+      shape: z.enum(["circle", "square"]).optional().describe("brush shape (default circle)"),
+      ground_tile_id: z.string().describe("4-char FourCC in the map ground palette"),
+    },
+    wrap("terrain.paint_tile")
+  );
+  server.tool(
+    "terrain_brush_height",
+    "Raise/lower/flatten/smooth the terrain heightfield over a brush footprint. mode: 'raise' | 'lower' | 'flatten' | 'smooth'. strength is game-Z units added per dab for raise/lower (default 16), or a 0..1 blend fraction for smooth (default 0.5). target is the height (game-Z) to flatten to. Returns { ok: true }. Undo-aware.",
+    {
+      col: z.number().int().describe("footprint center column (0-based corner)"),
+      row: z.number().int().describe("footprint center row (0-based corner)"),
+      radius: z.number().int().optional().describe("brush radius in corner units (0 = single corner)"),
+      shape: z.enum(["circle", "square"]).optional().describe("brush shape (default circle)"),
+      mode: z.enum(["raise", "lower", "flatten", "smooth"]).describe("height brush mode"),
+      strength: z.number().optional().describe("game-Z per dab (raise/lower) or 0..1 blend (smooth)"),
+      target: z.number().optional().describe("flatten target height (game-Z)"),
+    },
+    wrap("terrain.brush_height")
+  );
+  server.tool(
+    "terrain_brush_cliff",
+    "Raise/lower/set the integer cliff layer (0..15) over a brush footprint. mode: 'raise' (layer+1) | 'lower' (layer-1) | 'set' (layer=level). cliff_tile_id selects the cliff tileset FourCC (empty → slot 0); the brush sets each corner's cliff texture so a wall actually renders. Cliff walls are derived from layer differences, so painting a higher layer next to lower terrain creates a cliff. Returns { ok: true }. Undo-aware.",
+    {
+      col: z.number().int().describe("footprint center column (0-based corner)"),
+      row: z.number().int().describe("footprint center row (0-based corner)"),
+      radius: z.number().int().optional().describe("brush radius in corner units (0 = single corner)"),
+      shape: z.enum(["circle", "square"]).optional().describe("brush shape (default circle)"),
+      mode: z.enum(["raise", "lower", "set"]).describe("cliff brush mode"),
+      level: z.number().int().optional().describe("target layer (0..15) for mode 'set'"),
+      cliff_tile_id: z.string().optional().describe("4-char cliff-tileset FourCC (empty → slot 0)"),
+    },
+    wrap("terrain.brush_cliff")
+  );
+  server.tool(
+    "terrain_brush_ramp",
+    "Toggle the ramp flag over a brush footprint. on=true makes the cliff step under the footprint render as a walkable slope; on=false reverts it to a sheer wall. Use over a cliff edge after raising a cliff to make it traversable. Returns { ok: true }. Undo-aware.",
+    {
+      col: z.number().int().describe("footprint center column (0-based corner)"),
+      row: z.number().int().describe("footprint center row (0-based corner)"),
+      radius: z.number().int().optional().describe("brush radius in corner units (0 = single corner)"),
+      shape: z.enum(["circle", "square"]).optional().describe("brush shape (default circle)"),
+      on: z.boolean().describe("true = mark ramp (slope), false = clear ramp (wall)"),
+    },
+    wrap("terrain.brush_ramp")
+  );
 }
