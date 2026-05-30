@@ -1667,6 +1667,17 @@ func (s *Session) SwapTileset(req SwapTilesetRequest) error {
 // kind) or the field isn't in the kind's metadata. Does not flip dirty /
 // record history when the call errored out.
 func (s *Session) SetObjectField(cfg *KindConfig, id, field, value string) error {
+	// LOCK-ORDERING HAZARD — warm the per-kind base cache BEFORE taking s.mu.
+	// loadObjectBase's first-ever call for a kind runs readBaseAsset, whose
+	// production reader (main.readBaseAsset → Current.ReadFile) takes
+	// Current.mu.RLock(). If that first load happened while this goroutine
+	// already held s.mu.Lock() (write), the RLock would block forever —
+	// Go's sync.RWMutex is non-reentrant, so a write-holder can't re-acquire
+	// a read lock on the same mutex. Warming here (no lock held) makes the
+	// in-lock loadObjectBase calls below idempotent cache hits (once.Do is
+	// already satisfied), so no readBaseAsset / RLock runs under s.mu. Do NOT
+	// move base loading inside the lock or move this warm-up below it.
+	loadObjectBase(cfg)
 	s.mu.Lock()
 	if !s.loaded {
 		s.mu.Unlock()
@@ -1731,6 +1742,11 @@ func (s *Session) SetObjectField(cfg *KindConfig, id, field, value string) error
 // Errors if newID collides with an existing custom or shadows a stock row.
 // Recorded in history as one undo step.
 func (s *Session) AddCustomObject(cfg *KindConfig, newID, baseID string) (string, error) {
+	// LOCK-ORDERING HAZARD — warm the base cache before s.mu (see the comment
+	// on SetObjectField). addCustomObject + allocateCustomID both call
+	// loadObjectBase while we hold the write lock; the first-ever load would
+	// otherwise deadlock on Current.mu.RLock inside readBaseAsset.
+	loadObjectBase(cfg)
 	s.mu.Lock()
 	if !s.loaded {
 		s.mu.Unlock()
@@ -1767,6 +1783,12 @@ func (s *Session) AddCustomObject(cfg *KindConfig, newID, baseID string) (string
 // the base SLK). Recorded in history as one undo step; Revert re-appends
 // the snapshot.
 func (s *Session) DeleteCustomObject(cfg *KindConfig, id string) error {
+	// LOCK-ORDERING HAZARD — warm the base cache before s.mu (see the comment
+	// on SetObjectField). DeleteCustomObject's in-lock path doesn't load base
+	// today, but warming up-front is idempotent + keeps every object-mutator's
+	// lock-ordering uniform so a future edit that adds a base lookup can't
+	// silently reintroduce the deadlock.
+	loadObjectBase(cfg)
 	s.mu.Lock()
 	if !s.loaded {
 		s.mu.Unlock()

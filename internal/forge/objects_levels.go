@@ -221,6 +221,14 @@ func (s *Session) SetObjectFieldLevel(cfg *KindConfig, id, field string, level u
 	if !cfg.ShadowOpt {
 		return fmt.Errorf("kind %q has no per-level fields (level must be 0)", cfg.Kind)
 	}
+	// LOCK-ORDERING HAZARD — warm the per-kind base cache BEFORE s.mu. The
+	// level>0 path below (and setObjectFieldLevel itself) call loadObjectBase
+	// while holding the write lock; the first-ever load runs readBaseAsset,
+	// whose reader takes Current.mu.RLock(). A write-holder re-acquiring a
+	// read lock on the same non-reentrant RWMutex deadlocks forever. Warming
+	// here (no lock held) turns the in-lock loads into cache hits. See
+	// SetObjectField for the full rationale; do NOT remove this.
+	loadObjectBase(cfg)
 	s.mu.Lock()
 	if !s.loaded {
 		s.mu.Unlock()
