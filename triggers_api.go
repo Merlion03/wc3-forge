@@ -757,10 +757,11 @@ type TranspileSectionDTO struct {
 	ID                 int32    `json:"id"`
 	Label              string   `json:"label"`
 	Kind               string   `json:"kind"`
-	Original           string   `json:"original"`
-	Transpiled         string   `json:"transpiled"`
-	Errors             []string `json:"errors,omitempty"`
-	PreprocessWarnings []string `json:"preprocess_warnings,omitempty"`
+	Original           string             `json:"original"`
+	Transpiled         string             `json:"transpiled"`
+	Diagnostics        []forge.Diagnostic `json:"diagnostics,omitempty"`
+	Errors             []string           `json:"errors,omitempty"`
+	PreprocessWarnings []string           `json:"preprocess_warnings,omitempty"`
 }
 
 // TranspilePreviewDTO mirrors forge.TranspilePreview.
@@ -784,6 +785,7 @@ func (a *App) GetTranspilePreview() (*TranspilePreviewDTO, error) {
 			Kind:               s.Kind,
 			Original:           s.Original,
 			Transpiled:         s.Transpiled,
+			Diagnostics:        s.Diagnostics,
 			Errors:             s.Errors,
 			PreprocessWarnings: s.PreprocessWarnings,
 		})

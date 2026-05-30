@@ -69,6 +69,22 @@ export namespace doodadsdoo {
 
 export namespace forge {
 	
+	export class Diagnostic {
+	    lua_line: number;
+	    reason: string;
+	    source?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Diagnostic(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.lua_line = source["lua_line"];
+	        this.reason = source["reason"];
+	        this.source = source["source"];
+	    }
+	}
 	export class HistoryEntry {
 	    index: number;
 	    label: string;
@@ -771,6 +787,7 @@ export namespace main {
 	    kind: string;
 	    original: string;
 	    transpiled: string;
+	    diagnostics?: forge.Diagnostic[];
 	    errors?: string[];
 	    preprocess_warnings?: string[];
 	
@@ -785,9 +802,28 @@ export namespace main {
 	        this.kind = source["kind"];
 	        this.original = source["original"];
 	        this.transpiled = source["transpiled"];
+	        this.diagnostics = this.convertValues(source["diagnostics"], forge.Diagnostic);
 	        this.errors = source["errors"];
 	        this.preprocess_warnings = source["preprocess_warnings"];
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class TranspilePreviewDTO {
 	    sections: TranspileSectionDTO[];

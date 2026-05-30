@@ -64,7 +64,12 @@ func main() {
 	failingSections := 0
 	for i := range preview.Sections {
 		sec := &preview.Sections[i]
-		n := inlineCount(sec.Transpiled)
+		// Markers are now stripped from .Transpiled and surfaced as structured
+		// Diagnostics; fall back to the text scan for older payloads.
+		n := len(sec.Diagnostics)
+		if n == 0 {
+			n = inlineCount(sec.Transpiled)
+		}
 		totalInline += n
 		if n > 0 {
 			failingSections++

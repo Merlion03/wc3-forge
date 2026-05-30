@@ -598,15 +598,18 @@ func TestTranspilePreview_SurfacesInlineErrorCount(t *testing.T) {
 	if broken == nil {
 		t.Fatalf("missing section for trigger 11; got %+v", preview.Sections)
 	}
-	inlineCount := strings.Count(broken.Transpiled, "error(")
+	inlineCount := len(broken.Diagnostics)
 	if inlineCount == 0 {
-		t.Fatalf("expected inline error() markers in transpiled output, got none:\n%s", broken.Transpiled)
+		t.Fatalf("expected diagnostics for untranslatable statements, got none:\n%s", broken.Transpiled)
+	}
+	if strings.Contains(broken.Transpiled, "jass2lua failed") {
+		t.Errorf("transpiled output should be marker-free (diagnostics are structured now):\n%s", broken.Transpiled)
 	}
 	if len(broken.Errors) == 0 {
-		t.Fatalf("P0#1 regression: section reported 0 errors but produced %d inline error() markers", inlineCount)
+		t.Fatalf("P0#1 regression: section reported 0 errors but produced %d diagnostics", inlineCount)
 	}
 	if len(broken.Errors) != inlineCount {
-		t.Errorf("section.Errors count (%d) should match inline error() count (%d)\nerrors: %v\nlua:\n%s",
+		t.Errorf("section.Errors count (%d) should match diagnostics count (%d)\nerrors: %v\nlua:\n%s",
 			len(broken.Errors), inlineCount, broken.Errors, broken.Transpiled)
 	}
 }
@@ -656,12 +659,12 @@ func TestTranspilePreview_SurfacesStructMethodErrorCount(t *testing.T) {
 	if sec == nil {
 		t.Fatalf("missing section for trigger 11; got %+v", preview.Sections)
 	}
-	inlineCount := strings.Count(sec.Transpiled, "error(")
+	inlineCount := len(sec.Diagnostics)
 	if inlineCount == 0 {
-		t.Fatalf("expected inline error() markers from the bad struct method, got none:\n%s", sec.Transpiled)
+		t.Fatalf("expected diagnostics from the bad struct method, got none:\n%s", sec.Transpiled)
 	}
 	if len(sec.Errors) == 0 {
-		t.Fatalf("P0#1 completion regression: struct-method failure produced %d inline error() markers but section reported 0 errors", inlineCount)
+		t.Fatalf("P0#1 completion regression: struct-method failure produced %d diagnostics but section reported 0 errors", inlineCount)
 	}
 	// At least one surfaced error must point at the offending struct method.
 	found := false
