@@ -9,6 +9,8 @@
     GetUnitTypeIndex, GetDoodadTypeIndex,
     NewMapDialog as NewMapSaveDialog, CreateNewMap, WriteNewMap, ReportDiagnostics,
     MoveUnit, MoveDoodad, CreateDoodad, IsDirty, SaveMap,
+    PaintTerrainTile, BrushTerrainHeight, BrushTerrainCliff, BrushTerrainRamp, GetTerrainTile,
+    BeginUndoGroup, EndUndoGroup,
     LaunchInWC3,
     Undo, Redo, CanUndo, CanRedo, HistoryList,
     CheckConvertToLua,
@@ -38,6 +40,7 @@
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
   import DoodadPalette from './DoodadPalette.svelte'
+  import TerrainPalette, { type TerrainBrush } from './TerrainPalette.svelte'
   import UpdateDialog from './UpdateDialog.svelte'
   import CameraOrbitGizmo from './CameraOrbitGizmo.svelte'
   import DiagnosticsOverlay from './DiagnosticsOverlay.svelte'
@@ -103,6 +106,18 @@
   // null = nothing armed. Owned here; mirrored to the scene via
   // scene.setPlacementMode and read by the palette to highlight the armed icon.
   let armedDoodadType: string | null = $state(null)
+
+  // Terrain-brush state. The Terrain Palette reports the armed brush here; we
+  // mirror its size/shape to the scene's footprint cursor and put the scene in
+  // brush mode. A brush stroke (mousedown→drag→mouseup) arrives via
+  // handleTerrainBrushStroke, which brackets the Go brush calls in one undo
+  // group. null = nothing armed.
+  let terrainBrush: TerrainBrush | null = $state(null)
+  // Serializes the async brush calls of a single stroke so BeginUndoGroup, the
+  // dabs, and EndUndoGroup always run in order even as paint events fire fast.
+  let terrainBrushChain: Promise<unknown> = Promise.resolve()
+  // Flatten target Z, captured on stroke start (the height under the first dab).
+  let terrainFlattenTarget = 0
 
   // Diagnostics: top-left overlay + in-canvas heartbeat (F9). Verbose logging
   // drops the log threshold to 'debug' so per-frame/per-asset traces are
@@ -717,6 +732,7 @@
       scene.onPick(handlePick)
       scene.onTerrainPick(handleTerrainPick)
       scene.onPlacementPick(handlePlacementPick)
+      scene.onTerrainBrushStroke(handleTerrainBrushStroke)
       // Re-apply persisted diagnostics / verbose-logging settings now that the
       // scene + logger exist.
       scene.setDiagnosticsMode(diagnosticsOn)
@@ -1404,8 +1420,89 @@
       showToast('Open a map before placing doodads', 'error')
       return
     }
+    if (typeId) onTerrainBrushChange(null) // doodad + terrain brush are exclusive
     armedDoodadType = typeId
     scene?.setPlacementMode(!!typeId)
+  }
+
+  // Terrain Palette → scene wiring. The palette reports the armed brush (tool +
+  // size/shape/strength + selected tiles) or null to disarm. We mirror the
+  // footprint to the scene's cursor and toggle brush mode; arming a terrain
+  // brush is mutually exclusive with doodad placement + terrain-pick so the
+  // canvas's click routing stays unambiguous.
+  function onTerrainBrushChange(brush: TerrainBrush | null) {
+    terrainBrush = brush
+    if (brush) {
+      if (armedDoodadType) { armedDoodadType = null; scene?.setPlacementMode(false) }
+      if (terrainPickModeOn) { terrainPickModeOn = false; terrainCell = null; scene?.setTerrainPickMode(false); scene?.setHighlightedCell(null) }
+      scene?.setTerrainBrushShape({ radius: brush.radius, shape: brush.shape })
+      scene?.setTerrainBrushMode(true)
+    } else {
+      scene?.setTerrainBrushMode(false)
+    }
+  }
+
+  // A terrain brush stroke: 'start' opens an undo group + paints the first dab,
+  // 'paint' paints each subsequent dab as the cursor crosses cells, 'end' closes
+  // the group. Calls are chained on terrainBrushChain so they apply in order
+  // (BeginUndoGroup must land before any dab, EndUndoGroup after the last).
+  function handleTerrainBrushStroke(cell: TerrainCellInfo | null, phase: 'start' | 'paint' | 'end') {
+    const b = terrainBrush
+    if (!b) return
+    if (phase === 'end') {
+      terrainBrushChain = terrainBrushChain.then(() => EndUndoGroup()).catch(() => {})
+      return
+    }
+    if (!cell) return
+    if (phase === 'start') {
+      terrainBrushChain = terrainBrushChain
+        .then(() => BeginUndoGroup(brushLabel(b.tool)))
+        .then(async () => {
+          // Flatten needs the height under the first dab as its target level.
+          if (b.tool === 'flatten') {
+            try { terrainFlattenTarget = (await GetTerrainTile(cell.col, cell.row)).height } catch { terrainFlattenTarget = 0 }
+          }
+        })
+        .then(() => applyBrushDab(b, cell))
+        .catch(() => {})
+      return
+    }
+    // phase === 'paint'
+    terrainBrushChain = terrainBrushChain.then(() => applyBrushDab(b, cell)).catch(() => {})
+  }
+
+  function brushLabel(tool: TerrainBrush['tool']): string {
+    if (tool === 'paint') return 'Paint terrain'
+    if (tool === 'ramp' || tool === 'rampOff') return 'Edit ramp'
+    if (tool === 'cliffRaise' || tool === 'cliffLower') return 'Edit cliff'
+    return 'Edit terrain height'
+  }
+
+  // Dispatch one dab to the matching Go brush. col/row are the footprint center.
+  function applyBrushDab(b: TerrainBrush, cell: TerrainCellInfo): Promise<unknown> {
+    const { col, row } = cell
+    switch (b.tool) {
+      case 'paint':
+        return PaintTerrainTile(col, row, b.radius, b.shape, b.groundTileId)
+      case 'raise':
+        return BrushTerrainHeight(col, row, b.radius, b.shape, 'raise', b.strength, 0)
+      case 'lower':
+        return BrushTerrainHeight(col, row, b.radius, b.shape, 'lower', b.strength, 0)
+      case 'flatten':
+        return BrushTerrainHeight(col, row, b.radius, b.shape, 'flatten', 0, terrainFlattenTarget)
+      case 'smooth':
+        return BrushTerrainHeight(col, row, b.radius, b.shape, 'smooth', b.strength, 0)
+      case 'cliffRaise':
+        return BrushTerrainCliff(col, row, b.radius, b.shape, 'raise', 0, b.cliffTileId)
+      case 'cliffLower':
+        return BrushTerrainCliff(col, row, b.radius, b.shape, 'lower', 0, b.cliffTileId)
+      case 'ramp':
+        return BrushTerrainRamp(col, row, b.radius, b.shape, true)
+      case 'rampOff':
+        return BrushTerrainRamp(col, row, b.radius, b.shape, false)
+      default:
+        return Promise.resolve()
+    }
   }
 
   // Place the armed doodad at a clicked ground point. The scene gives us the
@@ -1599,6 +1696,7 @@
     // two click-routing modes don't fight over the canvas (placement wins in
     // the scene's click handler, which would otherwise swallow terrain clicks).
     if (!terrainPickModeOn && armedDoodadType) armDoodad(null)
+    if (!terrainPickModeOn && terrainBrush) onTerrainBrushChange(null)
     terrainPickModeOn = !terrainPickModeOn
     scene?.setTerrainPickMode(terrainPickModeOn)
     if (!terrainPickModeOn) {
@@ -2306,6 +2404,11 @@
       {#if status.loaded}
         <DoodadPalette armedTypeId={armedDoodadType} {reforged} onArm={armDoodad} />
       {/if}
+      <!-- Terrain palette: floating "mountain" launcher (bottom-left, beside the
+           doodad "+"). Reports the armed brush via onChange; App drives the
+           scene's brush mode + the Go brush calls. Always mounted so its FAB is
+           available; it shows an "open a map" hint when no map is loaded. -->
+      <TerrainPalette loaded={status.loaded} onChange={onTerrainBrushChange} />
     </section>
 
     <Splitter direction="vertical"

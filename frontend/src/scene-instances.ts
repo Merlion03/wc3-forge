@@ -47,6 +47,7 @@ import {
   buildSlocRenderer, type SlocRenderer, type SlocMarker,
 } from './sloc-markers'
 import { buildCellHighlight, type CellHighlight } from './cell-highlight'
+import { buildBrushCursor, type BrushCursor } from './brush-cursor'
 import { buildPathBlockerRenderer, type PathBlockerRenderer, type PathBlockerMarker } from './path-blockers'
 import { buildGizmo, type GizmoRenderer, type SelectionItem as GizmoSelectionItem } from './gizmo'
 
@@ -466,6 +467,20 @@ import { pickTerrainCell, rayGroundPlane, type TerrainCellInfo } from './terrain
 export type { TerrainCellInfo } from './terrain-picker'
 export type TerrainPickCallback = (cell: TerrainCellInfo | null) => void
 /**
+ * A terrain BRUSH stroke event while the Terrain Palette is armed. `phase`
+ * tracks the drag lifecycle so the caller can bracket the whole stroke in one
+ * undo group:
+ *   - 'start' fires on mousedown (open the undo group, paint the first dab),
+ *   - 'paint' fires as the cursor crosses into a new cell during the drag,
+ *   - 'end'   fires on mouseup / Escape (close the undo group). On 'end' `cell`
+ *             is the last-painted cell (or null if the stroke never landed).
+ * `cell` carries the footprint CENTER (BL-corner col/row + world XY).
+ */
+export type TerrainBrushPhase = 'start' | 'paint' | 'end'
+export type TerrainBrushCallback = (cell: TerrainCellInfo | null, phase: TerrainBrushPhase) => void
+/** Brush footprint descriptor the palette pushes to the scene for the cursor. */
+export interface TerrainBrushShape { radius: number; shape: 'circle' | 'square' }
+/**
  * A click-to-place hit while placement mode is armed. `worldX`/`worldY` are
  * the game-coordinate intersection of the click ray with the ground, and `z`
  * is the terrain height sampled (bilinearly) at that point so a newly-placed
@@ -623,6 +638,20 @@ export interface SceneAPI {
    * sky background or outside the map's bounds).
    */
   onTerrainPick(cb: TerrainPickCallback): void
+  /**
+   * Toggle terrain-BRUSH mode (the Terrain Palette's paint engine). When active,
+   * a plain LMB press-drag-release on the canvas streams a brush stroke to the
+   * onTerrainBrushStroke callback (start → paint… → end) instead of selecting.
+   * Takes priority over terrain-pick + placement. Camera pan (RMB/MMB) still
+   * works; Escape ends the stroke. Cursor shows the footprint ring.
+   */
+  setTerrainBrushMode(active: boolean): void
+  /** Current terrain-brush-mode flag — for UI display. */
+  isTerrainBrushMode(): boolean
+  /** Register the terrain-brush stroke callback (see TerrainBrushCallback). */
+  onTerrainBrushStroke(cb: TerrainBrushCallback): void
+  /** Set the brush footprint (radius in corner units + shape) for the cursor. */
+  setTerrainBrushShape(shape: TerrainBrushShape): void
   /**
    * Toggle doodad-placement mode. When active, a plain LMB click on the canvas
    * fires the onPlacementPick callback with the ground-plane intersection and
@@ -887,6 +916,15 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   let terrainPickMode = false
   let terrainPickCallback: TerrainPickCallback | null = null
   let cachedTerrainDTO: any = null
+  // Terrain-BRUSH mode state (Terrain Palette paint engine). When active, a
+  // plain LMB press-drag-release streams a brush stroke; `brushStroking` tracks
+  // an in-progress drag, `brushLastCellKey` dedupes dabs so we only fire when
+  // the cursor crosses into a new cell. brushShape drives the footprint cursor.
+  let terrainBrushMode = false
+  let terrainBrushCallback: TerrainBrushCallback | null = null
+  let brushStroking = false
+  let brushLastCellKey = -1
+  let brushShape: TerrainBrushShape = { radius: 1, shape: 'circle' }
   // Doodad-placement mode state. When true, plain LMB clicks fire the
   // placement callback (with the ground intersection + sampled terrain Z)
   // instead of entity-pick / terrain-inspect. Checked BEFORE terrainPickMode
@@ -948,6 +986,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     cellHighlight = buildCellHighlight((viewer as any).gl as WebGLRenderingContext)
   } catch (e) {
     flog('[cell-highlight] init failed:', e instanceof Error ? e.message : String(e))
+  }
+  // Terrain-brush footprint ring (shown under the cursor while the Terrain
+  // Palette is armed). Same overlay lifetime as cellHighlight; non-fatal build.
+  let brushCursor: BrushCursor | null = null
+  try {
+    brushCursor = buildBrushCursor((viewer as any).gl as WebGLRenderingContext)
+  } catch (e) {
+    flog('[brush-cursor] init failed:', e instanceof Error ? e.message : String(e))
   }
   // Path-blocker overlay (pink/black checker quads at "Pathing Blockers"
   // category doodad positions). Built once per scene, lifetime matches the
@@ -1190,6 +1236,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // Drawn LAST before the gizmo so the wireframe sits visually on top
         // of every other layer including water.
         if (cellHighlight) cellHighlight.draw(scene.camera.viewProjectionMatrix)
+        // Terrain-brush footprint ring (only visible while the palette is armed
+        // and the cursor is over the map). Same always-on-top overlay tier.
+        if (brushCursor) brushCursor.draw(scene.camera.viewProjectionMatrix)
         // Transform gizmo — drawn LAST of all overlays. Always-on-top via
         // gl.disable(DEPTH_TEST) in draw(). Always invoked (the gate used to
         // be `gizmoSelectionItems.length > 0`) so that when selection clears,
@@ -1993,6 +2042,22 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const shift = e.shiftKey
     const ctrl = e.ctrlKey || e.metaKey
 
+    // ── TERRAIN BRUSH STROKE ──────────────────────────────────────────
+    // The Terrain Palette owns plain LMB press-drag-release: open a stroke
+    // and paint the first dab now, then stream more dabs as the cursor crosses
+    // into new cells (onDocMouseMove) until release (onDocMouseUp). We DON'T
+    // set downAt — brushStroking gates the doc handlers and leaving downAt null
+    // keeps the rubber-band / drag-move / gizmo paths inert. Modifier-held
+    // clicks fall through so the user can briefly select without disarming.
+    if (terrainBrushMode && !shift && !ctrl) {
+      brushStroking = true
+      brushLastCellKey = -1
+      const cell = cachedTerrainDTO ? pickTerrainCell(px, py, canvas, scene, cachedTerrainDTO) : null
+      terrainBrushCallback?.(cell, 'start')
+      if (cell) brushLastCellKey = cell.row * 100000 + cell.col
+      return
+    }
+
     // ── GIZMO PRIORITY PICK (design §1.3) ─────────────────────────────
     // Check gizmo handle BEFORE entity selection / drag-to-move logic.
     // Shift is allowed through because it's a gizmo-side modifier (e.g.
@@ -2092,6 +2157,22 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // the canvas mid-gesture (rubber-band should survive a wobble over the
   // app chrome — matches what every other editor does).
   function onDocMouseMove(e: MouseEvent) {
+    // ── Terrain brush stroke (no downAt) ────────────────────────────────
+    // Stream a dab whenever the cursor crosses into a new cell. Painting the
+    // same cell repeatedly is suppressed via brushLastCellKey so a held-still
+    // brush doesn't spam identical edits (raise/lower still accumulates as the
+    // user drags across cells, matching the editor's feel).
+    if (brushStroking) {
+      if (!terrainBrushCallback || !cachedTerrainDTO) return
+      const r = canvas.getBoundingClientRect()
+      const cell = pickTerrainCell(e.clientX - r.left, e.clientY - r.top, canvas, scene, cachedTerrainDTO)
+      if (!cell) return
+      const key = cell.row * 100000 + cell.col
+      if (key === brushLastCellKey) return
+      brushLastCellKey = key
+      terrainBrushCallback(cell, 'paint')
+      return
+    }
     if (!downAt) return
 
     // ── Gizmo drag path ─────────────────────────────────────────────────
@@ -2142,6 +2223,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   }
 
   function onDocMouseUp(e: MouseEvent) {
+    // ── Terrain brush stroke end ────────────────────────────────────────
+    // Close the stroke (the callback closes the undo group). Fires on any
+    // button release while a stroke is open — only LMB starts one, so this is
+    // the matching LMB-up in practice.
+    if (brushStroking) {
+      brushStroking = false
+      brushLastCellKey = -1
+      terrainBrushCallback?.(null, 'end')
+      return
+    }
     const d = downAt
     downAt = null
 
@@ -2266,6 +2357,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (a.isContentEditable) return
     }
+    // Mid-stroke Escape closes the terrain brush stroke (ends the undo group)
+    // so the partial stroke is committed as one step rather than left dangling.
+    if (brushStroking) {
+      brushStroking = false
+      brushLastCellKey = -1
+      terrainBrushCallback?.(null, 'end')
+      return
+    }
     // Placement mode Escape: disarm the palette brush (callback handles the
     // UI-side disarm). Takes priority over selection-clear so a user mid-place
     // who hits Escape exits placement rather than wiping their selection.
@@ -2327,7 +2426,37 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // need to reflect what's under it.
   let lastHoverTs = 0
   const HOVER_THROTTLE_MS = 33
+  // Reposition the brush footprint ring under the given client coords (or hide
+  // it when the pointer is off the map). Sampled to terrain height each move so
+  // the ring hugs the surface.
+  function updateBrushCursorAt(clientX: number, clientY: number) {
+    if (!brushCursor) return
+    const r = canvas.getBoundingClientRect()
+    const xy = groundPlaneXY(clientX - r.left, clientY - r.top)
+    if (!xy) {
+      brushCursor.setBrush(null)
+      return
+    }
+    brushCursor.setBrush({
+      cx: xy[0],
+      cy: xy[1],
+      // Match the Go circle threshold's (r+0.5) reach so the ring frames the
+      // cells actually edited.
+      radius: (brushShape.radius + 0.5) * 128,
+      shape: brushShape.shape,
+      sampleZ: (x, y) => sampleTerrainHeight(x, y),
+    })
+  }
+
   function onCanvasHoverMove(e: MouseEvent) {
+    // Terrain-brush cursor ring follows the pointer — including while painting
+    // with LMB held (no downAt during a brush stroke). Owns the cursor; skips
+    // the entity hover-pick entirely.
+    if (terrainBrushMode) {
+      updateBrushCursorAt(e.clientX, e.clientY)
+      if (canvas.style.cursor !== 'crosshair') canvas.style.cursor = 'crosshair'
+      return
+    }
     if (downAt) return // suppress hover-pick during any active gesture
     // e.buttons bit 0=LMB, bit 1=RMB, bit 2=MMB. Any held button means an
     // ongoing drag (LMB without downAt is weird but safe to ignore; RMB/MMB
@@ -2370,6 +2499,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   }
   function onCanvasHoverLeave() {
     if (canvas.style.cursor !== '') canvas.style.cursor = ''
+    // Hide the brush ring when the pointer leaves the canvas (unless a stroke
+    // is mid-flight, in which case the doc-level move keeps painting and the
+    // ring re-appears on re-entry).
+    if (!brushStroking) brushCursor?.setBrush(null)
   }
   canvas.addEventListener('mousemove', onCanvasHoverMove)
   canvas.addEventListener('mouseleave', onCanvasHoverLeave)
@@ -2479,9 +2612,55 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     inst.__wc3ForgeScale = [s[0], s[1], s[2]]
     nudgeSkeletonRefresh(inst)
   }
+  // Coalesced terrain rebuild. A terrain brush stroke fires many entity-changed
+  // events (Kind="terrain"); rather than rebuild the mesh per dab we re-fetch
+  // the TerrainDTO and rebuild terrain + cliffs + water once, with at most one
+  // rebuild queued behind an in-flight one. Triggered by the entity-changed
+  // handler below (brush, MCP, undo/redo — any source emits Kind="terrain").
+  let terrainRebuildRunning = false
+  let terrainRebuildPending = false
+  async function rebuildTerrainFromGo() {
+    if (terrainRebuildRunning) {
+      terrainRebuildPending = true
+      return
+    }
+    terrainRebuildRunning = true
+    try {
+      do {
+        terrainRebuildPending = false
+        const t = await GetTerrain()
+        cachedTerrainDTO = t
+        cellHighlight?.setTerrain(t as unknown as any)
+        brushCursor?.setBrush(null)
+        const gl = (viewer as any).gl as WebGLRenderingContext
+        if (terrain) { terrain.dispose(); terrain = null }
+        terrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
+        sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
+        if (cliffs) { cliffs.dispose(); cliffs = null }
+        const cliffPlacements = computeCliffPlacements(t as unknown as any)
+        if (cliffPlacements.length > 0) {
+          cliffs = await renderCliffs(gl, viewer as any, pathSolver, cliffPlacements, t as unknown as any)
+        }
+        // Height edits change water depth blending, so rebuild water too.
+        if (water) { water.dispose(); water = null }
+        water = await buildWater(gl, viewer as any, pathSolver, t as unknown as any)
+      } while (terrainRebuildPending)
+    } catch (e) {
+      flog('[terrain rebuild]', e instanceof Error ? e.message : String(e))
+    } finally {
+      terrainRebuildRunning = false
+    }
+  }
+
   EventsOn(ENTITY_EVENT, (payload: EntityChangedPayload) => {
     if (!payload) return
     const kind = payload.kind
+    // Terrain edits (brush dab, MCP terrain.*, undo/redo) rebuild the terrain
+    // composition. Coalesced so a fast brush stroke doesn't thrash the GPU.
+    if (kind === 'terrain') {
+      void rebuildTerrainFromGo()
+      return
+    }
     if (payload.field === 'position') {
       const p = payload.position
       if (!p || p.length < 3) return
@@ -2565,6 +2744,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
           cellHighlight.setTerrain(t as unknown as any)
           cellHighlight.setCell(null)
         }
+        // Drop any stale brush ring from a prior map (it re-samples the new
+        // heightfield on the next hover-move).
+        brushCursor?.setBrush(null)
         const gl = (viewer as any).gl as WebGLRenderingContext
         terrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
         sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
@@ -2848,6 +3030,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         cellHighlight.dispose()
         cellHighlight = null
       }
+      if (brushCursor) {
+        brushCursor.dispose()
+        brushCursor = null
+      }
       if (pathBlockers) {
         pathBlockers.dispose()
         pathBlockers = null
@@ -3104,6 +3290,30 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     isTerrainPickMode() { return terrainPickMode },
     onTerrainPick(cb: TerrainPickCallback) {
       terrainPickCallback = cb
+    },
+    setTerrainBrushMode(active: boolean) {
+      if (active === terrainBrushMode) return
+      terrainBrushMode = active
+      if (active) {
+        canvas.style.cursor = 'crosshair'
+      } else {
+        // Leaving brush mode: drop any in-progress stroke + the footprint ring,
+        // and release the cursor (unless another mode still wants the crosshair).
+        if (brushStroking) {
+          brushStroking = false
+          brushLastCellKey = -1
+          terrainBrushCallback?.(null, 'end')
+        }
+        brushCursor?.setBrush(null)
+        if (!terrainPickMode && !placementMode) canvas.style.cursor = ''
+      }
+    },
+    isTerrainBrushMode() { return terrainBrushMode },
+    onTerrainBrushStroke(cb: TerrainBrushCallback) {
+      terrainBrushCallback = cb
+    },
+    setTerrainBrushShape(shape: TerrainBrushShape) {
+      brushShape = { radius: Math.max(0, shape.radius | 0), shape: shape.shape }
     },
     setPlacementMode(active: boolean) {
       if (active === placementMode) return

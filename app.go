@@ -1439,6 +1439,13 @@ func (a *App) BrushTerrainRamp(col, row, radius int, shape string, on bool) erro
 	return forge.Current.RampBrush(col, row, radius, shape, on)
 }
 
+// GetTerrainTile reads back the ground tile + height at one corner. The Terrain
+// Palette's Flatten tool calls this on stroke start to capture the height to
+// flatten toward. Mirrors terrain.get_tile (MCP).
+func (a *App) GetTerrainTile(col, row int) (forge.TerrainTileInfo, error) {
+	return forge.Current.GetTerrainTile(col, row)
+}
+
 // Undo reverts the most-recent mutation on the session's history stack.
 // No-op when the stack is empty. The reverted command is pushed onto the
 // redo stack so the user can re-apply it. Bound to Ctrl+Z in the UI.
