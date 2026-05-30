@@ -228,6 +228,9 @@ const StructLuaMarker = "-- __VJASS_STRUCT__ "
 var (
 	structOpenerRe = regexp.MustCompile(`^\s*struct\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+extends\s+([A-Za-z_][A-Za-z0-9_]*))?\s*$`)
 	structCloserRe = regexp.MustCompile(`^\s*endstruct\s*$`)
+	// keywordDeclRe matches a vJASS `keyword` forward-declaration line, e.g.
+	// `private keyword roflcopter`. Stripped in PreprocessStructs (emits nothing).
+	keywordDeclRe = regexp.MustCompile(`^\s*(?:private\s+|public\s+)?keyword\s+[A-Za-z_][A-Za-z0-9_]*\s*$`)
 
 	// methodOpenerRe matches both instance + static methods (no operator).
 	// Groups: 1=optional `static`, 2=name, 3=takes-list (or "nothing"),
@@ -289,6 +292,18 @@ func PreprocessStructs(src string, modules map[string]ModuleDef, knownNames map[
 		Structs: map[string]StructDef{},
 	}
 	lines := splitLinesKeepEnd(src)
+
+	// Drop vJASS `keyword` forward-declarations (`[private|public] keyword Foo`).
+	// They pre-announce a struct/type name so it can be referenced before its
+	// definition; JassHelper emits nothing for them and they are not valid
+	// statements, so left in place they reach the statement parser as
+	// `unexpected token "keyword"`. Replace (not remove) with a marker comment so
+	// downstream line numbers stay stable.
+	for idx, ln := range lines {
+		if keywordDeclRe.MatchString(strings.TrimRight(ln, "\r\n")) {
+			lines[idx] = "// jass2lua: vJASS keyword forward-declaration dropped\n"
+		}
+	}
 
 	// Pass 1 — extract blocks; replace each block with a marker comment.
 	// Module `implement Foo` inlining happens INSIDE extractStructBlocks

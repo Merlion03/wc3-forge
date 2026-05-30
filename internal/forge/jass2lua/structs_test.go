@@ -999,3 +999,22 @@ func TestSanitizeModuleBodyForPaste(t *testing.T) {
 		t.Errorf("real field declaration should be kept:\n%s", out)
 	}
 }
+
+// TestPreprocessStructs_StripsKeywordForwardDecl covers vJASS `keyword`
+// forward-declarations: JassHelper emits nothing for them, but left in the
+// source they reach the statement parser as `unexpected token "keyword"`.
+// PreprocessStructs replaces them with a marker comment while leaving real
+// struct declarations intact.
+func TestPreprocessStructs_StripsKeywordForwardDecl(t *testing.T) {
+	src := "private keyword roflcopter\n" +
+		"struct Foo\n" +
+		"    integer x = 0\n" +
+		"endstruct\n"
+	res := PreprocessStructs(src, nil, nil)
+	if strings.Contains(res.Expanded, "keyword roflcopter") {
+		t.Errorf("keyword forward-decl should be stripped:\n%s", res.Expanded)
+	}
+	if _, ok := res.Structs["Foo"]; !ok {
+		t.Errorf("real struct Foo should still be parsed; got structs: %v", res.Structs)
+	}
+}
