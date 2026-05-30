@@ -536,6 +536,26 @@ export namespace main {
 	        this.found = source["found"];
 	    }
 	}
+	export class NewMapParams {
+	    name: string;
+	    width: number;
+	    height: number;
+	    tileset: string;
+	    path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new NewMapParams(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.width = source["width"];
+	        this.height = source["height"];
+	        this.tileset = source["tileset"];
+	        this.path = source["path"];
+	    }
+	}
 	export class PathingMapDTO {
 	    width: number;
 	    height: number;

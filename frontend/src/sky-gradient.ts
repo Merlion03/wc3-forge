@@ -116,6 +116,10 @@ export function buildSkyGradient(gl: WebGLRenderingContext, viewer: any): SkyGra
   gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
   gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW)
 
+  // Number of vertex-attribute slots the driver exposes — used to scrub leftover
+  // enabled arrays before our draw (see draw()).
+  const maxAttribs = gl.getParameter(gl.MAX_VERTEX_ATTRIBS) as number
+
   flog('[sky-gradient] built')
 
   let disposed = false
@@ -141,6 +145,15 @@ export function buildSkyGradient(gl: WebGLRenderingContext, viewer: any): SkyGra
       gl.disable(gl.BLEND)
       gl.depthMask(false)
 
+      // CRITICAL: scrub leftover vertex-attribute array state before drawing.
+      // mdx-m3-viewer's model render leaves several attribute arrays ENABLED
+      // (bound to per-model buffers). This pass runs first each frame and
+      // inherits that state; under ANGLE/D3D11 a draw with an enabled array
+      // whose buffer is stale/freed raises GL_INVALID_OPERATION on drawArrays —
+      // observed as a per-frame 0x502 that froze the viewport on maps with
+      // placed doodads. Disabling all slots, then enabling only ours, gives a
+      // clean, valid attribute set. Downstream passes re-enable what they need.
+      for (let i = 0; i < maxAttribs; i++) gl.disableVertexAttribArray(i)
       gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
       gl.enableVertexAttribArray(aNdc)
       gl.vertexAttribPointer(aNdc, 2, gl.FLOAT, false, 0, 0)

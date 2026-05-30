@@ -90,6 +90,14 @@ export function CreateCustomUnit(arg1, arg2) {
   return window['go']['main']['App']['CreateCustomUnit'](arg1, arg2);
 }
 
+export function CreateDoodad(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
+  return window['go']['main']['App']['CreateDoodad'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+}
+
+export function CreateNewMap(arg1) {
+  return window['go']['main']['App']['CreateNewMap'](arg1);
+}
+
 export function DeleteCustomObject(arg1, arg2) {
   return window['go']['main']['App']['DeleteCustomObject'](arg1, arg2);
 }
@@ -310,6 +318,10 @@ export function MoveUnit(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['MoveUnit'](arg1, arg2, arg3, arg4);
 }
 
+export function NewMapDialog(arg1) {
+  return window['go']['main']['App']['NewMapDialog'](arg1);
+}
+
 export function NewWindow() {
   return window['go']['main']['App']['NewWindow']();
 }
@@ -336,6 +348,10 @@ export function Redo() {
 
 export function RenameTriggerNode(arg1, arg2) {
   return window['go']['main']['App']['RenameTriggerNode'](arg1, arg2);
+}
+
+export function ReportDiagnostics(arg1) {
+  return window['go']['main']['App']['ReportDiagnostics'](arg1);
 }
 
 export function RotateDoodad(arg1, arg2) {
@@ -464,4 +480,8 @@ export function UndoTo(arg1) {
 
 export function WC3InstallStatus() {
   return window['go']['main']['App']['WC3InstallStatus']();
+}
+
+export function WriteNewMap(arg1) {
+  return window['go']['main']['App']['WriteNewMap'](arg1);
 }

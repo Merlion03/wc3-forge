@@ -92,6 +92,7 @@ func RegisterAll(b *bridge.Bridge) {
 	registerSessionPolishHandlers(reg)
 	reg("view.set_doodad_category_visible", handleViewSetDoodadCategoryVisible)
 	reg("camera.set_view", handleCameraSetView)
+	reg("diagnostics.get", handleDiagnosticsGet)
 	// window.set_title — connected agent labels its wc3-forge window so the
 	// user can tell parallel instances apart in the taskbar/alt-tab list.
 	// Free-form short string; the App layer composes it into the OS title as
@@ -1253,6 +1254,26 @@ type cameraSetViewParams struct {
 	Y        float32 `json:"y"`
 	Z        float32 `json:"z"`
 	Distance float32 `json:"distance"`
+}
+
+// handleDiagnosticsGet returns the most recent diagnostics snapshot the
+// frontend pushed (live render/camera/GL state) plus how stale it is. Lets an
+// agent inspect the running viewport's actual numbers — frame counter, fps,
+// camera eye/pivot, terrain dims, GL error, GPU string, doc focus — without a
+// screenshot. `ok:false` means the frontend hasn't reported yet (no map / very
+// early startup). A large `age_ms` means the render loop or reporting has
+// stalled.
+func handleDiagnosticsGet(_ json.RawMessage) (any, error) {
+	snapshot, ageMs, ok := Current.Diagnostics()
+	if !ok {
+		return map[string]any{"ok": false, "reason": "no diagnostics reported yet"}, nil
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(snapshot), &parsed); err != nil {
+		// Surface the raw string if it somehow isn't valid JSON.
+		return map[string]any{"ok": true, "age_ms": ageMs, "raw": snapshot}, nil
+	}
+	return map[string]any{"ok": true, "age_ms": ageMs, "diagnostics": parsed}, nil
 }
 
 func handleCameraSetView(params json.RawMessage) (any, error) {

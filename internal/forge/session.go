@@ -390,6 +390,15 @@ type Session struct {
 	agentLabel          string
 	agentLabelListeners []func(string)
 
+	// Diagnostics cache. The frontend pushes a small JSON snapshot of its live
+	// render/camera/GL state here a few times a second (App.ReportDiagnostics);
+	// the diagnostics.get MCP handler reads it back so an agent can inspect the
+	// running viewport's actual numbers without a screenshot. Own mutex so the
+	// frequent writes never contend with the main session lock.
+	diagMu   sync.Mutex
+	diagJSON string
+	diagAtNS int64 // unix nanos of last report; 0 = never reported
+
 	// Undo/redo machinery (history.go). history stores applied commands
 	// oldest-first; redoStack holds commands that have been undone and are
 	// ready to be re-applied. groupDepth + pendingGroup support transactional
@@ -2645,6 +2654,26 @@ func (s *Session) EmitUICommand(cmd string) {
 	for _, fn := range listeners {
 		fn(cmd)
 	}
+}
+
+// SetDiagnostics stores the latest frontend diagnostics snapshot (raw JSON)
+// and stamps the receive time. Called ~5Hz from App.ReportDiagnostics.
+func (s *Session) SetDiagnostics(snapshot string) {
+	s.diagMu.Lock()
+	s.diagJSON = snapshot
+	s.diagAtNS = time.Now().UnixNano()
+	s.diagMu.Unlock()
+}
+
+// Diagnostics returns the last reported snapshot and how stale it is. ok is
+// false when the frontend has never reported (no map open / pre-first-frame).
+func (s *Session) Diagnostics() (snapshot string, ageMs int64, ok bool) {
+	s.diagMu.Lock()
+	defer s.diagMu.Unlock()
+	if s.diagAtNS == 0 {
+		return "", 0, false
+	}
+	return s.diagJSON, (time.Now().UnixNano() - s.diagAtNS) / 1e6, true
 }
 
 // AgentLabel returns the free-form label most recently set by an MCP client.
