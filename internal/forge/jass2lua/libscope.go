@@ -130,6 +130,22 @@ var initFuncRe = regexp.MustCompile(`\binitializer\s+([A-Za-z_][A-Za-z0-9_]*)`)
 // only the tail; parseRequireList walks it.
 var requireClauseRe = regexp.MustCompile(`\b(?:requires|needs|uses)\s+([^\n]+?)(?:\s+initializer\b|$)`)
 
+// A multi-line `requires` clause leaves dangling lines in the library body.
+// JassHelper lets the opener interleave /* */ comments to document each
+// requirement, e.g.
+//
+//	library Foo /* banner */ requires /* doc */ optional A, /* doc */ optional B
+//
+// After StripBlockComments blanks the comments (preserving newlines), the
+// `requires` keyword and each `optional Name` item land on separate body lines
+// instead of the opener tail, so parseOpenerTail never sees them. None of these
+// tokens can begin a valid JASS statement, so we drop such lines from the body
+// (replacing with a marker to keep line numbers stable) before transpiling.
+var (
+	danglingRequiresRe = regexp.MustCompile(`^\s*(?:requires|needs|uses)\b`)
+	danglingOptionalRe = regexp.MustCompile(`^\s*optional\s+[A-Za-z_][A-Za-z0-9_]*\s*,?\s*$`)
+)
+
 // privatePublicRe matches a `private` or `public` visibility prefix on a
 // decl line. Group 1 is the keyword; the rest of the line is the bare decl.
 //
@@ -579,6 +595,13 @@ func extractDeclName(line string, inGlobals bool) string {
 // On lex error we fall back to a regex-based rename that at least preserves
 // the source; the diagnostic surfaces in res.Errors.
 func rewriteBlockBody(b *libBlock, res *LibScopeResult) {
+	// Drop dangling multi-line `requires` clause lines (see danglingRequiresRe).
+	for idx, ln := range b.bodyLines {
+		t := strings.TrimSpace(stripInlineComment(strings.TrimRight(ln, "\r\n")))
+		if danglingRequiresRe.MatchString(t) || danglingOptionalRe.MatchString(t) {
+			b.bodyLines[idx] = "// jass2lua: requires-clause continuation dropped\n"
+		}
+	}
 	body := strings.Join(b.bodyLines, "")
 	// Strip visibility keywords + rename the immediate decl on the same line.
 	// We do this line-by-line BEFORE the token-based reference rewrite — the

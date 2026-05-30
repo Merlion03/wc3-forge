@@ -479,3 +479,34 @@ endinterface`,
 		})
 	}
 }
+
+// TestPreprocessLibScope_MultiLineRequiresClause covers a `requires` clause
+// that lands on body lines instead of the opener tail — what happens when the
+// opener interleaves /* */ comments to document each requirement and
+// StripBlockComments has blanked them, leaving a standalone `requires` line and
+// bare `optional Name` items. Those tokens can't begin a valid JASS statement,
+// so the body must not carry them through to the transpiler; the real decls
+// stay.
+func TestPreprocessLibScope_MultiLineRequiresClause(t *testing.T) {
+	src := "library Foo\n" +
+		"requires\n" +
+		"optional Bar\n" +
+		"optional Baz ,\n" +
+		"needs Qux\n" +
+		"globals\n" +
+		"    integer x = 0\n" +
+		"endglobals\n" +
+		"endlibrary\n"
+	res := PreprocessLibScope(src)
+	for _, ln := range strings.Split(res.Expanded, "\n") {
+		trimmed := strings.TrimSpace(ln)
+		for _, bad := range []string{"requires", "needs Qux", "optional Bar", "optional Baz"} {
+			if strings.HasPrefix(trimmed, bad) {
+				t.Errorf("dangling requires line %q should have been dropped, got line: %q", bad, ln)
+			}
+		}
+	}
+	if !strings.Contains(res.Expanded, "integer x = 0") {
+		t.Errorf("real globals decl should survive:\n%s", res.Expanded)
+	}
+}
