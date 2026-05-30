@@ -348,6 +348,12 @@ export function registerTools(server: McpServer): void {
     },
     wrap("camera.set_view")
   );
+  server.tool(
+    "diagnostics_get",
+    "Read the running viewport's live render diagnostics (pushed ~5Hz from the frontend): frame counter, fps, camera eye/pivot/distance/yaw/pitch, doodad/unit/visible counts, terrain dimensions + center offset, sky/water flags, last GL error + the faulting render stage, GPU renderer string, and document focus/visibility. The response also carries age_ms (snapshot staleness); a large age_ms means the render loop or reporting has stalled. Lets an agent inspect the editor's actual on-screen state without a screenshot. No params.",
+    {},
+    wrap("diagnostics.get")
+  );
 
   // --- window -------------------------------------------------------------
   server.tool(
