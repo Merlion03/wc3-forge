@@ -24,9 +24,8 @@ const errorResponse = (err: unknown) => {
   };
 };
 
-const wrap =
-  (method: string) =>
-  async (args: Record<string, unknown>) => {
+const wrap = (method: string) => {
+  const handler = async (args: Record<string, unknown>) => {
     try {
       const result = await pool.call(method, args);
       return { content: [{ type: "text" as const, text: formatResult(result) }] };
@@ -34,6 +33,14 @@ const wrap =
       return errorResponse(err);
     }
   };
+  // Tag the handler with its bridge method so the Go-catalog generator
+  // (mcp/scripts/gen-tools.mjs) can recover the exact method per tool. The
+  // tool-name→method mapping is NOT mechanical (e.g. triggers_add_eca maps to
+  // triggers.add_eca, not triggers.add.eca), so it must be captured, not guessed.
+  // Runtime-harmless: nothing reads this property at MCP-serving time.
+  (handler as unknown as { __bridgeMethod?: string }).__bridgeMethod = method;
+  return handler;
+};
 
 const SELECTION_ITEM = z.object({
   kind: z

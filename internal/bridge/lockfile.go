@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -69,6 +70,57 @@ func writeLockfile(port int, token string) error {
 
 func deleteLockfile() {
 	_ = os.Remove(ownLockPath())
+}
+
+// LockInfo describes one running wc3-forge instance discovered via its
+// lockfile. Exported for the in-binary MCP proxy (internal/mcpserver), which
+// forwards tool calls to a running instance over the same bridge wire.
+type LockInfo struct {
+	PID       int    `json:"pid"`
+	Port      int    `json:"port"`
+	Token     string `json:"token"`
+	StartedAt string `json:"started_at"`
+}
+
+// LockDir returns the directory holding per-pid bridge lockfiles
+// (~/.wc3-forge/mcp, overridable via WC3FORGE_MCP_LOCK_DIR).
+func LockDir() string { return lockDir() }
+
+// PidAlive reports whether a process with the given pid is currently running.
+func PidAlive(pid int) bool { return pidAlive(pid) }
+
+// ListLocks enumerates live wc3-forge bridge lockfiles, pruning any whose
+// process is no longer alive, sorted oldest-first by started_at. Returns nil
+// when the lock dir is absent or empty.
+func ListLocks() []LockInfo {
+	dir := lockDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []LockInfo
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".lock") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var lf lockFile
+		if err := json.Unmarshal(data, &lf); err != nil {
+			continue
+		}
+		if !pidAlive(lf.PID) {
+			// Stale — prune defensively (writeLockfile prunes on startup too).
+			_ = os.Remove(path)
+			continue
+		}
+		out = append(out, LockInfo(lf))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt < out[j].StartedAt })
+	return out
 }
 
 func pruneStaleLocks() {
