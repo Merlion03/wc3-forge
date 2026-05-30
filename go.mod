@@ -4,7 +4,10 @@ go 1.26
 
 require (
 	github.com/ebitengine/purego v0.10.0
+	github.com/hschendel/stl v1.0.4
 	github.com/nielsAD/gowarcraft3 v1.7.1
+	github.com/qmuntal/gltf v0.28.0
+	github.com/udhos/gwob v1.0.0
 	github.com/wailsapp/wails/v2 v2.12.0
 )
 

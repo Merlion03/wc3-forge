@@ -409,6 +409,38 @@ export function registerTools(server: McpServer): void {
     wrap("objects.convert")
   );
 
+  // --- model import ------------------------------------------------------
+  server.tool(
+    "models_import",
+    "Convert a 3D model file (.obj/.gltf/.glb/.stl) to a minimal WC3 MDX with baked BLP textures and import both into the loaded map under war3mapImported\\. Optionally assigns the imported model to an object's 'file' field. Returns { model_path, texture_paths, warnings }.",
+    {
+      source_path: z
+        .string()
+        .describe("Absolute path to the source .obj/.gltf/.glb/.stl file"),
+      scale: z
+        .number()
+        .optional()
+        .describe("Uniform scale applied to the mesh (default 1.0)"),
+      up_axis: z
+        .enum(["y", "z", "auto"])
+        .optional()
+        .describe("Source up-axis: 'y' (OBJ/glTF default, remaps to Z-up), 'z' (identity), or 'auto'"),
+      flip_v: z
+        .boolean()
+        .optional()
+        .describe("Flip texture V coordinate (v -> 1-v) for sources with bottom-origin UVs"),
+      target_object_kind: z
+        .string()
+        .optional()
+        .describe("Optional: object kind to assign the model to (units/items/abilities/buffs/destructables/doodads/upgrades)"),
+      target_object_id: z
+        .string()
+        .optional()
+        .describe("Optional: 4-char rawcode of the object to set 'file' on (requires target_object_kind)"),
+    },
+    wrap("models.import")
+  );
+
   // --- triggers (Trigger Editor) -----------------------------------------
   registerTriggerTools(server);
 

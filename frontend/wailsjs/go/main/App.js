@@ -62,6 +62,10 @@ export function CloseMap() {
   return window['go']['main']['App']['CloseMap']();
 }
 
+export function ConvertAndImportModel(arg1) {
+  return window['go']['main']['App']['ConvertAndImportModel'](arg1);
+}
+
 export function ConvertMapToLua() {
   return window['go']['main']['App']['ConvertMapToLua']();
 }

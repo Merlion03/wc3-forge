@@ -273,6 +273,67 @@ func (a *App) OpenMapFileDialog() (string, error) {
 	})
 }
 
+// modelFileFilter is the OS file-picker filter for importable 3D model
+// formats (mirrors the map-file filter shape used by OpenMapFileDialog).
+var modelFileFilter = []runtime.FileFilter{
+	{DisplayName: "3D models (*.obj; *.gltf; *.glb; *.stl)", Pattern: "*.obj;*.gltf;*.glb;*.stl"},
+	{DisplayName: "All files (*.*)", Pattern: "*.*"},
+}
+
+// ImportModelOptions carries the conversion knobs from the frontend import
+// dialog. Scale is a uniform multiplier (0 => 1.0); UpAxis is "y"/"z"/"auto"
+// ("" => "y"); FlipV flips texture V (OBJ/glTF bottom-origin -> WC3 top-origin).
+type ImportModelOptions struct {
+	Scale  float64 `json:"scale"`
+	UpAxis string  `json:"upAxis"`
+	FlipV  bool    `json:"flipV"`
+}
+
+// ImportModelResult reports where the converted model + textures landed in the
+// loaded map's archive plus any non-fatal conversion warnings (placeholder
+// textures, collision-suffixed names, missing UVs, …) for the UI to surface.
+type ImportModelResult struct {
+	ModelPath    string   `json:"modelPath"`
+	TexturePaths []string `json:"texturePaths"`
+	Warnings     []string `json:"warnings"`
+}
+
+// ConvertAndImportModel presents an OS file picker for a 3D model
+// (.obj/.gltf/.glb/.stl), converts it to a minimal WC3 MDX with baked BLP
+// textures, and imports both into the loaded map under war3mapImported\. A
+// cancelled dialog returns a zero ImportModelResult and no error (matching how
+// OpenMapFileDialog signals cancel via an empty path).
+//
+// The conversion + import funnel through forge.ConvertAndImport — the SAME
+// code path the models.import MCP handler uses — and Current.ImportModel fires
+// the dirty/entity-changed notifications the App's startup() listeners already
+// forward to the frontend, so no explicit emit is needed here.
+func (a *App) ConvertAndImportModel(opts ImportModelOptions) (ImportModelResult, error) {
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:   "Select a 3D model to import",
+		Filters: modelFileFilter,
+	})
+	if err != nil {
+		return ImportModelResult{}, err
+	}
+	if path == "" {
+		return ImportModelResult{}, nil // cancelled
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ImportModelResult{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	res, warnings, err := forge.ConvertAndImport(path, data, opts.Scale, opts.UpAxis, opts.FlipV)
+	if err != nil {
+		return ImportModelResult{}, err
+	}
+	return ImportModelResult{
+		ModelPath:    res.ModelPath,
+		TexturePaths: res.TexturePaths,
+		Warnings:     warnings,
+	}, nil
+}
+
 // WC3InstallStatusDTO reports whether a usable Warcraft III install (a CASC
 // root containing .build.info) is resolvable, plus the path that was checked.
 type WC3InstallStatusDTO struct {

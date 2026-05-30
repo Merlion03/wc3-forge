@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/imp"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/miscdata"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/mpq"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/shd"
@@ -101,7 +102,17 @@ func (f folderSource) write(name string, data []byte) error {
 		len(clean) >= 2 && clean[1] == ':':
 		return fmt.Errorf("write %q: unsafe path", name)
 	}
-	return os.WriteFile(filepath.Join(f.root, filepath.FromSlash(clean)), data, 0o644)
+	dst := filepath.Join(f.root, filepath.FromSlash(clean))
+	// Create any intermediate directories so writes into subdirectories work.
+	// Model imports write under war3mapImported\, which won't exist in a
+	// freshly-extracted folder map; without this MkdirAll the WriteFile fails
+	// with "cannot find the path". No-op when the parent already exists.
+	if dir := filepath.Dir(dst); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("write %q: mkdir: %w", name, err)
+		}
+	}
+	return os.WriteFile(dst, data, 0o644)
 }
 
 // delete removes the named file under f.root. Returns nil if the file is
@@ -247,6 +258,13 @@ type Session struct {
 	regions *w3r.File // war3map.w3r
 	cameras *w3c.File // war3map.w3c
 
+	// imp is the lazily-parsed war3map.imp import table (the registry the World
+	// Editor + engine consult for custom files). nil until the first ImportModel
+	// call parses the existing table off the source (or starts a fresh one if
+	// the map ships none). Cached on the Session so repeated imports in one
+	// session don't re-read + re-parse the file every time.
+	imp *imp.File
+
 	// Trigger Editor data — Phase 2a (read-write). war3map.wtg is the GUI
 	// trigger tree (categories + variables + triggers + ECAs); war3map.wct
 	// holds the per-trigger custom-script blobs and the global JASS header.
@@ -317,6 +335,13 @@ type Session struct {
 	// maps additionally bear mapHeaderScriptDirty for the script-source
 	// write path.
 	dirtyTriggers  bool
+	// dirtyImports tracks pending edits to the war3map.imp import table from
+	// ImportModel (model + texture registration). The imported byte files
+	// themselves go through s.source.write directly (and so are already
+	// buffered/durable per the source); this flag only gates the war3map.imp
+	// re-encode in Save and the public dirty event. Reset on Open/Close/Save
+	// like every other dirty flag.
+	dirtyImports   bool
 	dirtyListeners []func(bool)
 
 	// Sky-model override: set by the Map Info → Sky picker (or any caller
@@ -629,6 +654,9 @@ func (s *Session) Open(path string) error {
 	s.pathingMap = pathingMap
 	s.regions = regionsFile
 	s.cameras = camerasFile
+	// war3map.imp is parsed lazily on first ImportModel — drop any cached table
+	// from a previously-loaded map so the next import re-reads this map's.
+	s.imp = nil
 	s.strings = wtsStrings
 	s.gameplay = gameplay
 	s.triggers = triggers
@@ -652,6 +680,7 @@ func (s *Session) Open(path string) error {
 	s.dirtyDoodadMods = false
 	s.dirtyUpgradeMods = false
 	s.dirtyTriggers = false
+	s.dirtyImports = false
 	// Reset history — previous map's undo stack must not leak across opens
 	// (creation_numbers would dangle and Revert would error). Mutating the
 	// slices directly under the existing write-lock; ClearHistory's own lock
@@ -718,6 +747,7 @@ func (s *Session) Close() {
 	s.pathingMap = nil
 	s.regions = nil
 	s.cameras = nil
+	s.imp = nil
 	s.strings = nil
 	s.gameplay = nil
 	s.triggers = nil
@@ -741,6 +771,7 @@ func (s *Session) Close() {
 	s.dirtyDoodadMods = false
 	s.dirtyUpgradeMods = false
 	s.dirtyTriggers = false
+	s.dirtyImports = false
 	hadHistory := len(s.history) > 0 || len(s.redoStack) > 0
 	s.history = nil
 	s.redoStack = nil
@@ -1766,6 +1797,121 @@ func (s *Session) DeleteCustomObject(cfg *KindConfig, id string) error {
 	return nil
 }
 
+// ImportTexture is one texture file to import alongside a model. Name is the
+// full in-archive path the file is written under (e.g.
+// "war3mapImported\foo.blp") — the caller is responsible for synthesizing a
+// collision-free name; ImportModel writes + registers it verbatim.
+type ImportTexture struct {
+	Name string
+	Data []byte
+}
+
+// ImportModelReq is the request for Session.ImportModel: the converted MDX
+// bytes (written under ModelName, an in-archive path like
+// "war3mapImported\foo.mdx") plus any baked texture files.
+type ImportModelReq struct {
+	ModelName string
+	MdxData   []byte
+	Textures  []ImportTexture
+}
+
+// ImportModelResult reports the in-archive paths the import landed at, so the
+// caller can preview the model and/or assign ModelPath to an object's "file"
+// field.
+type ImportModelResult struct {
+	ModelPath    string
+	TexturePaths []string
+}
+
+// ImportModel writes a converted MDX (and its baked textures) into the loaded
+// map's archive under war3mapImported\, registers every written path in
+// war3map.imp, and marks the session dirty so Save flushes the updated import
+// table. The byte files go straight through s.source.write — buffered for MPQ
+// sources (committed at flush()), durable immediately for folder sources — so
+// ReadFile returns them for in-editor preview before Save.
+//
+// NOT undoable: like the World Editor's Import Manager, an imported asset is
+// not a per-file undo step. (For folder-backed maps the bytes hit disk
+// immediately; rolling them back would mean deleting files off the user's
+// disk, which the editor deliberately doesn't do. The model-path *assignment*
+// to an object — a separate SetObjectField call — IS undoable on its own.)
+// Hence no recordCommand here.
+func (s *Session) ImportModel(req ImportModelReq) (ImportModelResult, error) {
+	if req.ModelName == "" {
+		return ImportModelResult{}, fmt.Errorf("ImportModel: empty model name")
+	}
+	if len(req.MdxData) == 0 {
+		return ImportModelResult{}, fmt.Errorf("ImportModel: empty model data")
+	}
+
+	s.mu.Lock()
+	if !s.loaded {
+		s.mu.Unlock()
+		return ImportModelResult{}, fmt.Errorf("no map loaded")
+	}
+	src := s.source
+	if src == nil {
+		s.mu.Unlock()
+		return ImportModelResult{}, fmt.Errorf("no source for writing")
+	}
+
+	// Lazily parse the existing war3map.imp once per session; start a fresh
+	// v1 table when the map ships none. Cached on s.imp so repeated imports
+	// don't re-read.
+	if s.imp == nil {
+		if data, ok, err := src.read("war3map.imp"); err != nil {
+			s.mu.Unlock()
+			return ImportModelResult{}, fmt.Errorf("read war3map.imp: %w", err)
+		} else if ok {
+			parsed, perr := imp.Parse(data)
+			if perr != nil {
+				s.mu.Unlock()
+				return ImportModelResult{}, fmt.Errorf("parse war3map.imp: %w", perr)
+			}
+			s.imp = parsed
+		} else {
+			s.imp = &imp.File{Version: 1}
+		}
+	}
+
+	// Write the MDX, then each texture. Register every written path in the
+	// import table (Add is idempotent + normalizes slashes + uses StandardFlag).
+	if err := src.write(req.ModelName, req.MdxData); err != nil {
+		s.mu.Unlock()
+		return ImportModelResult{}, fmt.Errorf("write %s: %w", req.ModelName, err)
+	}
+	s.imp.Add(req.ModelName)
+
+	texPaths := make([]string, 0, len(req.Textures))
+	for _, t := range req.Textures {
+		if t.Name == "" {
+			s.mu.Unlock()
+			return ImportModelResult{}, fmt.Errorf("ImportModel: texture with empty name")
+		}
+		if err := src.write(t.Name, t.Data); err != nil {
+			s.mu.Unlock()
+			return ImportModelResult{}, fmt.Errorf("write %s: %w", t.Name, err)
+		}
+		s.imp.Add(t.Name)
+		texPaths = append(texPaths, t.Name)
+	}
+
+	wasDirty := s.anyDirtyLocked()
+	s.dirtyImports = true
+	nowDirty := s.anyDirtyLocked()
+	s.mu.Unlock()
+
+	if !wasDirty && nowDirty {
+		s.notifyDirty(true)
+	}
+	// One entity-changed event so subscribers (asset preview, import manager
+	// panel) refresh. Kind "import" is a new tag; existing subscribers that
+	// branch on Kind ignore it harmlessly.
+	s.notifyEntityChanged(EntityChange{Kind: "import", ID: 0, Field: "model"})
+
+	return ImportModelResult{ModelPath: req.ModelName, TexturePaths: texPaths}, nil
+}
+
 // ConvertObject converts one object to a different kind. Today only the
 // doodad ↔ destructable pair is supported (they share roughly the same shape:
 // a placed environment object with a model + pathing footprint), so the
@@ -1935,7 +2081,7 @@ func (s *Session) anyDirtyLocked() bool {
 		s.dirtyGameplay || s.dirtyUnitMods || s.dirtyItemMods ||
 		s.dirtyAbilityMods || s.dirtyBuffMods || s.dirtyDestructibleMods ||
 		s.dirtyDoodadMods || s.dirtyUpgradeMods ||
-		s.dirtyTriggers || s.mapHeaderScriptDirty
+		s.dirtyTriggers || s.mapHeaderScriptDirty || s.dirtyImports
 }
 
 // ---------------------------------------------------------------------------
@@ -2124,6 +2270,8 @@ func (s *Session) Save() error {
 	triggersWct := s.triggersWct
 	triggerHandRolled := s.triggerIsHandRolled
 	mapHeaderScriptName := s.mapHeaderScriptName
+	saveImports := s.dirtyImports
+	impFile := s.imp
 	s.mu.Unlock()
 
 	if src == nil {
@@ -2290,6 +2438,25 @@ func (s *Session) Save() error {
 		s.mu.Lock()
 		s.dirtyTriggers = false
 		s.triggersWct = wctFile
+		s.mu.Unlock()
+	}
+	// war3map.imp re-encode. The imported MDX + texture bytes were already
+	// written to the source by ImportModel (buffered for MPQ, durable for
+	// folder); here we only flush the updated import table that lists them.
+	// The table is independent of every other file on disk + the dirty bus,
+	// so partial-write semantics match the rest of Save (its flag clears only
+	// after its own successful write).
+	if saveImports {
+		if impFile == nil {
+			// Defensive: ImportModel always allocates s.imp before flipping the
+			// dirty flag, but never crash if a future path trips this.
+			impFile = &imp.File{Version: 1}
+		}
+		if err := src.write("war3map.imp", impFile.Encode()); err != nil {
+			return fmt.Errorf("write war3map.imp: %w", err)
+		}
+		s.mu.Lock()
+		s.dirtyImports = false
 		s.mu.Unlock()
 	}
 	if pendingSky != nil {

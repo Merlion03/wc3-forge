@@ -144,6 +144,10 @@ func RegisterAll(b *bridge.Bridge) {
 	// custom_text for one node), triggers.functions_meta (TriggerData.txt
 	// vocabulary for client-side label templating).
 	registerTriggerHandlers(reg)
+	// Model import — converts an OBJ/glTF/GLB/STL file to a minimal MDX +
+	// baked BLP textures and imports them into the loaded map. Single route
+	// (models.import); see handlers_models.go.
+	registerModelHandlers(reg)
 }
 
 // handleUISendCommand forwards a raw test-driver command string. Used by

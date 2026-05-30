@@ -424,6 +424,38 @@ export namespace main {
 	        this.value = source["value"];
 	    }
 	}
+	export class ImportModelOptions {
+	    scale: number;
+	    upAxis: string;
+	    flipV: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ImportModelOptions(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.scale = source["scale"];
+	        this.upAxis = source["upAxis"];
+	        this.flipV = source["flipV"];
+	    }
+	}
+	export class ImportModelResult {
+	    modelPath: string;
+	    texturePaths: string[];
+	    warnings: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ImportModelResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.modelPath = source["modelPath"];
+	        this.texturePaths = source["texturePaths"];
+	        this.warnings = source["warnings"];
+	    }
+	}
 	export class LabeledOption {
 	    key: string;
 	    label: string;
