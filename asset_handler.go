@@ -6,6 +6,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/StephenSHorton/wc3-forge/internal/casc"
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
@@ -149,6 +150,7 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing asset path", http.StatusBadRequest)
 		return
 	}
+	defer assetRecordResolveTime(time.Now()) // diagnostics: slow-resolve + max
 	// Normalize: lowercase + forward-slash. WC3 asset paths are
 	// conventionally case-insensitive; archives and CASC are stored
 	// lowercase. Backslash <-> forward-slash interchangeable.
@@ -189,10 +191,12 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, candidate := range candidates {
 		data, ok, err := forge.Current.ReadFile(candidate)
 		if err != nil {
+			assetRecordReadError()
 			http.Error(w, "read error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if ok {
+			assetRecordHit(false, candidate != requested)
 			via := "map source"
 			if candidate != requested {
 				via = "map source (sibling-ext)"
@@ -208,11 +212,13 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, candidate := range candidates {
 			data, ok, err := c.ReadFile(candidate)
 			if err != nil {
+				assetRecordReadError()
 				log.Printf("asset: %s -> CASC error: %v", candidate, err)
 				http.Error(w, "casc read error: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 			if ok {
+				assetRecordHit(true, candidate != requested)
 				via := "CASC"
 				if candidate != requested {
 					via = "CASC (sibling-ext)"
@@ -224,6 +230,7 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	assetRecord404(requested)
 	log.Printf("asset: %s -> 404", requested)
 	http.NotFound(w, r)
 }
