@@ -258,6 +258,39 @@ func TestJASSCodegen_RefusesLuaMap(t *testing.T) {
 	}
 }
 
+func TestScriptNeedsRegen(t *testing.T) {
+	const jassMarker = JASSCodegenMarkerLine + "\nglobals\nendglobals\n"
+	const luaMarker = CodegenMarkerLine + "\n"
+	const foreign = "// hand-authored or JassHelper output\nfunction main takes nothing returns nothing\nendfunction\n"
+	cases := []struct {
+		name           string
+		handRolled     bool
+		triggersEdited bool
+		isLua          bool
+		existing       string
+		existingOK     bool
+		want           bool
+	}{
+		{"hand-rolled never regen", true, true, false, "", false, false},
+		{"edited triggers → regen (jass)", false, true, false, foreign, true, true},
+		{"edited triggers → regen (lua)", false, true, true, foreign, true, true},
+		{"unedited + foreign jass → PRESERVE", false, false, false, foreign, true, false},
+		{"unedited + foreign lua → PRESERVE", false, false, true, foreign, true, false},
+		{"unedited + codegen jass → regen", false, false, false, jassMarker, true, true},
+		{"unedited + codegen lua → regen", false, false, true, luaMarker, true, true},
+		{"unedited + absent script → regen", false, false, false, "", false, true},
+		{"unedited + empty script → regen", false, false, false, "", true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := scriptNeedsRegen(c.handRolled, c.triggersEdited, c.isLua, []byte(c.existing), c.existingOK)
+			if got != c.want {
+				t.Fatalf("scriptNeedsRegen = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 func TestJASSCodegen_FullScriptShape(t *testing.T) {
 	in := CodegenInputs{
 		Info: &w3i.Info{Lua: false, Name: "TestMap", Description: "desc",
