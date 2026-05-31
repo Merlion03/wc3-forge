@@ -899,12 +899,19 @@
       bumpEvent(ENTITY_EVENT)
       if (!payload) return
       if (payload.kind === 'terrain') {
-        // Tileset swap (initial Apply, Undo, or Redo) — palette + per-tile
-        // texture indices have changed. Rebuild the terrain renderer's atlas
-        // + minimap so the viewport reflects the new state. Keep camera so
-        // the undo doesn't yank the user's viewpoint.
-        mapLoadGen += 1
-        await reloadMap({ keepCamera: true })
+        // Only a TILESET SWAP (field "tileset": initial Apply, Undo, or Redo)
+        // needs a full map reload — the palette changed, so the atlas + minimap
+        // must rebake. Keep camera so undo doesn't yank the viewpoint.
+        //
+        // Brush edits (field tile/height/cliff/ramp) must NOT reload here: the
+        // scene-instances terrain listener already re-renders them live
+        // (throttled). A full reloadMap per dab re-placed every unit/doodad/
+        // cliff/water ~40×/s during a drag — the terrain-tool lag + flicker,
+        // worse the more content the map had.
+        if (payload.field === 'tileset') {
+          mapLoadGen += 1
+          await reloadMap({ keepCamera: true })
+        }
         return
       }
       if (payload.kind === 'unit') {

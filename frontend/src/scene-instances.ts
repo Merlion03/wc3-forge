@@ -2932,24 +2932,31 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     inst.__wc3ForgeScale = [s[0], s[1], s[2]]
     nudgeSkeletonRefresh(inst)
   }
-  // Throttled, surface-differentiated terrain rebuild. A brush stroke fires many
-  // entity-changed events (Kind="terrain") per second. The old code rebuilt
-  // terrain + cliffs + water on EVERY event in a tight do/while that never
-  // yielded during a continuous drag — starving the render loop (the lag) and,
-  // on content-heavy maps, rebuilding all cliff/water meshes ~30×/s (the
-  // flicker). Now we:
-  //   1. accumulate dirty flags per surface from the event's field, and
-  //   2. run at most one rebuild every REBUILD_MIN_MS (leading + trailing), so
-  //      the RAF keeps breathing,
-  //   3. rebuild only the dirty surfaces — a tile paint touches terrain only;
-  //      height also touches water; cliff/ramp touch cliffs.
-  const REBUILD_MIN_MS = 90
+  // Live terrain re-render during brush strokes, split into two tiers by cost
+  // (measured via the bridge-paint + diagnostics harness):
+  //
+  //   TERRAIN geometry — cheap: terrain.update() re-uploads vertex buffers and
+  //     reuses the baked atlas. Runs THROTTLED (~every 90ms) so the user sees
+  //     paint/height land live. On an empty 65² map this held ~78fps, no stall.
+  //
+  //   WATER + CLIFFS — expensive: buildWater / renderCliffs rebuild whole meshes
+  //     and tanked the RAF to ~15fps with 200ms stalls (age_ms) when run per
+  //     dab — THIS was the "flicker + lag, worse on full maps." They don't need
+  //     to track every dab, so they run on a TRAILING DEBOUNCE: the timer resets
+  //     on each edit and only fires ~350ms after editing STOPS. During a
+  //     continuous drag they never rebuild; a moment after you pause/release
+  //     they update once. (Water/cliff geometry only depends on the final
+  //     heights/layers, so a single settle-time rebuild is correct.)
+  const TERRAIN_THROTTLE_MS = 90
+  const HEAVY_DEBOUNCE_MS = 350
   let terrainDirty = false
   let cliffsDirty = false
   let waterDirty = false
-  let terrainRebuildRunning = false
-  let terrainRebuildTimer: ReturnType<typeof setTimeout> | null = null
-  let lastRebuildTs = -1e9
+  let terrainRunning = false
+  let terrainTimer: ReturnType<typeof setTimeout> | null = null
+  let lastTerrainTs = -1e9
+  let heavyRunning = false
+  let heavyTimer: ReturnType<typeof setTimeout> | null = null
   // Identity of the ground palette a terrain mesh was baked against. When this
   // is unchanged between rebuilds, terrain.update() can reuse the atlas; when it
   // changes (tileset swap), we rebuild the mesh so the atlas matches.
@@ -2957,7 +2964,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     return Array.isArray(t?.palette) ? t.palette.join('|') : ''
   }
   // Translate the entity-changed field into which surfaces need rebuilding, then
-  // schedule a throttled rebuild.
+  // schedule the appropriate tier.
   function markTerrainDirty(field: string) {
     switch (field) {
       case 'tile': terrainDirty = true; break
@@ -2966,45 +2973,60 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       case 'ramp': cliffsDirty = true; break
       default: terrainDirty = true; cliffsDirty = true; waterDirty = true; break // unknown → all
     }
-    scheduleTerrainRebuild()
+    if (terrainDirty) scheduleTerrain()
+    if (cliffsDirty || waterDirty) scheduleHeavy()
   }
-  function scheduleTerrainRebuild() {
-    if (terrainRebuildTimer !== null || terrainRebuildRunning) return
-    const wait = Math.max(0, REBUILD_MIN_MS - (performance.now() - lastRebuildTs))
-    terrainRebuildTimer = setTimeout(() => {
-      terrainRebuildTimer = null
-      void runTerrainRebuild()
-    }, wait)
+  // --- Tier 1: terrain geometry (throttled, leading-ish) ---
+  function scheduleTerrain() {
+    if (terrainTimer !== null || terrainRunning) return
+    const wait = Math.max(0, TERRAIN_THROTTLE_MS - (performance.now() - lastTerrainTs))
+    terrainTimer = setTimeout(() => { terrainTimer = null; void runTerrain() }, wait)
   }
-  async function runTerrainRebuild() {
-    if (terrainRebuildRunning) { scheduleTerrainRebuild(); return }
-    if (!terrainDirty && !cliffsDirty && !waterDirty) return
-    terrainRebuildRunning = true
-    lastRebuildTs = performance.now()
-    // Snapshot + clear flags up front so edits arriving mid-rebuild re-arm a
-    // trailing pass rather than being lost.
-    const doTerrain = terrainDirty, doCliffs = cliffsDirty, doWater = waterDirty
-    terrainDirty = cliffsDirty = waterDirty = false
+  async function runTerrain() {
+    if (terrainRunning) { scheduleTerrain(); return }
+    if (!terrainDirty) return
+    terrainRunning = true
+    lastTerrainTs = performance.now()
+    terrainDirty = false
     try {
       const prevPaletteKey = terrainPaletteKey(cachedTerrainDTO)
       const t = await GetTerrain()
       cachedTerrainDTO = t
       cellHighlight?.setTerrain(t as unknown as any)
       const gl = (viewer as any).gl as WebGLRenderingContext
-      if (doTerrain) {
-        // In-place geometry re-upload reusing the baked atlas (no FBO re-bake);
-        // only a palette change (tileset swap) forces a full rebuild.
-        const paletteChanged = terrainPaletteKey(t) !== prevPaletteKey
-        if (terrain && !paletteChanged) {
-          terrain.update(t as unknown as any)
-        } else {
-          const newTerrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
-          terrain?.dispose(); terrain = newTerrain
-        }
-        sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
+      const paletteChanged = terrainPaletteKey(t) !== prevPaletteKey
+      if (terrain && !paletteChanged) {
+        terrain.update(t as unknown as any)
+      } else {
+        const newTerrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
+        terrain?.dispose(); terrain = newTerrain
       }
+      sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
+    } catch (e) {
+      flog('[terrain update]', e instanceof Error ? e.message : String(e))
+    } finally {
+      terrainRunning = false
+      if (terrainDirty) scheduleTerrain()
+    }
+  }
+  // --- Tier 2: water + cliffs (trailing debounce — fires after editing stops) ---
+  function scheduleHeavy() {
+    if (heavyTimer !== null) clearTimeout(heavyTimer)
+    heavyTimer = setTimeout(() => { heavyTimer = null; void runHeavy() }, HEAVY_DEBOUNCE_MS)
+  }
+  async function runHeavy() {
+    if (heavyRunning) { scheduleHeavy(); return }
+    if (!cliffsDirty && !waterDirty) return
+    heavyRunning = true
+    const doCliffs = cliffsDirty, doWater = waterDirty
+    cliffsDirty = waterDirty = false
+    try {
+      // Reuse the terrain tier's last fetch when available (it runs far more
+      // often); only fetch if we somehow have nothing cached.
+      const t = cachedTerrainDTO ?? (await GetTerrain())
+      cachedTerrainDTO = t
+      const gl = (viewer as any).gl as WebGLRenderingContext
       if (doCliffs) {
-        // Build-then-swap (no null gap). Cliffs are derived from layer heights.
         const cliffPlacements = computeCliffPlacements(t as unknown as any)
         const newCliffs = cliffPlacements.length > 0
           ? await renderCliffs(gl, viewer as any, pathSolver, cliffPlacements, t as unknown as any)
@@ -3016,11 +3038,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         water?.dispose(); water = newWater
       }
     } catch (e) {
-      flog('[terrain rebuild]', e instanceof Error ? e.message : String(e))
+      flog('[terrain heavy rebuild]', e instanceof Error ? e.message : String(e))
     } finally {
-      terrainRebuildRunning = false
-      // Trailing pass for any edits that landed during this rebuild.
-      if (terrainDirty || cliffsDirty || waterDirty) scheduleTerrainRebuild()
+      heavyRunning = false
+      if (cliffsDirty || waterDirty) scheduleHeavy()
     }
   }
 
