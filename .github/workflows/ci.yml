@@ -21,7 +21,7 @@ jobs:
     env:
       GOFLAGS: -p=2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Enlarge the Windows pagefile so the Go compiler's large address-space
       # reservations don't hit ERROR_COMMITMENT_LIMIT (errno=1455) on the
@@ -32,12 +32,12 @@ jobs:
           minimum-size: 8GB
           maximum-size: 16GB
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
