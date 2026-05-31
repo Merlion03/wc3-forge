@@ -1266,13 +1266,16 @@ func (a *App) GenerateMinimapBytes() (MinimapDTO, error) {
 	if t == nil {
 		return MinimapDTO{Found: false}, nil
 	}
-	blpBytes, err := BakeMinimapBLP(t)
-	if err != nil || len(blpBytes) == 0 {
+	// PNG, not BLP: the panel renders it directly. Go's BLP-JPEG output is valid
+	// for WC3/gowarcraft3 but mdx-m3-viewer's in-browser JPG decoder garbles it,
+	// so we never hand the frontend a Go-baked BLP to decode.
+	pngBytes, err := BakeMinimapPNG(t)
+	if err != nil || len(pngBytes) == 0 {
 		return MinimapDTO{Found: false}, err
 	}
 	return MinimapDTO{
-		Bytes:     base64.StdEncoding.EncodeToString(blpBytes),
-		Ext:       "blp",
+		Bytes:     base64.StdEncoding.EncodeToString(pngBytes),
+		Ext:       "png",
 		Found:     true,
 		Generated: true,
 	}, nil

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"image/png"
 	"path/filepath"
 	"testing"
 
@@ -110,6 +111,57 @@ func TestBakeMinimapBLPRoundTrips(t *testing.T) {
 
 func TestBakeMinimapBLPNilTerrain(t *testing.T) {
 	if _, err := BakeMinimapBLP(nil); err == nil {
+		t.Error("expected error for nil terrain, got nil")
+	}
+}
+
+// TestBakeMinimapImageFlatIsUniformOpaque guards the failure mode that shipped:
+// the frontend showed a non-uniform, partly-transparent mess. A flat
+// single-tileset map must bake to a single fully-opaque color across every
+// pixel — anything else means the color/alpha math is wrong.
+func TestBakeMinimapImageFlatIsUniformOpaque(t *testing.T) {
+	img := bakeMinimapImage(flatTerrain(12, 12))
+	b := img.Bounds()
+	first := img.RGBAAt(b.Min.X, b.Min.Y)
+	if first.A != 255 {
+		t.Fatalf("pixel alpha = %d, want 255 (opaque)", first.A)
+	}
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			p := img.RGBAAt(x, y)
+			if p != first {
+				t.Fatalf("flat map not uniform: pixel (%d,%d)=%v != %v", x, y, p, first)
+			}
+		}
+	}
+}
+
+// TestBakeMinimapPNGRoundTrips is the frontend-path guard: the panel renders a
+// PNG, so the PNG must decode (via the standard library, same as the browser's
+// native decoder) to the right size and an opaque image.
+func TestBakeMinimapPNGRoundTrips(t *testing.T) {
+	data, err := BakeMinimapPNG(flatTerrain(20, 16))
+	if err != nil {
+		t.Fatalf("BakeMinimapPNG: %v", err)
+	}
+	img, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("decode PNG: %v", err)
+	}
+	if got := img.Bounds().Dx(); got != 20 {
+		t.Errorf("PNG width = %d, want 20", got)
+	}
+	if got := img.Bounds().Dy(); got != 16 {
+		t.Errorf("PNG height = %d, want 16", got)
+	}
+	_, _, _, a := img.At(10, 8).RGBA()
+	if a>>8 != 255 {
+		t.Errorf("PNG center alpha = %d, want 255 (opaque)", a>>8)
+	}
+}
+
+func TestBakeMinimapPNGNilTerrain(t *testing.T) {
+	if _, err := BakeMinimapPNG(nil); err == nil {
 		t.Error("expected error for nil terrain, got nil")
 	}
 }

@@ -32,6 +32,7 @@
     GenerateMinimapBytes,
     GetTerrain,
   } from '../wailsjs/go/main/App.js'
+  import { EventsOn } from '../wailsjs/runtime/runtime.js'
   import { decodeImageBytes } from './icon-loader'
   import type { SceneAPI } from './scene-instances'
 
@@ -52,11 +53,10 @@
   // The image-loading state. dataURL is the result of decoding the bytes
   // returned by GetMinimapBytes; "" means we have no image (either no map
   // loaded, no baked preview in the map, or decode failed).
+  // The panel prefers a LIVE terrain render (GenerateMinimapBytes → PNG) so it
+  // tracks terrain edits; the map's own baked war3mapMap.blp/.dds/.tga is only a
+  // fallback for maps with no terrain. "" means nothing to show (placeholder).
   let dataURL = $state('')
-  // True when dataURL came from an on-the-fly terrain bake (the map ships no
-  // baked minimap) rather than the map's own war3mapMap.blp/.dds/.tga. Drives a
-  // subtle "auto" badge so the preview reads as synthesized, not authored.
-  let generated = $state(false)
   // The image's natural aspect ratio. Defaults to 1:1 (square); updated once
   // the <img> reports its natural dimensions. Non-square preview images (rare)
   // get correctly proportioned via CSS aspect-ratio.
@@ -168,38 +168,75 @@
     }
   })
 
+  // Live-update on terrain edits. Brush dabs fire entity-changed (kind
+  // "terrain") many times per second during a drag, so debounce: re-bake the
+  // minimap once ~350ms after the last edit settles. (Tileset swaps bump
+  // mapLoadGen in App.svelte and reload via the effect above; this covers the
+  // per-dab tile/height/cliff/ramp edits that don't.)
+  $effect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const off = EventsOn(
+      'wc3-forge:entity-changed',
+      (p: { kind?: string }) => {
+        if (!p || p.kind !== 'terrain') return
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => {
+          timer = null
+          void rerender()
+        }, 350)
+      },
+    )
+    return () => {
+      if (timer) clearTimeout(timer)
+      off()
+    }
+  })
+
+  // Convert the DTO's base64 bytes into an <img> src. PNG is the live terrain
+  // render (browser-native — wrap it directly). BLP/DDS/TGA come from the map's
+  // own baked file and go through mdx-m3-viewer's decoder.
+  function bytesToDataURL(b64: string, ext: string): string {
+    if (ext === 'png') return `data:image/png;base64,${b64}`
+    const bin = atob(b64)
+    const buf = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
+    return decodeImageBytes(buf, ext)
+  }
+
+  // Lightweight refresh used by the terrain-edit listener: re-bake the live
+  // terrain PNG and swap the image in place. Unlike reload() it doesn't clear
+  // dataURL first (no flicker mid-edit) and skips the click-to-pan coord refetch
+  // (terrain dimensions don't change under the brush).
+  async function rerender() {
+    try {
+      const dto = await GenerateMinimapBytes()
+      if (dto && dto.found && dto.bytes) {
+        dataURL = bytesToDataURL(dto.bytes, dto.ext)
+      }
+    } catch (e) {
+      console.warn('[Minimap] rerender failed:', e)
+    }
+  }
+
   async function reload() {
     dataURL = ''
     aspect = 1
-    generated = false
     try {
-      let dto = await GetMinimapBytes()
-      // No baked minimap in the map (e.g. a freshly-created or never-rendered
-      // map)? Fall back to a terrain-colored preview baked on the Go side. The
-      // generated image spans the same vertex extent the click-to-pan/frustum
-      // math assumes, so those affordances keep working unchanged.
+      // Prefer a LIVE terrain render (Go bakes the current .w3e to a PNG). This
+      // is what makes the panel track terrain edits and gives new maps a real
+      // minimap — and it sidesteps mdx-m3-viewer's BLP-JPEG decoder, which
+      // garbles Go-baked BLPs. Returns found=false only when no terrain is
+      // loaded, in which case we fall back to the map's own baked image.
+      let dto = await GenerateMinimapBytes()
       if (!dto || !dto.found || !dto.bytes) {
-        try {
-          const gen = await GenerateMinimapBytes()
-          if (gen && gen.found && gen.bytes) {
-            dto = gen
-            generated = true
-          }
-        } catch (ge) {
-          console.warn('[Minimap] generate fallback failed:', ge)
-        }
+        dto = await GetMinimapBytes()
       }
       if (!dto || !dto.found || !dto.bytes) return
-      // Decode base64 → Uint8Array, then dispatch to BLP/DDS/TGA decoder.
-      const bin = atob(dto.bytes)
-      const buf = new Uint8Array(bin.length)
-      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
-      dataURL = decodeImageBytes(buf, dto.ext)
+      dataURL = bytesToDataURL(dto.bytes, dto.ext)
     } catch (e) {
       // Silent failure — the placeholder renders if dataURL stays empty.
       console.warn('[Minimap] decode failed:', e)
       dataURL = ''
-      generated = false
     }
     // Cache terrain coords for click-to-pan. Side-band fetch; failures here
     // just mean clicks don't pan (image still displays fine).
@@ -338,17 +375,6 @@
           opacity="0.85"
         />
       </svg>
-    {/if}
-    {#if generated}
-      <!-- Subtle badge marking this as a synthesized terrain preview rather
-           than the map's own baked minimap. Bottom-left so it stays clear of
-           the typical camera frustum and click target. -->
-      <div
-        class="absolute left-1 bottom-1 px-1 py-px rounded-sm bg-black/55 text-[9px] leading-none uppercase tracking-wide text-white/80 pointer-events-none select-none"
-        title="Auto-generated from terrain — this map has no baked minimap"
-      >
-        auto
-      </div>
     {/if}
   {:else}
     <div

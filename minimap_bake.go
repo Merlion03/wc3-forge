@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/color"
+	"image/png"
 
 	"github.com/StephenSHorton/wc3-forge/internal/blp"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3e"
@@ -119,6 +121,23 @@ func bakeMinimapImage(t *w3e.File) *image.RGBA {
 		}
 	}
 	return img
+}
+
+// BakeMinimapPNG renders the terrain minimap and encodes it as a PNG. This is
+// what the editor's minimap PANEL consumes: PNG is lossless and browser-native,
+// so the frontend renders it directly without going through mdx-m3-viewer's BLP
+// decoder (which mishandles Go's 3-component JPEG-in-BLP output — the bytes
+// decode fine in WC3 and gowarcraft3, but render as garbage in the viewer's JPG
+// path). BLP is still used for the on-disk war3mapMap.blp (see BakeMinimapBLP).
+func BakeMinimapPNG(t *w3e.File) ([]byte, error) {
+	if t == nil {
+		return nil, fmt.Errorf("minimap: nil terrain")
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, bakeMinimapImage(t)); err != nil {
+		return nil, fmt.Errorf("minimap: encode png: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 // BakeMinimapBLP renders the terrain minimap and encodes it as a BLP1/JPEG
