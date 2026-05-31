@@ -670,6 +670,15 @@ export interface SceneAPI {
   /** Register the placement callback (see setPlacementMode / PlacementHit). */
   onPlacementPick(cb: PlacementPickCallback): void
   /**
+   * Arm (or swap) the preview ghost — a tinted, non-interactive instance of
+   * `typeId` that follows the cursor across the terrain while placement mode
+   * is active, so the user sees the model and its footprint before clicking.
+   * Pass null to drop the preview. The ghost is purely visual: it never enters
+   * selection, the View-menu visibility toggles, pick tests, or the saved map.
+   * Disarming placement mode (setPlacementMode(false)) also drops it.
+   */
+  setPlacementGhost(typeId: string | null, types: Record<string, DoodadTypeInfo>): void
+  /**
    * Add a single doodad to the live scene from its DTO, without a full map
    * reload. Used by the Doodad Palette after CreateDoodad allocates a
    * creation_number: the caller pushes the DTO into its own doodads array and
@@ -981,6 +990,23 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // in the click handler so an armed palette brush wins over terrain mode.
   let placementMode = false
   let placementCallback: PlacementPickCallback | null = null
+  // Placement ghost — a translucent-tinted preview instance of the armed
+  // doodad that follows the cursor across the terrain (HiveWE / World Editor
+  // behavior) so the user sees what they're about to drop and where. Built by
+  // setPlacementGhost when a type is armed, repositioned in the hover handler,
+  // and torn down whenever placement mode turns off. It lives OUTSIDE
+  // doodadInstances/doodadCategoryByCn (it's not a real map entity) so it never
+  // leaks into selection, visibility toggles, pick tests, or save. The load
+  // token guards against a stale async model load landing after a re-arm or
+  // disarm raced ahead of it.
+  let placementGhostInst: any = null
+  let placementGhostTypeId: string | null = null
+  let placementGhostLoadToken = 0
+  let placementGhostPlaced = false // shown only after the first positioned move
+  // Cool cyan wash so the preview reads as "not placed yet." Alpha is ignored
+  // by opaque doodad layers (no blend mode), so the tint — not transparency —
+  // is what distinguishes the ghost from a real instance.
+  const GHOST_TINT: [number, number, number, number] = [0.4, 0.85, 1.2, 1]
   // Doodad instances whose model has at least one 'stand' sequence AND that
   // sequence may end (either non-looping, or multi-variation where we want
   // to re-roll a new variation when the current one ends). These need
@@ -1626,13 +1652,20 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   //
   // Doodad scale is stored RAW in war3map.doo (memory note: no /128 divide),
   // so we pass unit.scale through verbatim, multiplied by the SLK base scale.
-  async function placeDoodad(d: any, types: Record<string, DoodadTypeInfo>): Promise<any | null> {
-    const info = types[d.type_id]
-    if (!info || !info.file) return null
+  // Resolve + load the MDX/MDL model for a doodad type, trying the variant
+  // path, the unsuffixed fallback, and the other extension in order (see the
+  // inline notes for why). Returns the loaded model and the path that worked,
+  // or null when none loaded. Shared by placeDoodad (real instances) and the
+  // placement ghost (cursor preview) so both honor the same extension-
+  // exhaustion order.
+  async function resolveDoodadModel(
+    info: DoodadTypeInfo,
+    variation: number,
+  ): Promise<{ model: any; chosenPath: string } | null> {
     const extMatch = info.file.match(/\.(mdl|mdx)$/i)
     const declaredExt = extMatch ? extMatch[0] : '.mdx'
     const stem = extMatch ? info.file.slice(0, -extMatch[0].length) : info.file
-    const variantIdx = Math.min(Math.max(0, d.variation), Math.max(0, info.num_var - 1))
+    const variantIdx = Math.min(Math.max(0, variation), Math.max(0, info.num_var - 1))
 
     // Try (in order):
     //   1. variant path with the declared extension
@@ -1651,7 +1684,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (model && typeof model.addInstance === 'function') break
       try { model = await viewer.load(p, pathSolver); chosenPath = p } catch { /* swallow, try next */ }
     }
-    if (!model || typeof model.addInstance !== 'function') { sceneDiag.doodadModelFails++; return null }
+    if (!model || typeof model.addInstance !== 'function') return null
+    return { model, chosenPath: chosenPath! }
+  }
+
+  async function placeDoodad(d: any, types: Record<string, DoodadTypeInfo>): Promise<any | null> {
+    const info = types[d.type_id]
+    if (!info || !info.file) return null
+    const resolved = await resolveDoodadModel(info, d.variation)
+    if (!resolved) { sceneDiag.doodadModelFails++; return null }
+    const { model, chosenPath } = resolved
 
     // Placed-but-invisible guard (same rationale as placeUnit): a doodad model
     // that parsed with zero geosets renders nothing but counts as placed.
@@ -1763,6 +1805,57 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     return inst
   }
 
+  // Tear down the placement ghost (if any). Detaches it from the scene's
+  // render list — same removal path clearInstances uses for real doodads —
+  // and bumps the load token so any model load still in flight discards its
+  // result instead of attaching an orphan. The model itself stays in the
+  // viewer cache for instant re-arm.
+  function disposePlacementGhost() {
+    placementGhostLoadToken++
+    placementGhostTypeId = null
+    placementGhostPlaced = false
+    if (placementGhostInst) {
+      doodadInstancesToReroll.delete(placementGhostInst)
+      try { placementGhostInst.detach() } catch { /* already detached */ }
+      placementGhostInst = null
+    }
+  }
+
+  // (Re)build the placement ghost for `typeId`. Drops any prior ghost first, so
+  // arming a different doodad swaps the preview. Passing null just disarms the
+  // preview. The instance is created hidden and positioned (then shown) on the
+  // first hover-move so it doesn't flash at the map origin before the cursor
+  // reports a terrain cell. Transform mirrors placeDoodad's defaults for a
+  // fresh drop: rotation 0, base model scale, the per-type fixed pitch/roll.
+  async function rebuildPlacementGhost(typeId: string | null, types: Record<string, DoodadTypeInfo>) {
+    disposePlacementGhost()
+    if (!typeId) return
+    const info = types[typeId]
+    if (!info || !info.file) return
+    placementGhostTypeId = typeId
+    const token = placementGhostLoadToken
+    const resolved = await resolveDoodadModel(info, 0)
+    // A newer arm/disarm superseded this load while it was in flight — discard.
+    if (token !== placementGhostLoadToken || placementGhostTypeId !== typeId) return
+    if (!resolved) return
+    const inst = resolved.model.addInstance()
+    let rot = quatZ(0)
+    const mp = info.max_pitch || 0
+    if (mp < 0) rot = quatMul(rot, quatY(-mp))
+    const mr = info.max_roll || 0
+    if (mr < 0) rot = quatMul(rot, quatX(-mr))
+    inst.rotateLocal(rot)
+    const ms = info.model_scale || 1
+    if (typeof inst.setScale === 'function') inst.setScale([ms, ms, ms])
+    else inst.uniformScale(ms)
+    inst.setScene(scene)
+    inst.setVertexColor(GHOST_TINT)
+    rollSequence(inst, 'stand')
+    inst.hide() // revealed by the first positioned hover-move
+    placementGhostInst = inst
+    placementGhostPlaced = false
+  }
+
   // Sample the terrain surface height at a game-coord (worldX, worldY) by
   // bilinearly interpolating the four surrounding vertex heights from the
   // cached TerrainDTO. Mirrors pickTerrainCell's grid math: vertex (0,0) sits
@@ -1817,6 +1910,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   }
 
   function clearInstances() {
+    // A reload/close invalidates any armed placement ghost (its model may not
+    // even exist in the next map's catalog). Drop it before detaching the rest.
+    disposePlacementGhost()
     // Manual-anim pins are scoped to a loaded map — drop them so a fresh
     // map opens with all units back in the idle-reroll pool.
     manualAnimCns.clear()
@@ -2213,6 +2309,11 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     } | null
   }
   let downAt: DownState | null = null
+  // Where the most recent right-mouse-button press landed (client px), or null.
+  // Used to tell a right-CLICK (disarm the placement brush) from a right-DRAG
+  // (camera pan) on the contextmenu event — only a near-stationary release
+  // counts as a click. Camera panning owns RMB-drag and is left untouched.
+  let rmbDownAt: { x: number; y: number } | null = null
 
   // The rubber-band rectangle is rendered as a positioned DOM div. WebGL
   // would be lower-overhead but a one-element DOM overlay is dramatically
@@ -2284,6 +2385,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       downAt = null
       return
     }
+    // Remember where RMB went down so the contextmenu handler can distinguish
+    // a click (disarm placement) from a pan-drag (a right-drag moves far).
+    if (e.button === 2) rmbDownAt = { x: e.clientX, y: e.clientY }
     if (e.button !== 0) return
     // Gesture is starting — drop the pre-click hover hint. If this click selects
     // the entity it gets the white selection outline; otherwise the next free
@@ -2710,7 +2814,22 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // cancel a gizmo drag. Otherwise both the cancel-drag and the menu fire,
   // and the menu lingers until dismissed.
   function onCanvasContextMenu(e: MouseEvent) {
-    if (gizmoDragging && gizmo?.isDragging()) e.preventDefault()
+    if (gizmoDragging && gizmo?.isDragging()) { e.preventDefault(); return }
+    // Right-click while a placement brush is armed disarms it (the callback
+    // does the UI-side disarm, which routes back through setPlacementMode and
+    // drops the ghost). Only a stationary click counts — a right-DRAG is a
+    // camera pan and must keep the brush armed. Suppress the WebView menu so
+    // it doesn't pop on the disarming click.
+    if (placementMode && rmbDownAt) {
+      const dist = Math.hypot(e.clientX - rmbDownAt.x, e.clientY - rmbDownAt.y)
+      rmbDownAt = null
+      if (dist <= CLICK_PIXEL_THRESHOLD) {
+        e.preventDefault()
+        placementCallback?.(null)
+        return
+      }
+    }
+    rmbDownAt = null
   }
   canvas.addEventListener('contextmenu', onCanvasContextMenu)
   // Listen on document for move/up so the rubber-band gesture survives the
@@ -2775,6 +2894,27 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     if (placementMode || terrainPickMode) {
       clearHover() // crosshair modes own the cursor; drop any pre-click hint
       if (canvas.style.cursor !== 'crosshair') canvas.style.cursor = 'crosshair'
+      // Slide the preview ghost to the terrain cell under the cursor (same
+      // pick + height-sample the click-to-place path uses, so the preview
+      // lands exactly where the drop will). Throttled with the shared hover
+      // gate — 30 Hz is smooth and keeps pickTerrainCell off the 1000 Hz mouse
+      // firehose. A miss (cursor off the map) just freezes the ghost in place.
+      if (placementMode && placementGhostInst && cachedTerrainDTO) {
+        const now = performance.now()
+        if (now - lastHoverTs >= HOVER_THROTTLE_MS) {
+          lastHoverTs = now
+          const r = canvas.getBoundingClientRect()
+          const cell = pickTerrainCell(e.clientX - r.left, e.clientY - r.top, canvas, scene, cachedTerrainDTO)
+          if (cell) {
+            const z = sampleTerrainHeight(cell.worldX, cell.worldY)
+            // setLocation (absolute), NOT move (relative += offset) — the hover
+            // handler fires every frame, so a relative move would accumulate
+            // and fling the ghost off the map after frame one.
+            placementGhostInst.setLocation([cell.worldX, cell.worldY, z])
+            if (!placementGhostPlaced) { placementGhostInst.show(); placementGhostPlaced = true }
+          }
+        }
+      }
       return
     }
     const now = performance.now()
@@ -3738,10 +3878,18 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       // shouldn't reset a cursor terrain mode still wants).
       if (active) canvas.style.cursor = 'crosshair'
       else if (!terrainPickMode) canvas.style.cursor = ''
+      // Leaving placement mode always retires the preview ghost — it only
+      // makes sense while a brush is armed. Re-entry rebuilds it via
+      // setPlacementGhost. This is the single chokepoint every disarm path
+      // (palette cancel, Escape, right-click, map close) funnels through.
+      if (!active) disposePlacementGhost()
     },
     isPlacementMode() { return placementMode },
     onPlacementPick(cb: PlacementPickCallback) {
       placementCallback = cb
+    },
+    setPlacementGhost(typeId: string | null, types: Record<string, DoodadTypeInfo>) {
+      void rebuildPlacementGhost(typeId, types)
     },
     async addDoodadLive(d: any, types: Record<string, DoodadTypeInfo>) {
       const inst = await placeDoodad(d, types)

@@ -1436,6 +1436,10 @@
     if (typeId) onTerrainBrushChange(null) // doodad + terrain brush are exclusive
     armedDoodadType = typeId
     scene?.setPlacementMode(!!typeId)
+    // Drive the cursor preview ghost: arming builds/swaps it, disarming drops
+    // it (setPlacementMode(false) also drops it, so the null case is belt-and-
+    // suspenders). doodadTypes is the same index the scene placed the map from.
+    scene?.setPlacementGhost(typeId, doodadTypes as unknown as Record<string, any>)
   }
 
   // Terrain Palette → scene wiring. The palette (shown only in Terrain Mode)
