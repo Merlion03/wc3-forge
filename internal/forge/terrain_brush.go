@@ -177,15 +177,17 @@ func (s *Session) commitTerrainBrushLocked(label string, edits []terrainCornerEd
 // finishTerrainBrush fires the post-unlock notifications shared by every brush
 // mutator: dirty pill (if it just flipped), one terrain entity-changed event,
 // and history-changed when the edit landed outside a group. Call AFTER s.mu is
-// released.
-func (s *Session) finishTerrainBrush(wasDirty, changed, historyChanged bool) {
+// released. `field` names what changed ("tile" / "height" / "cliff" / "ramp")
+// so the frontend can re-render only the affected surface — a tile paint
+// shouldn't trigger a cliff or water rebuild.
+func (s *Session) finishTerrainBrush(wasDirty, changed, historyChanged bool, field string) {
 	if !changed {
 		return
 	}
 	if !wasDirty {
 		s.notifyDirty(true)
 	}
-	s.notifyEntityChanged(EntityChange{Kind: "terrain", ID: 0, Field: "brush"})
+	s.notifyEntityChanged(EntityChange{Kind: "terrain", ID: 0, Field: field})
 	if historyChanged {
 		s.notifyHistoryChanged()
 	}
@@ -218,7 +220,7 @@ func (s *Session) PaintTileBrush(centerCol, centerRow, radius int, shape, ground
 	}
 	historyChanged := s.commitTerrainBrushLocked("Paint terrain", edits)
 	s.mu.Unlock()
-	s.finishTerrainBrush(wasDirty, len(edits) > 0, historyChanged)
+	s.finishTerrainBrush(wasDirty, len(edits) > 0, historyChanged, "tile")
 	return nil
 }
 
@@ -283,7 +285,7 @@ func (s *Session) HeightBrush(centerCol, centerRow, radius int, shape, mode stri
 	}
 	historyChanged := s.commitTerrainBrushLocked("Edit terrain height", edits)
 	s.mu.Unlock()
-	s.finishTerrainBrush(wasDirty, len(edits) > 0, historyChanged)
+	s.finishTerrainBrush(wasDirty, len(edits) > 0, historyChanged, "height")
 	return nil
 }
 
@@ -365,7 +367,7 @@ func (s *Session) CliffBrush(centerCol, centerRow, radius int, shape, mode strin
 	}
 	historyChanged := s.commitTerrainBrushLocked("Edit cliff", edits)
 	s.mu.Unlock()
-	s.finishTerrainBrush(wasDirty, len(edits) > 0, historyChanged)
+	s.finishTerrainBrush(wasDirty, len(edits) > 0, historyChanged, "cliff")
 	return nil
 }
 
@@ -397,7 +399,7 @@ func (s *Session) RampBrush(centerCol, centerRow, radius int, shape string, on b
 	}
 	historyChanged := s.commitTerrainBrushLocked("Edit ramp", edits)
 	s.mu.Unlock()
-	s.finishTerrainBrush(wasDirty, len(edits) > 0, historyChanged)
+	s.finishTerrainBrush(wasDirty, len(edits) > 0, historyChanged, "ramp")
 	return nil
 }
 
