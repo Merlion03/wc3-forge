@@ -328,11 +328,17 @@ func neighborAvgZLocked(s *Session, idx, w, h int) float32 {
 //	"lower" — LayerHeight -= 1 (clamped to 0).
 //	"set"   — LayerHeight = level (clamped to [0,15]).
 //
-// When a corner ends up on a cliff (its layer differs from a neighbor the
-// renderer will wall off) its CliffTexture is set to the palette slot matching
-// cliffTileID (or slot 0 when cliffTileID is empty / not found) so a wall
-// actually renders — a corner left at CliffTexture 15 ("no cliff") renders a
-// void. One undo step, one re-render.
+// CRITICAL: WC3 cliff models only exist for a ONE-level step between adjacent
+// corners (the Cliffs<ABCD>N.mdx names encode each corner's height above the
+// cell minimum, and Blizzard ships only A/B = 0/1 patterns). A 2+ level step has
+// no model → an invisible wall. So after editing the footprint we "ripple" the
+// change outward (enforceCliffStaircaseLocked), pulling neighboring corners into
+// a staircase where no two adjacent corners differ by more than one level —
+// exactly what the World Editor does when you raise/lower a cliff.
+//
+// Every corner that ends up on a cliff (footprint + rippled) gets a valid
+// CliffTexture (palette slot for cliffTileID, or slot 0) so a wall renders — a
+// corner left at CliffTexture 15 ("no cliff") renders a void. One undo step.
 func (s *Session) CliffBrush(centerCol, centerRow int, radius float64, shape, mode string, level int, cliffTileID string) error {
 	s.mu.Lock()
 	corners := s.terrainBrushCornersLocked(centerCol, centerRow, radius, shape)
@@ -343,7 +349,10 @@ func (s *Session) CliffBrush(centerCol, centerRow int, radius float64, shape, mo
 	cliffTex := s.resolveCliffPaletteIndexLocked(cliffTileID)
 	wasDirty := s.anyDirtyLocked()
 	edits := make([]terrainCornerEdit, 0, len(corners)*2)
+	footprint := make(map[int]bool, len(corners))
+	layerChanged := false
 	for _, idx := range corners {
+		footprint[idx] = true
 		oldLayer := int(s.terrain.Tiles[idx].LayerHeight)
 		var newLayer int
 		switch mode {
@@ -363,20 +372,84 @@ func (s *Session) CliffBrush(centerCol, centerRow int, radius float64, shape, mo
 		if newLayer != oldLayer {
 			s.terrain.Tiles[idx].LayerHeight = uint8(newLayer)
 			edits = append(edits, terrainCornerEdit{idx: idx, field: fieldLayer, oldVal: int32(oldLayer), newVal: int32(newLayer)})
+			layerChanged = true
 		}
-		// Give every painted corner a valid cliff texture so a wall renders
-		// where layers differ. Skipping corners whose texture is already set
-		// keeps the edit list lean.
-		oldTex := s.terrain.Tiles[idx].CliffTexture
-		if oldTex != cliffTex {
-			s.terrain.Tiles[idx].CliffTexture = cliffTex
-			edits = append(edits, terrainCornerEdit{idx: idx, field: fieldCliffTex, oldVal: int32(oldTex), newVal: int32(cliffTex)})
-		}
+		setCliffTexLocked(s, idx, cliffTex, &edits)
+	}
+	// Ripple into a valid 1-level staircase so multi-level steps don't render as
+	// invisible walls (no Cliffs<C/D...>.mdx exists). Only when a layer actually
+	// moved — a no-op cliff dab shouldn't reshape the whole map.
+	if layerChanged {
+		s.enforceCliffStaircaseLocked(footprint, cliffTex, &edits)
 	}
 	historyChanged := s.commitTerrainBrushLocked("Edit cliff", edits)
 	s.mu.Unlock()
 	s.finishTerrainBrush(wasDirty, len(edits) > 0, historyChanged, "cliff")
 	return nil
+}
+
+// setCliffTexLocked sets one corner's CliffTexture (recording the edit) unless
+// it already matches. Caller MUST hold s.mu.
+func setCliffTexLocked(s *Session, idx int, cliffTex uint8, edits *[]terrainCornerEdit) {
+	oldTex := s.terrain.Tiles[idx].CliffTexture
+	if oldTex != cliffTex {
+		s.terrain.Tiles[idx].CliffTexture = cliffTex
+		*edits = append(*edits, terrainCornerEdit{idx: idx, field: fieldCliffTex, oldVal: int32(oldTex), newVal: int32(cliffTex)})
+	}
+}
+
+// enforceCliffStaircaseLocked pulls every corner into a configuration where no
+// two 4-adjacent corners differ by more than one cliff level, by propagating
+// outward from the (pinned) footprint corners. Each adjusted corner is recorded
+// in edits and given the cliff texture so its staircase step renders. Caller
+// MUST hold s.mu.
+//
+// Termination: for a raise the footprint is the local maximum, so neighbors only
+// ever move UP (toward it); for a lower, only DOWN. Either way each corner moves
+// monotonically within [0,15], so the BFS settles. A hard cap guards the
+// pathological "set" case against any cycle.
+func (s *Session) enforceCliffStaircaseLocked(footprint map[int]bool, cliffTex uint8, edits *[]terrainCornerEdit) {
+	w := int(s.terrain.Width)
+	h := int(s.terrain.Height)
+	queue := make([]int, 0, len(footprint)*4)
+	for idx := range footprint {
+		queue = append(queue, idx)
+	}
+	limit := w * h * (maxLayerHeight + 2) // generous bound; never reached in practice
+	for qi := 0; qi < len(queue); qi++ {
+		if qi > limit {
+			break
+		}
+		idx := queue[qi]
+		L := int(s.terrain.Tiles[idx].LayerHeight)
+		col := idx % w
+		row := idx / w
+		neighbors := [4][2]int{{col - 1, row}, {col + 1, row}, {col, row - 1}, {col, row + 1}}
+		for _, nb := range neighbors {
+			c, r := nb[0], nb[1]
+			if c < 0 || c >= w || r < 0 || r >= h {
+				continue
+			}
+			nidx := r*w + c
+			if footprint[nidx] {
+				continue // pinned — the user's explicit edit
+			}
+			cur := int(s.terrain.Tiles[nidx].LayerHeight)
+			target := cur
+			if cur > L+1 {
+				target = L + 1
+			} else if cur < L-1 {
+				target = L - 1
+			}
+			if target == cur {
+				continue
+			}
+			s.terrain.Tiles[nidx].LayerHeight = uint8(target)
+			*edits = append(*edits, terrainCornerEdit{idx: nidx, field: fieldLayer, oldVal: int32(cur), newVal: int32(target)})
+			setCliffTexLocked(s, nidx, cliffTex, edits)
+			queue = append(queue, nidx)
+		}
+	}
 }
 
 // RampBrush toggles the ramp flag (Flags bit 0x1) over the footprint. With

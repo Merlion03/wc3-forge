@@ -178,6 +178,72 @@ func TestBrushSaveRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCliffBrush_StaircaseInvariant raises a single corner three levels and
+// asserts the result is a valid 1-level staircase: no two 4-adjacent corners
+// differ by more than one level. Without the ripple, the center would be 3
+// levels above its neighbors — a multi-level step with no cliff model (invisible
+// wall). Also confirms one Undo reverts the whole ripple.
+func TestCliffBrush_StaircaseInvariant(t *testing.T) {
+	tmp := copyFixtureToTemp(t, fixtureExtracted)
+	s := &Session{}
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	col, row := centerCorner(t, s)
+	w := int(s.Terrain().Width)
+	h := int(s.Terrain().Height)
+	center := row*w + col
+	orig := int(s.Terrain().Tiles[center].LayerHeight)
+	if orig+3 > maxLayerHeight {
+		t.Skipf("center layer %d too high for a +3 raise", orig)
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := s.CliffBrush(col, row, 0, "circle", "raise", 0, ""); err != nil {
+			t.Fatalf("CliffBrush raise %d: %v", i, err)
+		}
+	}
+	if got := int(s.Terrain().Tiles[center].LayerHeight); got != orig+3 {
+		t.Errorf("center layer = %d, want %d", got, orig+3)
+	}
+	// Whole-grid staircase check: every 4-adjacent pair within 1 level.
+	tiles := s.Terrain().Tiles
+	maxDiff := 0
+	for r := 0; r < h; r++ {
+		for c := 0; c < w; c++ {
+			l := int(tiles[r*w+c].LayerHeight)
+			if c+1 < w {
+				if d := abs(l - int(tiles[r*w+c+1].LayerHeight)); d > maxDiff {
+					maxDiff = d
+				}
+			}
+			if r+1 < h {
+				if d := abs(l - int(tiles[(r+1)*w+c].LayerHeight)); d > maxDiff {
+					maxDiff = d
+				}
+			}
+		}
+	}
+	if maxDiff > 1 {
+		t.Errorf("max adjacent layer diff = %d, want ≤1 (staircase broken)", maxDiff)
+	}
+
+	// One Undo reverts the last raise (and its ripple) as a single step.
+	if err := s.Undo(); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	if got := int(s.Terrain().Tiles[center].LayerHeight); got != orig+2 {
+		t.Errorf("center layer after one undo = %d, want %d", got, orig+2)
+	}
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // TestBrushFootprint_CircleVsSquare checks the two shapes produce the expected
 // corner counts for a radius-2 brush well inside the grid: a square is the full
 // (2r+1)² block; a circle drops the four extreme corners.
