@@ -8,7 +8,7 @@
     GetReforgedMode, SetReforgedMode,
     GetUnitTypeIndex, GetDoodadTypeIndex,
     NewMapDialog as NewMapSaveDialog, CreateNewMap, WriteNewMap, ReportDiagnostics,
-    MoveUnit, MoveDoodad, CreateDoodad, IsDirty, SaveMap,
+    MoveUnit, MoveDoodad, CreateDoodad, DeleteSelection, IsDirty, SaveMap,
     LaunchInWC3,
     Undo, Redo, CanUndo, CanRedo, HistoryList,
     CheckConvertToLua,
@@ -82,6 +82,18 @@
   let selectionItems: main.SelectionItemDTO[] = $state([])
   let primaryEntity: unitsdoo.Entity | null = $state(null)
   let primaryDoodad: main.DoodadDTO | null = $state(null)
+  // True while the Doodad Palette is placing a doodad (CreateDoodad +
+  // addDoodadLive). The entity-changed `created` handler checks this to avoid a
+  // redundant full reload for palette placements — those render their instance
+  // live and the event may arrive before addDoodadLive finishes. Not $state:
+  // it's a plain control flag, never read in the template.
+  let palettePlacing = false
+  // True while a `created`-triggered reloadMap is in flight. A group undo of a
+  // multi-entity delete emits one `created` event per entity; without this
+  // guard each would kick its own full reload. One reloadMap rebuilds the whole
+  // scene from Go's authoritative state, so the first reload already covers
+  // every reinserted entity — the rest coalesce into it.
+  let createdReloadPending = false
   // Persistent state errors only — currently just the scene-init-failed path
   // during onMount. Transient operational errors (Save/Open/Move/Reforged
   // toggle) go through showToast() so they auto-dismiss.
@@ -885,6 +897,42 @@
         await reloadMap({ keepCamera: true })
         return
       }
+      // Entity removed (Delete key, MCP doodads.delete/units.delete, or undo of
+      // a create). The scene detaches the rendered instance in its own
+      // entity-changed subscription; here we just drop the row from the
+      // Explorer's units/doodads arrays so the list stays in sync. The
+      // selection-changed event (fired when the deleter clears selection)
+      // resets primaryEntity/primaryDoodad, but null them defensively in case
+      // the deleted entity was the focused primary without a selection change.
+      if (payload.field === 'deleted') {
+        if (payload.kind === 'unit') {
+          units = units.filter(u => u.creation_number !== payload.id)
+          if (primaryEntity?.CreationNumber === payload.id) primaryEntity = null
+        } else if (payload.kind === 'doodad') {
+          doodads = doodads.filter(d => d.creation_number !== payload.id)
+          if (primaryDoodad?.creation_number === payload.id) primaryDoodad = null
+        }
+        return
+      }
+      // Entity (re-)created from a source other than the live Doodad Palette —
+      // undo of a delete, redo of a create, or an MCP units.create/doodads.create.
+      // The scene has no rendered instance for it yet, so rebuild from Go's
+      // authoritative state (keepCamera so an undo doesn't yank the viewpoint).
+      // The palette places its own instance live + handles the race via the
+      // palettePlacing guard, so skip the reload for those to keep placement fast.
+      if (payload.field === 'created') {
+        if (palettePlacing) return
+        if (scene?.hasInstance(payload.kind, payload.id)) return
+        if (createdReloadPending) return
+        createdReloadPending = true
+        mapLoadGen += 1
+        try {
+          await reloadMap({ keepCamera: true })
+        } finally {
+          createdReloadPending = false
+        }
+        return
+      }
       if (payload.kind === 'unit') {
         if (!primaryEntity || primaryEntity.CreationNumber !== payload.id) {
           // entity-changed drop: a unit other than the focused primary changed,
@@ -1221,6 +1269,35 @@
       e.preventDefault()
       scene?.focusSelection()
     }
+    // Delete / Backspace: remove the selected units + doodads in one undo step.
+    // Bare key only (no modifiers); skipped when typing in an input or when a
+    // modal/editor dialog is open — those own their own Delete semantics (the
+    // Trigger Editor deletes a node, Object Editor a custom row, etc.).
+    // Backspace is an alias for keyboards/laptops without a dedicated Delete.
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      const tgt = e.target as HTMLElement | null
+      const tagName = tgt?.tagName?.toLowerCase()
+      if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
+      if (showObjectEditor || showTriggerEditor || showConvertToLua || showMapInfoEditor
+          || showNewMap || showUpdateDialog || showWC3InstallDialog || quitGuardOpen) return
+      if (selectionItems.length === 0) return
+      e.preventDefault()
+      void deleteSelection()
+    }
+  }
+
+  // Delete every unit + doodad in the current selection as a single undo group
+  // (the Go App.DeleteSelection batches them). The scene detaches the removed
+  // instances and the Explorer arrays update via the entity-changed `deleted`
+  // events; selection clears via the selection-changed event the delete fires.
+  async function deleteSelection() {
+    if (selectionItems.length === 0) return
+    try {
+      const n = await DeleteSelection()
+      flogDebug(`[delete] removed ${n} entit${n === 1 ? 'y' : 'ies'} from selection`)
+    } catch (err) {
+      showToast('Delete failed: ' + String(err), 'error')
+    }
   }
 
   function setGizmoMode(m: 'move' | 'rotate' | 'scale') {
@@ -1418,6 +1495,7 @@
     if (!hit) { armDoodad(null); return }
     const typeId = armedDoodadType
     if (!typeId) return
+    palettePlacing = true
     try {
       const cn = await CreateDoodad(typeId, hit.worldX, hit.worldY, hit.z, 0, 1, 0)
       // Mirror what the Go session built so the live add + Explorer row match
@@ -1440,6 +1518,8 @@
       dirty = true
     } catch (e) {
       showToast('Place doodad failed: ' + String(e), 'error')
+    } finally {
+      palettePlacing = false
     }
   }
 
