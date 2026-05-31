@@ -16,7 +16,6 @@ import (
 	"github.com/StephenSHorton/wc3-forge/internal/formats/miscdata"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
-	"github.com/StephenSHorton/wc3-forge/internal/wc3launch"
 	"github.com/StephenSHorton/wc3-forge/internal/wc3path"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -1696,11 +1695,15 @@ func (a *App) LaunchInWC3() error {
 	if !forge.Current.IsLoaded() {
 		return fmt.Errorf("no map loaded")
 	}
-	mapPath := forge.Current.Path()
-	if mapPath == "" {
+	if forge.Current.Path() == "" {
 		return fmt.Errorf("no map path available")
 	}
-	return wc3launch.LaunchWithMap(mapPath)
+	// Delegate to the shared TestMap pipeline so both the GUI button and the
+	// MCP triggers.test_map handler behave identically: save pending edits,
+	// (re)generate the script if needed, and — for folder-backed sessions —
+	// package the folder into a sibling out/<map>.w3x before launching (WC3
+	// can't load a loose folder).
+	return forge.Current.TestMap()
 }
 
 // MapInfoGet returns the full parsed war3map.w3i for the loaded map. The

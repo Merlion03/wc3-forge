@@ -219,6 +219,9 @@
     if (testMapDisabled) return
     launching = true
     try {
+      if (testMapIsFolder) {
+        showToast('Packaging & launching…', 'info')
+      }
       await LaunchInWC3()
       showToast('Launching Warcraft III…', 'info')
     } catch (e) {
@@ -2097,26 +2100,27 @@
   }
   // ----- Test Map button (launch WC3 with the current map preloaded) -----
   //
-  // Mirrors HiveWE's ribbon `Test Map` action. v1 constraints (see
-  // app.go::LaunchInWC3 + internal/wc3launch/launch.go):
+  // Mirrors HiveWE's ribbon `Test Map` action. Constraints (see
+  // app.go::LaunchInWC3 -> forge.Session.TestMap):
   //   - Session must be loaded.
-  //   - Session must NOT be dirty — wc3-forge has no MPQ writer yet, so
-  //     edits can't be packaged into the .w3x that WC3 needs to load. The
-  //     button is gated below; future work: save + repackage + launch.
-  //   - Session path must be a .w3x/.w3m/.mpq archive, NOT a folder.
-  //     Folder-backed sessions can't be launched directly because WC3 only
-  //     opens packaged archives.
+  //   - Session must NOT be dirty — save first so the launched map reflects
+  //     the current edits (folder maps save in place; MPQ maps repack).
+  //   - .w3x/.w3m/.mpq archives launch directly; FOLDER-backed sessions are
+  //     packaged into a sibling out/<map>.w3x on launch (WC3 can't open a
+  //     loose folder), so the button is enabled for them too.
   let testMapLoaded = $derived(status.loaded && !!status.path)
   let testMapIsFile = $derived((() => {
     const p = (status.path || '').toLowerCase()
     return /\.(w3x|w3m|mpq)$/.test(p)
   })())
-  let testMapDisabled = $derived(!testMapLoaded || !testMapIsFile || dirty || launching)
+  // Folder-backed = loaded with a path that isn't a packaged-archive extension.
+  let testMapIsFolder = $derived(testMapLoaded && !testMapIsFile)
+  let testMapDisabled = $derived(!testMapLoaded || dirty || launching)
   let testMapTooltip = $derived((() => {
     if (!testMapLoaded) return 'Open a map first'
-    if (!testMapIsFile) return 'Folder-backed maps can\'t be tested — open a packaged .w3x first'
-    if (dirty) return 'Save changes first (note: saving to MPQ archives is not yet supported, so edits must be discarded or applied externally before testing)'
+    if (dirty) return 'Save changes first, then launch'
     if (launching) return 'Launching…'
+    if (testMapIsFolder) return 'Package this folder and launch in WC3'
     return 'Launch Warcraft III with this map (-loadfile)'
   })())
   let groups = $derived(bucket(units, unitTypes))
