@@ -2964,19 +2964,25 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     return Array.isArray(t?.palette) ? t.palette.join('|') : ''
   }
   // Translate the entity-changed field into which surfaces need rebuilding, then
-  // schedule the appropriate tier.
+  // schedule the appropriate tier. Terrain AND cliffs go in the fast throttled
+  // tier and rebuild from the SAME fresh fetch, in lockstep: terrain.update
+  // skips cliff cells (holes) the instant a layer changes, so the cliff walls
+  // MUST rebuild at the same cadence or you get voids ("invisible cliffs").
+  // Cliffs are rebuilt exactly as loadMap does (fresh GetTerrain → compute →
+  // render) — reusing a cached DTO produced fewer/no placements. Only water
+  // (expensive, never edited by these brushes) is deferred to the slow tier.
   function markTerrainDirty(field: string) {
     switch (field) {
       case 'tile': terrainDirty = true; break
       case 'height': terrainDirty = true; waterDirty = true; break
       case 'cliff': terrainDirty = true; cliffsDirty = true; break
-      case 'ramp': cliffsDirty = true; break
+      case 'ramp': terrainDirty = true; cliffsDirty = true; break
       default: terrainDirty = true; cliffsDirty = true; waterDirty = true; break // unknown → all
     }
-    if (terrainDirty) scheduleTerrain()
-    if (cliffsDirty || waterDirty) scheduleHeavy()
+    if (terrainDirty || cliffsDirty) scheduleTerrain()
+    if (waterDirty) scheduleHeavy()
   }
-  // --- Tier 1: terrain geometry (throttled, leading-ish) ---
+  // --- Tier 1: terrain geometry + cliffs (throttled, in lockstep) ---
   function scheduleTerrain() {
     if (terrainTimer !== null || terrainRunning) return
     const wait = Math.max(0, TERRAIN_THROTTLE_MS - (performance.now() - lastTerrainTs))
@@ -2984,64 +2990,63 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   }
   async function runTerrain() {
     if (terrainRunning) { scheduleTerrain(); return }
-    if (!terrainDirty) return
+    if (!terrainDirty && !cliffsDirty) return
     terrainRunning = true
     lastTerrainTs = performance.now()
-    terrainDirty = false
+    const doTerrain = terrainDirty, doCliffs = cliffsDirty
+    terrainDirty = cliffsDirty = false
     try {
       const prevPaletteKey = terrainPaletteKey(cachedTerrainDTO)
       const t = await GetTerrain()
       cachedTerrainDTO = t
       cellHighlight?.setTerrain(t as unknown as any)
       const gl = (viewer as any).gl as WebGLRenderingContext
-      const paletteChanged = terrainPaletteKey(t) !== prevPaletteKey
-      if (terrain && !paletteChanged) {
-        terrain.update(t as unknown as any)
-      } else {
-        const newTerrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
-        terrain?.dispose(); terrain = newTerrain
+      if (doTerrain) {
+        const paletteChanged = terrainPaletteKey(t) !== prevPaletteKey
+        if (terrain && !paletteChanged) {
+          terrain.update(t as unknown as any)
+        } else {
+          const newTerrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
+          terrain?.dispose(); terrain = newTerrain
+        }
+        sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
       }
-      sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
-    } catch (e) {
-      flog('[terrain update]', e instanceof Error ? e.message : String(e))
-    } finally {
-      terrainRunning = false
-      if (terrainDirty) scheduleTerrain()
-    }
-  }
-  // --- Tier 2: water + cliffs (trailing debounce — fires after editing stops) ---
-  function scheduleHeavy() {
-    if (heavyTimer !== null) clearTimeout(heavyTimer)
-    heavyTimer = setTimeout(() => { heavyTimer = null; void runHeavy() }, HEAVY_DEBOUNCE_MS)
-  }
-  async function runHeavy() {
-    if (heavyRunning) { scheduleHeavy(); return }
-    if (!cliffsDirty && !waterDirty) return
-    heavyRunning = true
-    const doCliffs = cliffsDirty, doWater = waterDirty
-    cliffsDirty = waterDirty = false
-    try {
-      // Reuse the terrain tier's last fetch when available (it runs far more
-      // often); only fetch if we somehow have nothing cached.
-      const t = cachedTerrainDTO ?? (await GetTerrain())
-      cachedTerrainDTO = t
-      const gl = (viewer as any).gl as WebGLRenderingContext
       if (doCliffs) {
+        // Build-then-swap (no null gap), same path + same fresh `t` as loadMap.
         const cliffPlacements = computeCliffPlacements(t as unknown as any)
         const newCliffs = cliffPlacements.length > 0
           ? await renderCliffs(gl, viewer as any, pathSolver, cliffPlacements, t as unknown as any)
           : null
         cliffs?.dispose(); cliffs = newCliffs
       }
-      if (doWater) {
-        const newWater = await buildWater(gl, viewer as any, pathSolver, t as unknown as any)
-        water?.dispose(); water = newWater
-      }
     } catch (e) {
-      flog('[terrain heavy rebuild]', e instanceof Error ? e.message : String(e))
+      flog('[terrain update]', e instanceof Error ? e.message : String(e))
+    } finally {
+      terrainRunning = false
+      if (terrainDirty || cliffsDirty) scheduleTerrain()
+    }
+  }
+  // --- Tier 2: water (trailing debounce — fires after editing stops) ---
+  function scheduleHeavy() {
+    if (heavyTimer !== null) clearTimeout(heavyTimer)
+    heavyTimer = setTimeout(() => { heavyTimer = null; void runHeavy() }, HEAVY_DEBOUNCE_MS)
+  }
+  async function runHeavy() {
+    if (heavyRunning) { scheduleHeavy(); return }
+    if (!waterDirty) return
+    heavyRunning = true
+    waterDirty = false
+    try {
+      // The fast terrain tier fetched fresh moments ago; reuse it for water.
+      const t = cachedTerrainDTO ?? (await GetTerrain())
+      const gl = (viewer as any).gl as WebGLRenderingContext
+      const newWater = await buildWater(gl, viewer as any, pathSolver, t as unknown as any)
+      water?.dispose(); water = newWater
+    } catch (e) {
+      flog('[terrain water rebuild]', e instanceof Error ? e.message : String(e))
     } finally {
       heavyRunning = false
-      if (cliffsDirty || waterDirty) scheduleHeavy()
+      if (waterDirty) scheduleHeavy()
     }
   }
 
