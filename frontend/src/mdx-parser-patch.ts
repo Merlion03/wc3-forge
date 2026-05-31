@@ -224,6 +224,21 @@ export function patchMdxParser(): void {
     }
   }
 
+  // Reforged "tree" replaceable-texture bases (mirror of mdx-m3-viewer's
+  // handlers/mdx/replaceableids). In the SD era each id mapped to ONE texture;
+  // the HD assets split it into per-slot files (<base>_Diffuse/_Normal/_ORM).
+  const TREE_REPLACEABLE_BASE: Record<number, string> = {
+    31: 'LordaeronTree/LordaeronSummerTree',
+    32: 'AshenvaleTree/AshenTree',
+    33: 'BarrensTree/BarrensTree',
+    34: 'NorthrendTree/NorthTree',
+    35: 'Mushroom/MushroomTree',
+    36: 'RuinsTree/RuinsTree',
+    37: 'OutlandMushroomTree/MushroomTree',
+  }
+  // HD per-slot filename suffixes, indexed by the lib's HD layer slot order.
+  const SLOT_SUFFIX: Record<number, string> = { 0: '_Diffuse', 1: '_Normal', 2: '_ORM', 3: '_Emissive' }
+
   // ---- HD material reconstruction (the load-bearing part) ----
   //
   // mdx-m3-viewer predates the post-v1100 MDX format. Its HD render path
@@ -262,6 +277,27 @@ export function patchMdxParser(): void {
       if (!layers.some((l: any) => l.hd === 1)) continue // not an HD material
       const base = layers[0]
       const texs: Array<{ id: number; slot: number }> = base.texs || []
+      // Resolve Reforged "tree" replaceable textures (ids 31–37) to their real
+      // per-slot HD files. The lib's replaceable-id table only knows the bare
+      // base name, so without this it resolves diffuse/normal/orm ALL to the SD
+      // texture: the HD shader then samples the diffuse as the normal+orm maps,
+      // and orm.a (team-color factor) reads the foliage diffuse's alpha (~1), so
+      // `color *= teamColor` blackens the whole tree. Each tree slot ships as a
+      // separate file (<base>_Diffuse/_Normal/_ORM.dds), so point each
+      // empty-path tree-replaceable texture at the right one (literal path,
+      // replaceableId cleared so the lib uses it verbatim). Non-tree-replaceable
+      // slots (emissive=Black32, teamColor, environment) already have real paths
+      // or ids and are left untouched.
+      for (const { id, slot } of texs) {
+        if (!valid(id)) continue
+        const tex = model.textures[id]
+        if (!tex || tex.path !== '') continue
+        const baseName = TREE_REPLACEABLE_BASE[tex.replaceableId]
+        const suffix = SLOT_SUFFIX[slot]
+        if (!baseName || !suffix) continue
+        tex.path = `ReplaceableTextures\\${baseName}${suffix}.dds`
+        tex.replaceableId = 0
+      }
       // Diffuse fallback for any slot we can't resolve — always a valid index.
       const diffuse = (() => {
         const d = texs.find(t => t.slot === 0) || texs[0]
