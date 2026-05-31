@@ -79,6 +79,28 @@ Function .onInit
    !insertmacro wails.checkArchitecture
 FunctionEnd
 
+# MoveAsideIfPresent renames an installed file out of the way (FILE -> FILE.old)
+# so a fresh copy can be written even when the original is locked by a running
+# process. The motivating case: wc3-forge ships an MCP server that Claude runs
+# as a long-lived `wc3-forge.exe --mcp` child process. It holds the installed
+# binary's image locked the whole time Claude is up — independent of the GUI —
+# so the updater quitting the editor window doesn't release it, and the
+# installer's file-copy fails ("Error opening file for writing"). Windows lets
+# you RENAME a running/locked image even though you can't overwrite it, so we
+# move it aside; wails.files then writes the new binary at the now-free path and
+# the still-running server keeps using the renamed copy until it next restarts.
+# UID makes the skip-label unique per insertion. The trailing Delete is
+# best-effort cleanup (the .old is still locked while its holder runs, so it
+# usually lingers until the next install's leading Delete sweeps it once the
+# holder has exited).
+!macro MoveAsideIfPresent FILENAME UID
+    IfFileExists "$INSTDIR\${FILENAME}" 0 moveaside_skip_${UID}
+        Delete "$INSTDIR\${FILENAME}.old"
+        Rename "$INSTDIR\${FILENAME}" "$INSTDIR\${FILENAME}.old"
+        Delete "$INSTDIR\${FILENAME}.old"
+    moveaside_skip_${UID}:
+!macroend
+
 Section
     !insertmacro wails.setShellContext
 
@@ -86,29 +108,17 @@ Section
 
     SetOutPath $INSTDIR
 
-    # --- Self-update lock guard ---------------------------------------------
-    # The in-app updater launches this installer and then quits wc3-forge, but
-    # the elevated installer races the app's shutdown. If we reach wails.files
-    # while the old wc3-forge.exe is still mapped, NSIS can't open it for
-    # writing ("Error opening file for writing: ...wc3-forge.exe") and the
-    # install aborts. Wait (bounded) for the running binary to release its
-    # lock before copying. We probe by trying to Delete the target exe: a
-    # running image can't be deleted, so a failed Delete means it's still
-    # alive. Once the process exits the Delete succeeds (or the file never
-    # existed on a fresh install) and we proceed. Deleting the exe also
-    # implies the process released the CASC DLLs, so the File lines below are
-    # safe too. After ~15s we give up and let wails.files surface the original
-    # error rather than hang forever on a wedged shutdown.
-    StrCpy $R0 0 # attempt counter
-    wc3forge_waitlock:
-        ClearErrors
-        Delete "$INSTDIR\${PRODUCT_EXECUTABLE}"
-        IfErrors 0 wc3forge_unlocked
-        IntOp $R0 $R0 + 1
-        IntCmp $R0 30 wc3forge_unlocked 0 wc3forge_unlocked
-        Sleep 500
-        Goto wc3forge_waitlock
-    wc3forge_unlocked:
+    # --- Free any locked install targets before copying ---------------------
+    # wc3-forge.exe is kept locked not only by a running editor window but by
+    # the `wc3-forge.exe --mcp` server that Claude spawns — that process keeps
+    # the installed binary mapped even when no window is open, so a plain
+    # overwrite fails with "Error opening file for writing: ...wc3-forge.exe".
+    # Renaming the old (locked) copy aside frees the path so the new one writes
+    # cleanly; see the MoveAsideIfPresent macro for the full rationale. Done
+    # before wails.files (which writes the exe) and the CASC File lines below.
+    !insertmacro MoveAsideIfPresent "${PRODUCT_EXECUTABLE}" "exe"
+    !insertmacro MoveAsideIfPresent "CascLib.dll" "casc"
+    !insertmacro MoveAsideIfPresent "zlib1.dll" "zlib"
 
     !insertmacro wails.files
 

@@ -10,12 +10,13 @@ import (
 
 // runInstaller launches the downloaded NSIS installer with the "runas" verb
 // so Windows shows the UAC elevation prompt (the installer writes to Program
-// Files). The caller (DownloadAndRunInstaller) quits wc3-forge right after
-// this returns so the running .exe releases its lock — but ShellExecuteW is
-// async, so the elevated installer races that shutdown. The installer does
-// NOT rely on timing: project.nsi waits (bounded) for the old wc3-forge.exe
-// to become deletable before its file-copy step, which is what actually
-// closes the "Error opening file for writing" race.
+// Files). The caller (DownloadAndRunInstaller) quits wc3-forge after this
+// returns, but quitting the editor is NOT enough to free the binary: the
+// `wc3-forge.exe --mcp` server that Claude spawns keeps the installed image
+// locked independently. So the installer doesn't rely on the app exiting —
+// project.nsi renames the locked binary aside before its file-copy step
+// (Windows allows renaming a running image), which is what closes the
+// "Error opening file for writing" failure.
 //
 // ShellExecuteW is used (via syscall.NewLazyDLL, matching internal/casc's
 // no-cgo DLL-binding style) rather than os/exec because os/exec can't request
