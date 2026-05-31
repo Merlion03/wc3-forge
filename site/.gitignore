@@ -1,0 +1,15 @@
+# dependencies
+/node_modules
+
+# next.js / build output
+/.next/
+/out/
+
+# fumadocs generated source
+/.source/
+
+# env / misc
+.env*.local
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store

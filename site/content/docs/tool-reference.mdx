@@ -1,0 +1,63 @@
+---
+title: MCP tool reference
+description: Everything Claude Code can do in wc3-forge today, grouped by surface.
+---
+
+All entity tools speak **game coordinates** (origin at map center, units = WC3
+world units). All mutations flow through the same history stack the GUI uses, so
+`Ctrl+Z` in the editor undoes Claude's edits and vice versa.
+
+## Map lifecycle
+
+| Tool | Purpose |
+| --- | --- |
+| `map_open` | Open a map folder or `.w3x` |
+| `map_close` | Close the current map |
+| `map_status` | Name + counts for the loaded map |
+| `map_save` | Save in place |
+
+## Map info
+
+`map_info_get`, `map_info_set` — name, author, description, suggested players,
+and the Lua flag.
+
+## Placed units
+
+`units_list`, `units_get`, `units_move`, `units_rotate`, `units_scale`,
+`units_create`, `units_delete`.
+
+## Placed doodads
+
+`doodads_list`, `doodads_get`, `doodads_move`, `doodads_rotate`, `doodads_scale`,
+`doodads_create`, `doodads_delete`.
+
+## Terrain
+
+`terrain_get_tile`, `terrain_set_tile`, `terrain_set_height`.
+
+## Object definitions (all 7 kinds)
+
+For `<kind>` in **units / items / abilities / buffs / destructables / doodads /
+upgrades**, read + write custom and stock objects:
+
+`objects_<kind>_list`, `objects_<kind>_get`, `objects_<kind>_set_field`,
+`objects_<kind>_create_custom`, `objects_<kind>_delete_custom`,
+`objects_<kind>_fields_meta` — plus `objects_convert`.
+
+## Triggers
+
+`triggers_tree`, `triggers_get`, `triggers_add_gui`, `triggers_generate_script`,
+`triggers_convert_to_lua`, `triggers_test_map` — the full GUI tree, Monaco editor,
+GUI→Lua codegen, Convert-Map-to-Lua, and Test Map.
+
+## Selection, view & window
+
+- Selection: `selection_get`, `selection_set`, `selection_clear`.
+- View + camera: `view_set_mode`, `view_set_doodad_category_visible`, `camera_set_view`.
+- Window: `window_set_title`.
+
+## History & multi-instance
+
+- History: `history_undo`, `history_redo`, `history_list`, `history_begin_group`,
+  `history_end_group`.
+- Multi-instance: `sessions_list`, `session_select`.

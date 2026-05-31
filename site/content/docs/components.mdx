@@ -1,0 +1,25 @@
+---
+title: UI showcase
+description: The Warcraft III-themed components this site is built from, courtesy of warcraftcn-ui.
+---
+
+This whole site is themed with [warcraftcn-ui](https://github.com/TheOrcDev/warcraftcn-ui)
+(MIT) — a Warcraft III-inspired component set. A live gallery of every component
+lands here next.
+
+<WcCard className="max-w-md text-white">
+  <WcCardHeader>
+    <WcCardTitle className="fantasy text-amber-200">For the Alliance</WcCardTitle>
+  </WcCardHeader>
+  <WcCardContent>
+    <WcCardDescription className="text-stone-300">
+      Hover anywhere in this card to feel the cursor change.
+    </WcCardDescription>
+  </WcCardContent>
+</WcCard>
+
+<Cursor faction="human">
+  <p className="mt-4 text-muted-foreground">
+    A human-faction cursor region — move your mouse over this paragraph.
+  </p>
+</Cursor>
