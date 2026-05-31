@@ -1406,6 +1406,10 @@
     }
     armedDoodadType = typeId
     scene?.setPlacementMode(!!typeId)
+    // Drive the cursor preview ghost: arming builds/swaps it, disarming drops
+    // it (setPlacementMode(false) also drops it, so the null case is belt-and-
+    // suspenders). doodadTypes is the same index the scene placed the map from.
+    scene?.setPlacementGhost(typeId, doodadTypes as unknown as Record<string, any>)
   }
 
   // Place the armed doodad at a clicked ground point. The scene gives us the
