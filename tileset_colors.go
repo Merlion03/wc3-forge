@@ -26,6 +26,62 @@ var (
 	terrainSLKOnce sync.Once
 )
 
+// neutralTileFallback is the gray returned by sampleTileColor when the texture
+// can't be located or decoded (no CASC, missing SLK row, decode failure). It's
+// a named sentinel so callers that want a *better* fallback — e.g. the minimap
+// baker, which can substitute a per-tileset approximate color — can detect "this
+// is a miss, not a real sample" without re-running the lookup.
+var neutralTileFallback = [3]uint8{102, 102, 110} // neutral medium gray
+
+// tilesetFallbackColor returns an approximate representative color for a tileset
+// letter, used by the minimap baker when CASC texture sampling is unavailable
+// (e.g. creating a map with no WC3 install). These are eyeballed averages of
+// each tileset's dominant ground tile — good enough to make a new map's minimap
+// read as "grass" / "snow" / "desert" rather than a flat gray. The real CASC
+// sample is always preferred when present.
+func tilesetFallbackColor(letter byte) [3]uint8 {
+	switch letter {
+	case 'A': // Ashenvale
+		return [3]uint8{74, 92, 54}
+	case 'B': // Barrens
+		return [3]uint8{156, 120, 72}
+	case 'C': // Felwood
+		return [3]uint8{72, 84, 56}
+	case 'D': // Dungeon
+		return [3]uint8{70, 66, 62}
+	case 'F': // Lordaeron Fall
+		return [3]uint8{120, 104, 64}
+	case 'G': // Underground
+		return [3]uint8{78, 70, 60}
+	case 'I': // Icecrown Glacier
+		return [3]uint8{150, 168, 190}
+	case 'J': // Dalaran Ruins
+		return [3]uint8{96, 100, 84}
+	case 'K': // Black Citadel
+		return [3]uint8{64, 52, 48}
+	case 'L': // Lordaeron Summer
+		return [3]uint8{86, 110, 58}
+	case 'N': // Northrend
+		return [3]uint8{198, 208, 216}
+	case 'O': // Outland
+		return [3]uint8{150, 96, 60}
+	case 'Q': // Village Fall
+		return [3]uint8{124, 116, 66}
+	case 'V': // Village
+		return [3]uint8{96, 120, 62}
+	case 'W': // Lordaeron Winter
+		return [3]uint8{200, 206, 210}
+	case 'X': // Dalaran
+		return [3]uint8{100, 104, 90}
+	case 'Y': // Cityscape
+		return [3]uint8{132, 122, 96}
+	case 'Z': // Sunken Ruins
+		return [3]uint8{72, 116, 116}
+	default:
+		return neutralTileFallback
+	}
+}
+
 func loadTerrainSLK() (*slk.Mapped, error) {
 	terrainSLKOnce.Do(func() {
 		data, ok, err := readBaseAsset("TerrainArt/Terrain.slk")
@@ -67,7 +123,7 @@ func tileColor(fourCC string) [3]uint8 {
 }
 
 func sampleTileColor(fourCC string) [3]uint8 {
-	fallback := [3]uint8{102, 102, 110} // neutral medium gray
+	fallback := neutralTileFallback // neutral medium gray
 	m, err := loadTerrainSLK()
 	if err != nil || m == nil {
 		return fallback

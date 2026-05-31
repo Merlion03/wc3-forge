@@ -1211,6 +1211,10 @@ type MinimapDTO struct {
 	Bytes string `json:"bytes"` // base64
 	Ext   string `json:"ext"`
 	Found bool   `json:"found"`
+	// Generated is true when the bytes were baked on-the-fly from the terrain
+	// (GenerateMinimapBytes) rather than read from a baked file in the map. Lets
+	// the panel distinguish "the map's own minimap" from "a synthesized preview".
+	Generated bool `json:"generated"`
 }
 
 // GetMinimapBytes returns the baked minimap image embedded in the loaded map.
@@ -1249,6 +1253,32 @@ func (a *App) GetMinimapBytes() (MinimapDTO, error) {
 		}, nil
 	}
 	return MinimapDTO{Found: false}, nil
+}
+
+// GenerateMinimapBytes bakes a minimap from the currently-loaded map's terrain
+// and returns it as a BLP1/JPEG image (same wire shape as GetMinimapBytes).
+// The panel calls this as a fallback when GetMinimapBytes finds no baked image,
+// so any minimap-less map still shows a terrain preview (colored per ground
+// tile) instead of the "No minimap" placeholder. Returns Found=false when no
+// map/terrain is loaded.
+func (a *App) GenerateMinimapBytes() (MinimapDTO, error) {
+	t := forge.Current.Terrain()
+	if t == nil {
+		return MinimapDTO{Found: false}, nil
+	}
+	// PNG, not BLP: the panel renders it directly. Go's BLP-JPEG output is valid
+	// for WC3/gowarcraft3 but mdx-m3-viewer's in-browser JPG decoder garbles it,
+	// so we never hand the frontend a Go-baked BLP to decode.
+	pngBytes, err := BakeMinimapPNG(t)
+	if err != nil || len(pngBytes) == 0 {
+		return MinimapDTO{Found: false}, err
+	}
+	return MinimapDTO{
+		Bytes:     base64.StdEncoding.EncodeToString(pngBytes),
+		Ext:       "png",
+		Found:     true,
+		Generated: true,
+	}, nil
 }
 
 // SetUnitAnimation is a dev-only hook for poking unit animations from the JS
@@ -1350,6 +1380,66 @@ func (a *App) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 	return forge.Current.MoveDoodad(creationNumber, x, y, z)
 }
 
+// DeleteDoodad removes the doodad with the given creation_number from the map.
+// Mirrors the MCP doodads.delete wire contract; the session mutator snapshots
+// the removed record for undo and emits an entity-changed event with Field
+// "deleted" (which the viewport listens for to detach the rendered instance).
+func (a *App) DeleteDoodad(creationNumber uint32) error {
+	return forge.Current.DeleteDoodad(creationNumber)
+}
+
+// DeleteUnit removes the unit with the given creation_number from the map.
+// Companion to DeleteDoodad with the same undo + entity-changed("deleted")
+// contract.
+func (a *App) DeleteUnit(creationNumber uint32) error {
+	return forge.Current.DeleteUnit(creationNumber)
+}
+
+// DeleteSelection removes every unit and doodad in the current selection,
+// batched into a single undo group, then clears the selection. Selection
+// entries of other kinds (regions/triggers/etc.) are ignored. Returns the
+// number of entities actually deleted; if any individual delete errored, the
+// first such error is returned alongside the partial count (the group is still
+// closed and the selection still cleared). Bound to the Delete key in the
+// viewport.
+func (a *App) DeleteSelection() (int, error) {
+	sel := forge.Current.Selection()
+	type target struct {
+		kind string
+		id   uint32
+	}
+	targets := make([]target, 0, len(sel.Items))
+	for _, it := range sel.Items {
+		if it.Kind == "unit" || it.Kind == "doodad" {
+			targets = append(targets, target{it.Kind, it.ID})
+		}
+	}
+	if len(targets) == 0 {
+		return 0, nil
+	}
+	forge.Current.BeginUndoGroup("Delete")
+	deleted := 0
+	var firstErr error
+	for _, t := range targets {
+		var err error
+		if t.kind == "unit" {
+			err = forge.Current.DeleteUnit(t.id)
+		} else {
+			err = forge.Current.DeleteDoodad(t.id)
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		deleted++
+	}
+	forge.Current.EndUndoGroup()
+	forge.Current.SetSelection(nil, -1)
+	return deleted, firstErr
+}
+
 // ReportDiagnostics receives the frontend's live render/camera/GL diagnostics
 // snapshot (raw JSON) and caches it on the session so the diagnostics.get MCP
 // handler can read it back. Called a few times a second by the viewport so an
@@ -1400,6 +1490,81 @@ func (a *App) ScaleUnit(creationNumber uint32, sx, sy, sz float32) error {
 // Parse), so the values passed here are written verbatim by Encode.
 func (a *App) ScaleDoodad(creationNumber uint32, sx, sy, sz float32) error {
 	return forge.Current.ScaleDoodad(creationNumber, sx, sy, sz)
+}
+
+// ---------------------------------------------------------------------------
+// Terrain brush bindings. The Terrain Palette panel calls these on click-drag
+// over the viewport; each is one "dab" (a brush footprint resolved Go-side from
+// center/radius/shape) recorded as one undo step. A whole stroke is wrapped in
+// BeginUndoGroup/EndUndoGroup by the frontend so Ctrl+Z undoes the full drag.
+// col/row are 0-based corner grid indices; radius is in corner units; shape is
+// "circle" or "square". See internal/forge/terrain_brush.go for the contract.
+// ---------------------------------------------------------------------------
+
+// PaintTerrainTile paints groundTileID (a FourCC already in the map's ground
+// palette) over the brush footprint. Mirrors terrain.paint_tile (MCP).
+func (a *App) PaintTerrainTile(col, row int, radius float64, shape, groundTileID string) error {
+	return forge.Current.PaintTileBrush(col, row, radius, shape, groundTileID)
+}
+
+// BrushTerrainHeight raises/lowers/flattens/smooths the heightfield over the
+// footprint. mode ∈ {raise, lower, flatten, smooth}; strength is game-Z units
+// per dab (or a 0..1 fraction for smooth); target is the flatten level (game-Z).
+// Mirrors terrain.brush_height (MCP).
+func (a *App) BrushTerrainHeight(col, row int, radius float64, shape, mode string, strength, target float32) error {
+	return forge.Current.HeightBrush(col, row, radius, shape, mode, strength, target)
+}
+
+// BrushTerrainCliff raises/lowers/sets the integer cliff layer over the
+// footprint. mode ∈ {raise, lower, set}; level is the target layer for "set";
+// cliffTileID picks the cliff tileset (empty → slot 0). Mirrors
+// terrain.brush_cliff (MCP).
+func (a *App) BrushTerrainCliff(col, row int, radius float64, shape, mode string, level int, cliffTileID string) error {
+	return forge.Current.CliffBrush(col, row, radius, shape, mode, level, cliffTileID)
+}
+
+// BrushTerrainRamp toggles the ramp flag over the footprint (on → walkable
+// slope, off → sheer wall). Mirrors terrain.brush_ramp (MCP).
+func (a *App) BrushTerrainRamp(col, row int, radius float64, shape string, on bool) error {
+	return forge.Current.RampBrush(col, row, radius, shape, on)
+}
+
+// GetTerrainTile reads back the ground tile + height at one corner. The Terrain
+// Palette's Flatten tool calls this on stroke start to capture the height to
+// flatten toward. Mirrors terrain.get_tile (MCP).
+func (a *App) GetTerrainTile(col, row int) (forge.TerrainTileInfo, error) {
+	return forge.Current.GetTerrainTile(col, row)
+}
+
+// TerrainPaletteThumbs carries data-URL PNG thumbnails for the loaded map's
+// ground + cliff palette FourCCs (keyed by FourCC), so the Terrain Palette can
+// render the real tile texture instead of a flat color swatch. Empty string per
+// FourCC on a decode miss — the frontend falls back to the swatch.
+type TerrainPaletteThumbs struct {
+	Ground map[string]string `json:"ground"`
+	Cliff  map[string]string `json:"cliff"`
+}
+
+// GetTerrainPaletteThumbs builds (cached) thumbnails for the currently-loaded
+// map's ground + cliff palettes — the same tile/cliff thumbnail cache the Swap
+// Tileset dialog warms via ListTilesets.
+func (a *App) GetTerrainPaletteThumbs() TerrainPaletteThumbs {
+	out := TerrainPaletteThumbs{Ground: map[string]string{}, Cliff: map[string]string{}}
+	t := forge.Current.Terrain()
+	if t == nil {
+		return out
+	}
+	for _, fc := range t.GroundTilesets {
+		if _, done := out.Ground[fc]; !done {
+			out.Ground[fc] = tileThumbnail(fc)
+		}
+	}
+	for _, fc := range t.CliffTilesets {
+		if _, done := out.Cliff[fc]; !done {
+			out.Cliff[fc] = cliffThumbnail(fc)
+		}
+	}
+	return out
 }
 
 // Undo reverts the most-recent mutation on the session's history stack.

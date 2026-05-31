@@ -79,3 +79,103 @@ func handleTerrainGetTile(params json.RawMessage) (any, error) {
 	}
 	return info, nil
 }
+
+// ---------------------------------------------------------------------------
+// Brush handlers — region edits over a footprint (terrain_brush.go). Shared
+// shape fields: col/row are the footprint center (0-based corner indices),
+// radius is in corner units (0 = single corner), shape is "circle" (default)
+// or "square". Each returns {ok:true}.
+// ---------------------------------------------------------------------------
+
+// terrainPaintTileParams — terrain.paint_tile. ground_tile_id must already be
+// in the map's ground palette.
+type terrainPaintTileParams struct {
+	Col          int     `json:"col"`
+	Row          int     `json:"row"`
+	Radius       float64 `json:"radius"`
+	Shape        string  `json:"shape"`
+	GroundTileID string  `json:"ground_tile_id"`
+}
+
+func handleTerrainPaintTile(params json.RawMessage) (any, error) {
+	var p terrainPaintTileParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.GroundTileID == "" {
+		return nil, fmt.Errorf("ground_tile_id is required")
+	}
+	if err := Current.PaintTileBrush(p.Col, p.Row, p.Radius, p.Shape, p.GroundTileID); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+// terrainBrushHeightParams — terrain.brush_height. mode ∈ {raise,lower,flatten,
+// smooth}; strength is game-Z per dab (or a 0..1 fraction for smooth); target is
+// the flatten level (game-Z).
+type terrainBrushHeightParams struct {
+	Col      int     `json:"col"`
+	Row      int     `json:"row"`
+	Radius   float64 `json:"radius"`
+	Shape    string  `json:"shape"`
+	Mode     string  `json:"mode"`
+	Strength float32 `json:"strength"`
+	Target   float32 `json:"target"`
+}
+
+func handleTerrainBrushHeight(params json.RawMessage) (any, error) {
+	var p terrainBrushHeightParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.HeightBrush(p.Col, p.Row, p.Radius, p.Shape, p.Mode, p.Strength, p.Target); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+// terrainBrushCliffParams — terrain.brush_cliff. mode ∈ {raise,lower,set};
+// level is the target layer for "set"; cliff_tile_id selects the cliff tileset
+// (empty → slot 0).
+type terrainBrushCliffParams struct {
+	Col         int     `json:"col"`
+	Row         int     `json:"row"`
+	Radius      float64 `json:"radius"`
+	Shape       string  `json:"shape"`
+	Mode        string  `json:"mode"`
+	Level       int     `json:"level"`
+	CliffTileID string  `json:"cliff_tile_id"`
+}
+
+func handleTerrainBrushCliff(params json.RawMessage) (any, error) {
+	var p terrainBrushCliffParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.CliffBrush(p.Col, p.Row, p.Radius, p.Shape, p.Mode, p.Level, p.CliffTileID); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+// terrainBrushRampParams — terrain.brush_ramp. on=true marks the footprint as a
+// walkable ramp; false reverts to a sheer cliff wall.
+type terrainBrushRampParams struct {
+	Col    int     `json:"col"`
+	Row    int     `json:"row"`
+	Radius float64 `json:"radius"`
+	Shape  string  `json:"shape"`
+	On     bool    `json:"on"`
+}
+
+func handleTerrainBrushRamp(params json.RawMessage) (any, error) {
+	var p terrainBrushRampParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.RampBrush(p.Col, p.Row, p.Radius, p.Shape, p.On); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}

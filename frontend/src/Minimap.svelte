@@ -27,7 +27,12 @@
   // Visibility is owned by App.svelte (which gates the mount), as is the
   // global 'M' hotkey — this component just renders when mounted.
 
-  import { GetMinimapBytes, GetTerrain } from '../wailsjs/go/main/App.js'
+  import {
+    GetMinimapBytes,
+    GenerateMinimapBytes,
+    GetTerrain,
+  } from '../wailsjs/go/main/App.js'
+  import { EventsOn } from '../wailsjs/runtime/runtime.js'
   import { decodeImageBytes } from './icon-loader'
   import type { SceneAPI } from './scene-instances'
 
@@ -48,6 +53,9 @@
   // The image-loading state. dataURL is the result of decoding the bytes
   // returned by GetMinimapBytes; "" means we have no image (either no map
   // loaded, no baked preview in the map, or decode failed).
+  // The panel prefers a LIVE terrain render (GenerateMinimapBytes → PNG) so it
+  // tracks terrain edits; the map's own baked war3mapMap.blp/.dds/.tga is only a
+  // fallback for maps with no terrain. "" means nothing to show (placeholder).
   let dataURL = $state('')
   // The image's natural aspect ratio. Defaults to 1:1 (square); updated once
   // the <img> reports its natural dimensions. Non-square preview images (rare)
@@ -160,17 +168,71 @@
     }
   })
 
+  // Live-update on terrain edits. Brush dabs fire entity-changed (kind
+  // "terrain") many times per second during a drag, so debounce: re-bake the
+  // minimap once ~350ms after the last edit settles. (Tileset swaps bump
+  // mapLoadGen in App.svelte and reload via the effect above; this covers the
+  // per-dab tile/height/cliff/ramp edits that don't.)
+  $effect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const off = EventsOn(
+      'wc3-forge:entity-changed',
+      (p: { kind?: string }) => {
+        if (!p || p.kind !== 'terrain') return
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => {
+          timer = null
+          void rerender()
+        }, 350)
+      },
+    )
+    return () => {
+      if (timer) clearTimeout(timer)
+      off()
+    }
+  })
+
+  // Convert the DTO's base64 bytes into an <img> src. PNG is the live terrain
+  // render (browser-native — wrap it directly). BLP/DDS/TGA come from the map's
+  // own baked file and go through mdx-m3-viewer's decoder.
+  function bytesToDataURL(b64: string, ext: string): string {
+    if (ext === 'png') return `data:image/png;base64,${b64}`
+    const bin = atob(b64)
+    const buf = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
+    return decodeImageBytes(buf, ext)
+  }
+
+  // Lightweight refresh used by the terrain-edit listener: re-bake the live
+  // terrain PNG and swap the image in place. Unlike reload() it doesn't clear
+  // dataURL first (no flicker mid-edit) and skips the click-to-pan coord refetch
+  // (terrain dimensions don't change under the brush).
+  async function rerender() {
+    try {
+      const dto = await GenerateMinimapBytes()
+      if (dto && dto.found && dto.bytes) {
+        dataURL = bytesToDataURL(dto.bytes, dto.ext)
+      }
+    } catch (e) {
+      console.warn('[Minimap] rerender failed:', e)
+    }
+  }
+
   async function reload() {
     dataURL = ''
     aspect = 1
     try {
-      const dto = await GetMinimapBytes()
+      // Prefer a LIVE terrain render (Go bakes the current .w3e to a PNG). This
+      // is what makes the panel track terrain edits and gives new maps a real
+      // minimap — and it sidesteps mdx-m3-viewer's BLP-JPEG decoder, which
+      // garbles Go-baked BLPs. Returns found=false only when no terrain is
+      // loaded, in which case we fall back to the map's own baked image.
+      let dto = await GenerateMinimapBytes()
+      if (!dto || !dto.found || !dto.bytes) {
+        dto = await GetMinimapBytes()
+      }
       if (!dto || !dto.found || !dto.bytes) return
-      // Decode base64 → Uint8Array, then dispatch to BLP/DDS/TGA decoder.
-      const bin = atob(dto.bytes)
-      const buf = new Uint8Array(bin.length)
-      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
-      dataURL = decodeImageBytes(buf, dto.ext)
+      dataURL = bytesToDataURL(dto.bytes, dto.ext)
     } catch (e) {
       // Silent failure — the placeholder renders if dataURL stays empty.
       console.warn('[Minimap] decode failed:', e)
