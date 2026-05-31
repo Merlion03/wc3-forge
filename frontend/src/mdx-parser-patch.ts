@@ -142,24 +142,27 @@ export function patchMdxParser(): void {
     // pipeline doesn't read these — the texture binding has already routed
     // through `viewer.load(path)` for both SD and HD paths.
     ;(this as any).hd = hd
-    // For each inline tex entry: parse and discard the slot. The texture id
-    // points into the model-level Textures chunk; for the lib's downstream
-    // rendering, we set `this.textureId` to the FIRST encountered id so the
-    // pre-v1100 codepath (which expects this.textureId to be the layer's
-    // texture) keeps working without further patches. Extra texs (PBR
-    // multi-layer for HD) get dropped — HiveWE's similar fallback for the
-    // pre-v1100 code path is the same trick.
-    let firstTexId = -1
+    // For each inline tex entry: read (id, slot). The id indexes the model-
+    // level Textures chunk; the slot is the PBR role (0 diffuse, 1 normals,
+    // 2 orm, 3 emissive, 4 teamColor, 5 environment). Pre-v1100 HD models
+    // carried each of these as a SEPARATE layer; post-v1100 collapses them
+    // into this one layer's texs array. Stash the whole array so the Material
+    // patch can expand it back into the per-slot layers mdx-m3-viewer's HD
+    // renderer expects (see patchedMaterialReadMdx). We also set this.textureId
+    // to the first (diffuse) id so the pre-v1100 single-texture codepath keeps
+    // working for any layer that doesn't get expanded.
+    const texs: Array<{ id: number; slot: number }> = []
     for (let t = 0; t < texsCount; t++) {
       const id = stream.readInt32()
-      stream.readInt32() // slot — HiveWE comment: "always a garbage value"
-      if (t === 0) firstTexId = id
+      const slot = stream.readInt32() // HiveWE: "usually slot order, sometimes garbage"
+      texs.push({ id, slot })
       // The per-tex inline KMTF track is technically possible per HiveWE's
       // reader (peek the next 4 bytes, if 'KMTF' consume the track). We
       // skip that for now — if subsequent track tags appear in the remaining
       // animations area, readAnimations will skip them via the 'K' filter.
     }
-    if (firstTexId >= 0) this.textureId = firstTexId
+    ;(this as any).texs = texs
+    if (texs.length > 0 && texs[0].id >= 0) this.textureId = texs[0].id
     // Whatever bytes remain in this layer's size are KMTA/KMTE/KFC3/KFCA/
     // KFTC animation tracks. Use the lib's readAnimations (animatedobject
     // protocol). The patched-for-safety version (see below) handles
@@ -210,10 +213,103 @@ export function patchMdxParser(): void {
     for (let n = 0; n < numLayers; n++) {
       const layer = new Layer()
       // Dispatches via patched Layer.readMdx → readLayerPostV1100 for
-      // VERS >= 1100, origLayerReadMdx otherwise.
+      // VERS >= 1100, origLayerReadMdx otherwise. For HD (post-v1100)
+      // materials the single layer stashes its texs[] + hd flag; the actual
+      // expansion into the lib's six-layer HD layout happens AFTER the whole
+      // model parses (see reconstructHdMaterials, wired into Model.load),
+      // because it needs the TEXS chunk — which comes after MTLS — to clamp
+      // each slot's texture id to a valid index.
       layer.readMdx(stream, version)
       this.layers.push(layer)
     }
+  }
+
+  // ---- HD material reconstruction (the load-bearing part) ----
+  //
+  // mdx-m3-viewer predates the post-v1100 MDX format. Its HD render path
+  // (handlers/mdx/setupgeosets.js + batchgroup.js) is gated on
+  // `material.shader === 'Shader_HD_DefaultUnit'` and destructures EXACTLY six
+  // layers per material — `[diffuse, normals, orm, emissive, teamColor,
+  // environment]` — the pre-v1100 layout. The post-v1100 file drops the shader
+  // field (material.shader === '') and folds all six PBR textures into ONE
+  // layer's `texs` array.
+  //
+  // Left as-is, `isHd` is false, so an HD geoset (whose skinning lives ENTIRELY
+  // in its SKIN chunk — the legacy vertexGroups are empty) is bound through the
+  // SD vertex-group path. That reads the 8-byte per-vertex skin data (4 bone
+  // ids + 4 weights) with the wrong stride, so bone indices come out as garbage
+  // and every vertex snaps toward bone 0 / the world origin → doodads and trees
+  // stretch from the origin to infinity on Reforged maps. (geoset/bone COUNTS
+  // look fine — only the on-screen skinning is wrong — which is why a
+  // parse-success check never caught it.)
+  //
+  // Fix: translate the post-v1100 representation forward into the pre-v1100 one
+  // the lib understands — expand the single layer into six slot-ordered layers
+  // (clamping each slot's texture id to a real index so the lib's UNGUARDED
+  // `textures[id].texture` deref can't crash the whole render loop) and restore
+  // the shader marker. This routes HD geosets through the correct hdSkinShader
+  // (#define SKIN) + bindSkin (stride-8) path.
+  function reconstructHdMaterials(model: any): void {
+    const texCount = Array.isArray(model.textures) ? model.textures.length : 0
+    // No textures → we cannot safely feed the HD path (it dereferences every
+    // slot's texture). Leave such degenerate materials alone.
+    if (texCount === 0) return
+    const valid = (id: number): boolean => id >= 0 && id < texCount
+    for (const material of model.materials || []) {
+      if (material.shader !== '') continue // already HD (pre-v1100) or SD
+      const layers = material.layers
+      if (!layers || layers.length === 0) continue
+      if (!layers.some((l: any) => l.hd === 1)) continue // not an HD material
+      const base = layers[0]
+      const texs: Array<{ id: number; slot: number }> = base.texs || []
+      // Diffuse fallback for any slot we can't resolve — always a valid index.
+      const diffuse = (() => {
+        const d = texs.find(t => t.slot === 0) || texs[0]
+        return d && valid(d.id) ? d.id : 0
+      })()
+      // Resolve a slot's texture id: by slot field (usually authoritative),
+      // then positionally, then the diffuse fallback. Every return is clamped
+      // valid, so the lib never dereferences an undefined texture.
+      const pick = (slot: number): number => {
+        const bySlot = texs.find(t => t.slot === slot)
+        if (bySlot && valid(bySlot.id)) return bySlot.id
+        const byPos = texs[slot]
+        if (byPos && valid(byPos.id)) return byPos.id
+        return diffuse
+      }
+      // Slot 0 (diffuse) reuses the parsed layer — it carries the material's
+      // filterMode/coordId/alpha and any KMTA/KMTF animation tracks, which the
+      // HD render path reads from `diffuseLayer` only.
+      base.textureId = pick(0)
+      const six: any[] = [base]
+      for (let s = 1; s <= 5; s++) {
+        const L: any = new Layer()
+        L.filterMode = base.filterMode
+        L.flags = base.flags
+        L.coordId = base.coordId
+        L.alpha = base.alpha
+        L.textureAnimationId = -1
+        L.textureId = pick(s)
+        L.hd = 1
+        six.push(L)
+      }
+      material.layers = six
+      material.shader = 'Shader_HD_DefaultUnit'
+    }
+  }
+
+  // Run the HD reconstruction after a full model parse, when the TEXS chunk is
+  // available. Wrap the mdlx Model's load so both the runtime MdxModel handler
+  // and any direct parser use get fixed materials.
+  const MdlxModel = MV?.parsers?.mdlx?.Model
+  if (MdlxModel && !(MdlxModel.prototype as any).__wc3ForgeHdFixup) {
+    const origModelLoad = MdlxModel.prototype.load
+    MdlxModel.prototype.load = function patchedModelLoad(this: any, ...loadArgs: any[]): any {
+      const result = origModelLoad.apply(this, loadArgs)
+      try { reconstructHdMaterials(this) } catch { /* never let the fixup break a parse */ }
+      return result
+    }
+    ;(MdlxModel.prototype as any).__wc3ForgeHdFixup = true
   }
 
   // Safety-belt readAnimations. The lib's original implementation crashes
