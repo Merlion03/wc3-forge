@@ -90,11 +90,11 @@ func handleTerrainGetTile(params json.RawMessage) (any, error) {
 // terrainPaintTileParams — terrain.paint_tile. ground_tile_id must already be
 // in the map's ground palette.
 type terrainPaintTileParams struct {
-	Col          int    `json:"col"`
-	Row          int    `json:"row"`
-	Radius       int    `json:"radius"`
-	Shape        string `json:"shape"`
-	GroundTileID string `json:"ground_tile_id"`
+	Col          int     `json:"col"`
+	Row          int     `json:"row"`
+	Radius       float64 `json:"radius"`
+	Shape        string  `json:"shape"`
+	GroundTileID string  `json:"ground_tile_id"`
 }
 
 func handleTerrainPaintTile(params json.RawMessage) (any, error) {
@@ -117,7 +117,7 @@ func handleTerrainPaintTile(params json.RawMessage) (any, error) {
 type terrainBrushHeightParams struct {
 	Col      int     `json:"col"`
 	Row      int     `json:"row"`
-	Radius   int     `json:"radius"`
+	Radius   float64 `json:"radius"`
 	Shape    string  `json:"shape"`
 	Mode     string  `json:"mode"`
 	Strength float32 `json:"strength"`
@@ -139,13 +139,13 @@ func handleTerrainBrushHeight(params json.RawMessage) (any, error) {
 // level is the target layer for "set"; cliff_tile_id selects the cliff tileset
 // (empty → slot 0).
 type terrainBrushCliffParams struct {
-	Col         int    `json:"col"`
-	Row         int    `json:"row"`
-	Radius      int    `json:"radius"`
-	Shape       string `json:"shape"`
-	Mode        string `json:"mode"`
-	Level       int    `json:"level"`
-	CliffTileID string `json:"cliff_tile_id"`
+	Col         int     `json:"col"`
+	Row         int     `json:"row"`
+	Radius      float64 `json:"radius"`
+	Shape       string  `json:"shape"`
+	Mode        string  `json:"mode"`
+	Level       int     `json:"level"`
+	CliffTileID string  `json:"cliff_tile_id"`
 }
 
 func handleTerrainBrushCliff(params json.RawMessage) (any, error) {
@@ -162,11 +162,11 @@ func handleTerrainBrushCliff(params json.RawMessage) (any, error) {
 // terrainBrushRampParams — terrain.brush_ramp. on=true marks the footprint as a
 // walkable ramp; false reverts to a sheer cliff wall.
 type terrainBrushRampParams struct {
-	Col    int    `json:"col"`
-	Row    int    `json:"row"`
-	Radius int    `json:"radius"`
-	Shape  string `json:"shape"`
-	On     bool   `json:"on"`
+	Col    int     `json:"col"`
+	Row    int     `json:"row"`
+	Radius float64 `json:"radius"`
+	Shape  string  `json:"shape"`
+	On     bool    `json:"on"`
 }
 
 func handleTerrainBrushRamp(params json.RawMessage) (any, error) {

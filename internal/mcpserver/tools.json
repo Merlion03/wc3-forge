@@ -1335,8 +1335,8 @@
           "description": "footprint center row (0-based corner)"
         },
         "radius": {
-          "type": "integer",
-          "description": "brush radius in corner units (0 = single corner)"
+          "type": "number",
+          "description": "brush radius in corner units, fractional allowed (0 = single corner)"
         },
         "shape": {
           "type": "string",
@@ -1388,8 +1388,8 @@
           "description": "footprint center row (0-based corner)"
         },
         "radius": {
-          "type": "integer",
-          "description": "brush radius in corner units (0 = single corner)"
+          "type": "number",
+          "description": "brush radius in corner units, fractional allowed (0 = single corner)"
         },
         "shape": {
           "type": "string",
@@ -1442,8 +1442,8 @@
           "description": "footprint center row (0-based corner)"
         },
         "radius": {
-          "type": "integer",
-          "description": "brush radius in corner units (0 = single corner)"
+          "type": "number",
+          "description": "brush radius in corner units, fractional allowed (0 = single corner)"
         },
         "shape": {
           "type": "string",
@@ -1505,8 +1505,8 @@
           "description": "footprint center row (0-based corner)"
         },
         "radius": {
-          "type": "integer",
-          "description": "brush radius in corner units (0 = single corner)"
+          "type": "number",
+          "description": "brush radius in corner units, fractional allowed (0 = single corner)"
         },
         "shape": {
           "type": "string",

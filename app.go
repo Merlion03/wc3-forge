@@ -1413,7 +1413,7 @@ func (a *App) ScaleDoodad(creationNumber uint32, sx, sy, sz float32) error {
 
 // PaintTerrainTile paints groundTileID (a FourCC already in the map's ground
 // palette) over the brush footprint. Mirrors terrain.paint_tile (MCP).
-func (a *App) PaintTerrainTile(col, row, radius int, shape, groundTileID string) error {
+func (a *App) PaintTerrainTile(col, row int, radius float64, shape, groundTileID string) error {
 	return forge.Current.PaintTileBrush(col, row, radius, shape, groundTileID)
 }
 
@@ -1421,7 +1421,7 @@ func (a *App) PaintTerrainTile(col, row, radius int, shape, groundTileID string)
 // footprint. mode ∈ {raise, lower, flatten, smooth}; strength is game-Z units
 // per dab (or a 0..1 fraction for smooth); target is the flatten level (game-Z).
 // Mirrors terrain.brush_height (MCP).
-func (a *App) BrushTerrainHeight(col, row, radius int, shape, mode string, strength, target float32) error {
+func (a *App) BrushTerrainHeight(col, row int, radius float64, shape, mode string, strength, target float32) error {
 	return forge.Current.HeightBrush(col, row, radius, shape, mode, strength, target)
 }
 
@@ -1429,13 +1429,13 @@ func (a *App) BrushTerrainHeight(col, row, radius int, shape, mode string, stren
 // footprint. mode ∈ {raise, lower, set}; level is the target layer for "set";
 // cliffTileID picks the cliff tileset (empty → slot 0). Mirrors
 // terrain.brush_cliff (MCP).
-func (a *App) BrushTerrainCliff(col, row, radius int, shape, mode string, level int, cliffTileID string) error {
+func (a *App) BrushTerrainCliff(col, row int, radius float64, shape, mode string, level int, cliffTileID string) error {
 	return forge.Current.CliffBrush(col, row, radius, shape, mode, level, cliffTileID)
 }
 
 // BrushTerrainRamp toggles the ramp flag over the footprint (on → walkable
 // slope, off → sheer wall). Mirrors terrain.brush_ramp (MCP).
-func (a *App) BrushTerrainRamp(col, row, radius int, shape string, on bool) error {
+func (a *App) BrushTerrainRamp(col, row int, radius float64, shape string, on bool) error {
 	return forge.Current.RampBrush(col, row, radius, shape, on)
 }
 

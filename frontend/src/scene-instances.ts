@@ -3720,7 +3720,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       terrainBrushCallback = cb
     },
     setTerrainBrushShape(shape: TerrainBrushShape) {
-      brushShape = { radius: Math.max(0, shape.radius | 0), shape: shape.shape }
+      // Keep the radius fractional — the footprint reach + cursor ring both use
+      // it as a float (radius+0.5), so e.g. 1.25 grows the brush smoothly.
+      brushShape = { radius: Math.max(0, shape.radius), shape: shape.shape }
     },
     setPlacementMode(active: boolean) {
       if (active === placementMode) return

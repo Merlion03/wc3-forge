@@ -192,6 +192,10 @@ func TestBrushFootprint_CircleVsSquare(t *testing.T) {
 	s.mu.Lock()
 	sq := s.terrainBrushCornersLocked(col, row, 2, "square")
 	ci := s.terrainBrushCornersLocked(col, row, 2, "circle")
+	// Fractional radius grows the footprint smoothly: at r=1.5 the circle reach
+	// is 2.0, so it includes the corners at distance²≤4 (13) — between r=1's 9
+	// and r=2's 21.
+	ciHalf := s.terrainBrushCornersLocked(col, row, 1.5, "circle")
 	s.mu.Unlock()
 
 	if len(sq) != 25 {
@@ -200,5 +204,8 @@ func TestBrushFootprint_CircleVsSquare(t *testing.T) {
 	// radius-2 euclidean: drops the 4 corners at distance √8 > 2 → 21.
 	if len(ci) != 21 {
 		t.Errorf("circle r=2 footprint = %d corners, want 21", len(ci))
+	}
+	if len(ciHalf) != 13 {
+		t.Errorf("circle r=1.5 footprint = %d corners, want 13", len(ciHalf))
 	}
 }

@@ -1011,7 +1011,7 @@ function registerContractTools(server: McpServer): void {
     {
       col: z.number().int().describe("footprint center column (0-based corner)"),
       row: z.number().int().describe("footprint center row (0-based corner)"),
-      radius: z.number().int().optional().describe("brush radius in corner units (0 = single corner)"),
+      radius: z.number().optional().describe("brush radius in corner units, fractional allowed (0 = single corner)"),
       shape: z.enum(["circle", "square"]).optional().describe("brush shape (default circle)"),
       ground_tile_id: z.string().describe("4-char FourCC in the map ground palette"),
     },
@@ -1023,7 +1023,7 @@ function registerContractTools(server: McpServer): void {
     {
       col: z.number().int().describe("footprint center column (0-based corner)"),
       row: z.number().int().describe("footprint center row (0-based corner)"),
-      radius: z.number().int().optional().describe("brush radius in corner units (0 = single corner)"),
+      radius: z.number().optional().describe("brush radius in corner units, fractional allowed (0 = single corner)"),
       shape: z.enum(["circle", "square"]).optional().describe("brush shape (default circle)"),
       mode: z.enum(["raise", "lower", "flatten", "smooth"]).describe("height brush mode"),
       strength: z.number().optional().describe("game-Z per dab (raise/lower) or 0..1 blend (smooth)"),
@@ -1037,7 +1037,7 @@ function registerContractTools(server: McpServer): void {
     {
       col: z.number().int().describe("footprint center column (0-based corner)"),
       row: z.number().int().describe("footprint center row (0-based corner)"),
-      radius: z.number().int().optional().describe("brush radius in corner units (0 = single corner)"),
+      radius: z.number().optional().describe("brush radius in corner units, fractional allowed (0 = single corner)"),
       shape: z.enum(["circle", "square"]).optional().describe("brush shape (default circle)"),
       mode: z.enum(["raise", "lower", "set"]).describe("cliff brush mode"),
       level: z.number().int().optional().describe("target layer (0..15) for mode 'set'"),
@@ -1051,7 +1051,7 @@ function registerContractTools(server: McpServer): void {
     {
       col: z.number().int().describe("footprint center column (0-based corner)"),
       row: z.number().int().describe("footprint center row (0-based corner)"),
-      radius: z.number().int().optional().describe("brush radius in corner units (0 = single corner)"),
+      radius: z.number().optional().describe("brush radius in corner units, fractional allowed (0 = single corner)"),
       shape: z.enum(["circle", "square"]).optional().describe("brush shape (default circle)"),
       on: z.boolean().describe("true = mark ramp (slope), false = clear ramp (wall)"),
     },

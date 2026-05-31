@@ -263,8 +263,8 @@
           <div class="section-title">Brush</div>
           <label class="ctl">
             <span>Size</span>
-            <input type="range" min="0" max="10" step="1" bind:value={radius} />
-            <span class="ctl-val">{radius}</span>
+            <input type="range" min="0" max="10" step="0.25" bind:value={radius} />
+            <span class="ctl-val">{radius.toFixed(2)}</span>
           </label>
           <div class="ctl">
             <span>Shape</span>

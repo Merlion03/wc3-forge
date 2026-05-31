@@ -1,6 +1,9 @@
 package forge
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // Terrain BRUSH mutators — region edits over a circular/square footprint of
 // corners, the engine behind the GUI Terrain Palette (and the matching
@@ -118,11 +121,14 @@ func applyTerrainEditsLocked(s *Session, edits []terrainCornerEdit, revert bool)
 }
 
 // terrainBrushCornersLocked returns the linear tile indices of every corner
-// within `radius` of (centerCol,centerRow), clipped to the grid. shape "square"
-// uses chebyshev distance (a (2r+1)² block); anything else (default "circle")
-// uses euclidean distance. Caller MUST hold s.mu. Returns nil if no terrain is
-// loaded or the center is off-grid.
-func (s *Session) terrainBrushCornersLocked(centerCol, centerRow, radius int, shape string) []int {
+// within `radius` (in corner units, fractional allowed) of (centerCol,
+// centerRow), clipped to the grid. The footprint "reach" is radius+0.5 so small
+// brushes are round, not star-shaped, AND a fractional radius grows the
+// footprint smoothly: shape "square" includes corners within chebyshev reach
+// (an integer radius reproduces the classic (2r+1)² block); anything else
+// (default "circle") uses euclidean reach. Caller MUST hold s.mu. Returns nil if
+// no terrain is loaded or the center is off-grid.
+func (s *Session) terrainBrushCornersLocked(centerCol, centerRow int, radius float64, shape string) []int {
 	if s.terrain == nil {
 		return nil
 	}
@@ -135,23 +141,25 @@ func (s *Session) terrainBrushCornersLocked(centerCol, centerRow, radius int, sh
 		radius = 0
 	}
 	square := shape == "square"
-	// Circle threshold uses (radius+0.5)² so small brushes are round rather
-	// than star-shaped: 4·(dx²+dy²) ≤ (2·radius+1)² is the integer-exact form.
-	// radius 0 → just the center, radius 1 → a full 3×3, radius 2 → 21 corners.
-	diam := 2*radius + 1
-	threshold := diam * diam
-	out := make([]int, 0, diam*diam)
-	for dy := -radius; dy <= radius; dy++ {
+	reach := radius + 0.5
+	reach2 := reach * reach
+	lim := int(math.Ceil(reach))
+	out := make([]int, 0, (2*lim+1)*(2*lim+1))
+	for dy := -lim; dy <= lim; dy++ {
 		row := centerRow + dy
 		if row < 0 || row >= h {
 			continue
 		}
-		for dx := -radius; dx <= radius; dx++ {
+		for dx := -lim; dx <= lim; dx++ {
 			col := centerCol + dx
 			if col < 0 || col >= w {
 				continue
 			}
-			if !square && 4*(dx*dx+dy*dy) > threshold {
+			if square {
+				if math.Abs(float64(dx)) > reach || math.Abs(float64(dy)) > reach {
+					continue
+				}
+			} else if float64(dx*dx+dy*dy) > reach2 {
 				continue
 			}
 			out = append(out, row*w+col)
@@ -196,7 +204,7 @@ func (s *Session) finishTerrainBrush(wasDirty, changed, historyChanged bool, fie
 // PaintTileBrush sets the ground tile of every corner in the brush footprint to
 // groundTileID (a FourCC already in the map's ground palette). One undo step,
 // one re-render. No-op corners (already on that tile) are skipped.
-func (s *Session) PaintTileBrush(centerCol, centerRow, radius int, shape, groundTileID string) error {
+func (s *Session) PaintTileBrush(centerCol, centerRow int, radius float64, shape, groundTileID string) error {
 	s.mu.Lock()
 	corners := s.terrainBrushCornersLocked(centerCol, centerRow, radius, shape)
 	if corners == nil {
@@ -235,7 +243,7 @@ func (s *Session) PaintTileBrush(centerCol, centerRow, radius int, shape, ground
 // strength<=0 falls back to defaultHeightStep for raise/lower and 0.5 for
 // smooth. Heights are quantized to the .w3e int16 grid; corners that don't
 // actually move are skipped. One undo step, one re-render.
-func (s *Session) HeightBrush(centerCol, centerRow, radius int, shape, mode string, strength, target float32) error {
+func (s *Session) HeightBrush(centerCol, centerRow int, radius float64, shape, mode string, strength, target float32) error {
 	s.mu.Lock()
 	corners := s.terrainBrushCornersLocked(centerCol, centerRow, radius, shape)
 	if corners == nil {
@@ -325,7 +333,7 @@ func neighborAvgZLocked(s *Session, idx, w, h int) float32 {
 // cliffTileID (or slot 0 when cliffTileID is empty / not found) so a wall
 // actually renders — a corner left at CliffTexture 15 ("no cliff") renders a
 // void. One undo step, one re-render.
-func (s *Session) CliffBrush(centerCol, centerRow, radius int, shape, mode string, level int, cliffTileID string) error {
+func (s *Session) CliffBrush(centerCol, centerRow int, radius float64, shape, mode string, level int, cliffTileID string) error {
 	s.mu.Lock()
 	corners := s.terrainBrushCornersLocked(centerCol, centerRow, radius, shape)
 	if corners == nil {
@@ -374,7 +382,7 @@ func (s *Session) CliffBrush(centerCol, centerRow, radius int, shape, mode strin
 // RampBrush toggles the ramp flag (Flags bit 0x1) over the footprint. With
 // on=true the cliff step under the footprint renders as a walkable slope; with
 // on=false it reverts to a sheer wall. One undo step, one re-render.
-func (s *Session) RampBrush(centerCol, centerRow, radius int, shape string, on bool) error {
+func (s *Session) RampBrush(centerCol, centerRow int, radius float64, shape string, on bool) error {
 	s.mu.Lock()
 	corners := s.terrainBrushCornersLocked(centerCol, centerRow, radius, shape)
 	if corners == nil {
