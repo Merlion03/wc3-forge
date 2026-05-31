@@ -407,6 +407,8 @@
   // opt-in). The Go side (update_app.go) owns the GitHub query + download +
   // elevated relaunch; this drives the UI and the dirty-state guard.
   let appVersion: string = $state('dev')
+  // Help → About dialog (version + author + credits). Read-only; no Go calls.
+  let showAboutDialog: boolean = $state(false)
   let showUpdateDialog: boolean = $state(false)
   let updateResult: update.CheckResult | null = $state(null)
   let updateError: string = $state('')
@@ -2105,14 +2107,6 @@
         <DropdownMenu.Item onSelect={runMenuAction(close)} disabled={!status.loaded || busy}>
           <span class="flex-1">Close</span>
         </DropdownMenu.Item>
-        <DropdownMenu.Separator />
-        <DropdownMenu.Item
-          onSelect={runMenuAction(checkForUpdatesManual)}
-          title="Check GitHub for a newer wc3-forge release."
-        >
-          <span class="flex-1">Check for Updates…</span>
-          <DropdownMenu.Shortcut>v{appVersion}</DropdownMenu.Shortcut>
-        </DropdownMenu.Item>
       </DropdownMenu.Content>
     </DropdownMenu.Root>
 
@@ -2168,6 +2162,35 @@
               onOverlayToggle={onOverlayToggle}
               onExtraToggle={onExtraToggle}
               onThemeChange={setTheme} />
+
+    <!-- Help menu. Hosts the manual update check (moved here from File) and
+         the About dialog. -->
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger>
+        {#snippet child({ props })}
+          <Button {...props} variant="ghost" size="sm" title="Help menu">
+            Help
+            <ChevronDownIcon class="text-muted-foreground" />
+          </Button>
+        {/snippet}
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content class="min-w-[220px]" align="start">
+        <DropdownMenu.Item
+          onSelect={runMenuAction(checkForUpdatesManual)}
+          title="Check GitHub for a newer wc3-forge release."
+        >
+          <span class="flex-1">Check for Updates…</span>
+          <DropdownMenu.Shortcut>v{appVersion}</DropdownMenu.Shortcut>
+        </DropdownMenu.Item>
+        <DropdownMenu.Separator />
+        <DropdownMenu.Item
+          onSelect={runMenuAction(() => { showAboutDialog = true })}
+          title="About wc3-forge — version, author, and credits."
+        >
+          <span class="flex-1">About wc3-forge</span>
+        </DropdownMenu.Item>
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
 
     <div class="flex-1 truncate text-xs text-muted-foreground">
       {#if status.loaded}
@@ -2714,6 +2737,44 @@
       onUpdate={startUpdate}
     />
   {/if}
+
+  <!-- Help → About. Static info card: app identity, version, author, and the
+       open-source projects wc3-forge is built on (see CREDITS.md). -->
+  <Dialog.Root bind:open={showAboutDialog}>
+    <Dialog.Content class="max-w-md">
+      <Dialog.Header>
+        <Dialog.Title>About wc3-forge</Dialog.Title>
+        <Dialog.Description>
+          A modern, agent-driven Warcraft III map editor.
+        </Dialog.Description>
+      </Dialog.Header>
+      <div class="space-y-3 text-sm">
+        <div class="flex items-baseline justify-between">
+          <span class="text-muted-foreground">Version</span>
+          <span class="font-medium">v{appVersion}</span>
+        </div>
+        <div class="flex items-baseline justify-between">
+          <span class="text-muted-foreground">Author</span>
+          <span class="font-medium">Stephen Horton</span>
+        </div>
+        <div class="flex items-baseline justify-between">
+          <span class="text-muted-foreground">License</span>
+          <span class="font-medium">GPL-3.0-or-later</span>
+        </div>
+        <p class="text-muted-foreground leading-relaxed">
+          wc3-forge stands on the shoulders of prior open-source work —
+          <span class="text-foreground">HiveWE</span> (Stijn Herfst),
+          <span class="text-foreground">mdx-m3-viewer</span> (Ghostwolf),
+          <span class="text-foreground">CascLib</span> &amp;
+          <span class="text-foreground">StormLib</span> (Ladislav Zezula).
+          See CREDITS.md for the full attribution.
+        </p>
+      </div>
+      <Dialog.Footer>
+        <Button onclick={() => { showAboutDialog = false }}>Close</Button>
+      </Dialog.Footer>
+    </Dialog.Content>
+  </Dialog.Root>
 
   <!-- Unsaved-changes confirmation. Driven by the wc3-forge:close-requested
        event emitted from Go's OnBeforeClose when the user X-es a dirty
