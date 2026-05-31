@@ -26,6 +26,57 @@ func mpqNameKey(name string) string {
 	return strings.ToUpper(name)
 }
 
+// editInfo is one buffered edit (a pending write or a tombstone) hashed for
+// matching against the source's unnamed RawEntries. The repack matches an edit
+// to a raw entry by comparing the two verifier hashes (HashA/HashB), since the
+// raw entries carry no filename.
+type editInfo struct {
+	hA, hB  uint32
+	name    string // display name for the new archive + listfile
+	data    []byte
+	deleted bool
+}
+
+// repackCountCheck computes the file count the lossless repack EXPECTS to write
+// and reports whether the count we're actually about to write diverges.
+//
+// expected = source blocks (minus the source listfile, which the writer
+// regenerates) + brand-new pending files (an edit with no matching raw entry,
+// net +1 each) - tombstones that matched a raw entry (net -1 each). A pending
+// edit that REPLACES a matched raw entry is net 0 (dropped from keep, re-added
+// via named). srcBlockCount is returned for the diagnostic log line.
+//
+// mismatch is true when written != expected. The DO-NO-HARM caller refuses the
+// save only on the DROP direction (written < expected) — the 240->14 import-
+// loss class — and keeps warn-and-write for a (non-lossy) count increase. This
+// is a pure function over the same hash bookkeeping the copy-through used, so it
+// is unit-testable with a synthetic rawEntries/edits set.
+func repackCountCheck(rawEntries []mpq.RawEntry, edits []editInfo, written int, lfA, lfB uint32) (expected, srcBlockCount int, mismatch bool) {
+	for _, re := range rawEntries {
+		if re.HashA == lfA && re.HashB == lfB {
+			continue // source listfile — not a user file, writer regenerates
+		}
+		srcBlockCount++
+	}
+	expected = srcBlockCount
+	for i := range edits {
+		matched := false
+		for _, re := range rawEntries {
+			if edits[i].hA == re.HashA && edits[i].hB == re.HashB {
+				matched = true
+				break
+			}
+		}
+		switch {
+		case edits[i].deleted && matched:
+			expected-- // tombstone removed an existing file
+		case !edits[i].deleted && !matched:
+			expected++ // brand-new file
+		}
+	}
+	return expected, srcBlockCount, written != expected
+}
+
 // flush repacks the entire archive and atomically replaces the .w3x on disk.
 //
 // Why repack-the-world rather than splice individual files: the MPQ writer in
@@ -107,12 +158,6 @@ func (m *mpqSource) flushLocked(force bool) error {
 	// unnamed raw entries. Each pending/tombstone key is a normalised name; we
 	// re-hash it with the reader's algorithm (via mpq.HashName) and compare to
 	// each raw entry's HashA/HashB.
-	type editInfo struct {
-		hA, hB  uint32
-		name    string // display name for the new archive + listfile
-		data    []byte
-		deleted bool
-	}
 	edits := make([]editInfo, 0, len(m.pending)+len(m.deleted))
 	for key, data := range m.pending {
 		name := displayNameForKey(key)
@@ -165,47 +210,32 @@ func (m *mpqSource) flushLocked(force bool) error {
 		return fmt.Errorf("%w: refusing to write an empty archive (no files collected)", ErrMPQRepackFailed)
 	}
 
-	// mapIO diagnostics: guard the historical import-drop class (a 240-file
-	// custom .w3x silently repacking down to 14 — feedback_wc3_forge_mpq_writer_listfile).
-	// Expected file count = source blocks (minus the source listfile, which the
-	// writer regenerates) plus any brand-new pending files that didn't replace a
-	// raw entry, minus tombstones that DID match a raw entry. We compute it from
-	// the same hash-match bookkeeping the copy-through used and compare to what
-	// we're about to write (keep + named). A divergence increments a COUNTER
-	// only — no blocking re-parse on the save path (per U9 spec). The counter
-	// makes the regression observable in diagnostics.get if it ever recurs.
-	srcBlockCount := 0
-	for _, re := range rawEntries {
-		if re.HashA == lfA && re.HashB == lfB {
-			continue // source listfile — not a user file, writer regenerates
-		}
-		srcBlockCount++
-	}
-	// Count edits that ADD a file with no matching raw entry (net +1 each) and
-	// tombstones that REMOVE a matched raw entry (net -1 each). A pending edit
-	// that replaces a matched raw entry is net 0 (dropped from keep, re-added
-	// via named). This yields the count we *expect* to write.
-	expected := srcBlockCount
-	for i := range edits {
-		matched := false
-		for _, re := range rawEntries {
-			if edits[i].hA == re.HashA && edits[i].hB == re.HashB {
-				matched = true
-				break
-			}
-		}
-		switch {
-		case edits[i].deleted && matched:
-			expected-- // tombstone removed an existing file
-		case !edits[i].deleted && !matched:
-			expected++ // brand-new file
-		}
-	}
+	// mapIO diagnostics + DO-NO-HARM guard for the historical import-drop class
+	// (a 240-file custom .w3x silently repacking down to 14 —
+	// feedback_wc3_forge_mpq_writer_listfile). repackCountCheck computes the file
+	// count we EXPECT to write from the same hash-match bookkeeping the copy-
+	// through used and compares it to what we're about to write (keep + named).
 	written := len(keep) + len(named)
-	if written != expected {
+	expected, srcBlockCount, mismatch := repackCountCheck(rawEntries, edits, written, lfA, lfB)
+	if mismatch {
+		// Always bump the diagnostic counter so any mismatch stays observable in
+		// diagnostics.get (preserves the U9 instrumentation contract).
 		mapIODiag.repackFileMismatch.Add(1)
 		log.Printf("[WARN] mpq flush %q: file-count mismatch (writing %d, expected %d from %d source blocks) — possible import drop",
 			m.path, written, expected, srcBlockCount)
+		// REFUSE-the-save on a file-count DROP. Writing fewer files than the
+		// source declared is the 240->14 import-loss class: it would drop custom
+		// imports (models/textures/sounds the editor can't name) and overwrite the
+		// user's only copy with a lossy archive. We return BEFORE the destructive
+		// rename (the archive handle is still open and the original .w3x is byte-
+		// for-byte untouched), and we keep the buffered edits pending so the
+		// session stays usable. This is the DO-NO-HARM floor: a lossy save is worse
+		// than no save. A count INCREASE is not a loss, so we keep the historical
+		// warn-and-write behaviour there (the counter above still records it).
+		if written < expected {
+			return fmt.Errorf("%w: refusing to save %q — the repack would write only %d of %d files, dropping %d custom import(s); your map's only copy is left untouched. Workaround: extract the map to a folder and save that instead",
+				ErrMPQRepackFailed, m.path, written, expected, expected-written)
+		}
 	}
 
 	// Capture the source's hash-table size + sector-size shift BEFORE closing —
