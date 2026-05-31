@@ -378,6 +378,31 @@ type reader struct {
 
 func (r *reader) remaining() int { return len(r.buf) - r.pos }
 
+// checkCount validates an untrusted element count read from the byte stream
+// before it is used to size an allocation. A count is implausible if the bytes
+// it would consume (count * minElemBytes) exceed the bytes remaining in the
+// buffer — no legitimate file can describe more elements than it has bytes for.
+// Rejecting up front turns a malformed/truncated/protected war3map.w3i (which
+// is parsed on EVERY map open) into a fast decode error instead of an attempted
+// multi-gigabyte allocation that OOM-crashes the process. Same idiom as
+// unitsdoo.reader.checkCount / the doodadsdoo sanity caps.
+//
+// what is used only to build a descriptive, wrapped error matching the
+// package's existing truncation-error style.
+func (r *reader) checkCount(count uint32, minElemBytes int, what string) error {
+	if minElemBytes < 1 {
+		minElemBytes = 1
+	}
+	// remaining()/minElemBytes is an upper bound on how many elements could
+	// possibly follow; anything beyond it is corrupt. Using division (rather
+	// than count*minElemBytes) avoids any multiply overflow on a hostile count.
+	if uint64(count) > uint64(r.remaining()/minElemBytes) {
+		return fmt.Errorf("w3i: %s count %d exceeds %d bytes remaining (min %d bytes/element) at offset %d: %w",
+			what, count, r.remaining(), minElemBytes, r.pos, io.ErrUnexpectedEOF)
+	}
+	return nil
+}
+
 func (r *reader) need(n int) error {
 	if r.pos+n > len(r.buf) {
 		return fmt.Errorf("w3i: short read: need %d bytes at offset %d, have %d", n, r.pos, len(r.buf)-r.pos)
@@ -754,6 +779,13 @@ func Parse(data []byte) (*Info, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A Player consumes at minimum 4 i32s + an (at least 1-byte) name string +
+	// a vec2 + 2 u32s = 33 bytes on the wire; bound before allocating so a
+	// hostile count can't OOM. (v31+ players are larger; the smaller bound is
+	// intentionally conservative — it never rejects a valid file.)
+	if err = r.checkCount(playerCount, 33, "player"); err != nil {
+		return nil, err
+	}
 	info.Players = make([]Player, 0, playerCount)
 	for i := uint32(0); i < playerCount; i++ {
 		var p Player
@@ -803,6 +835,10 @@ func Parse(data []byte) (*Info, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A Force consumes at minimum two u32s + an (at least 1-byte) name = 9 bytes.
+	if err = r.checkCount(forceCount, 9, "force"); err != nil {
+		return nil, err
+	}
 	info.Forces = make([]Force, 0, forceCount)
 	for i := uint32(0); i < forceCount; i++ {
 		var f Force
@@ -844,6 +880,10 @@ func Parse(data []byte) (*Info, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Each UpgradeAvailability is a fixed 16 bytes (u32 + 4-char id + 2 i32s).
+	if err = r.checkCount(upgradeCount, 16, "upgrade"); err != nil {
+		return nil, err
+	}
 	info.AvailableUpgrades = make([]UpgradeAvailability, 0, upgradeCount)
 	for i := uint32(0); i < upgradeCount; i++ {
 		var u UpgradeAvailability
@@ -870,6 +910,10 @@ func Parse(data []byte) (*Info, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Each TechAvailability is a fixed 8 bytes (u32 player flags + 4-char id).
+	if err = r.checkCount(techCount, 8, "tech"); err != nil {
+		return nil, err
+	}
 	info.AvailableTech = make([]TechAvailability, 0, techCount)
 	for i := uint32(0); i < techCount; i++ {
 		var t TechAvailability
@@ -890,6 +934,11 @@ func Parse(data []byte) (*Info, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A RandomUnitTable consumes at minimum CreationNumber(4) + name(>=1) +
+	// posCount(4) + lineCount(4) = 13 bytes.
+	if err = r.checkCount(rutCount, 13, "random_unit_table"); err != nil {
+		return nil, err
+	}
 	info.RandomUnitTables = make([]RandomUnitTable, 0, rutCount)
 	for i := uint32(0); i < rutCount; i++ {
 		var t RandomUnitTable
@@ -903,6 +952,10 @@ func Parse(data []byte) (*Info, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Each position is a 4-byte i32.
+		if err = r.checkCount(posCount, 4, "random_unit_table position"); err != nil {
+			return nil, err
+		}
 		t.Positions = make([]int32, posCount)
 		for j := uint32(0); j < posCount; j++ {
 			if t.Positions[j], err = r.i32(); err != nil {
@@ -911,6 +964,10 @@ func Parse(data []byte) (*Info, error) {
 		}
 		lineCount, err := r.u32()
 		if err != nil {
+			return nil, err
+		}
+		// Each line consumes at minimum a 4-byte chance (posCount may be 0).
+		if err = r.checkCount(lineCount, 4, "random_unit_table line"); err != nil {
 			return nil, err
 		}
 		t.Lines = make([]RandomUnitLine, lineCount)
@@ -942,6 +999,11 @@ func Parse(data []byte) (*Info, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A RandomItemTable consumes at minimum CreationNumber(4) + name(>=1) +
+	// setCount(4) = 9 bytes.
+	if err = r.checkCount(ritCount, 9, "random_item_table"); err != nil {
+		return nil, err
+	}
 	info.RandomItemTables = make([]RandomItemTable, 0, ritCount)
 	for i := uint32(0); i < ritCount; i++ {
 		var t RandomItemTable
@@ -955,10 +1017,18 @@ func Parse(data []byte) (*Info, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Each set consumes at minimum a 4-byte itemCount prefix.
+		if err = r.checkCount(setCount, 4, "random_item_table set"); err != nil {
+			return nil, err
+		}
 		t.ItemSets = make([]RandomItemSet, setCount)
 		for j := uint32(0); j < setCount; j++ {
 			itemCount, err := r.u32()
 			if err != nil {
+				return nil, err
+			}
+			// Each RandomItemEntry is a fixed 8 bytes (i32 chance + 4-char id).
+			if err = r.checkCount(itemCount, 8, "random_item_table entry"); err != nil {
 				return nil, err
 			}
 			t.ItemSets[j].Items = make([]RandomItemEntry, itemCount)

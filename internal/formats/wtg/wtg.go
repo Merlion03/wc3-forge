@@ -344,6 +344,11 @@ func loadVersion31(r *reader, t *Triggers, argc map[string]int) error {
 			t.DeletedIDs[i] = nil
 			continue
 		}
+		// Each id is a 4-byte u32; bound before allocating so a hostile count
+		// can't OOM.
+		if err := r.checkCount(n, 4, "deleted block id"); err != nil {
+			return fmt.Errorf("wtg: deleted block %d body: %w", i, err)
+		}
 		ids := make([]int32, n)
 		for j := uint32(0); j < n; j++ {
 			ids[j] = int32(r.readU32())
@@ -385,6 +390,11 @@ func loadVersion31(r *reader, t *Triggers, argc map[string]int) error {
 	if r.err != nil {
 		return fmt.Errorf("wtg: read element_count: %w", r.err)
 	}
+	// Each element consumes at minimum a 4-byte classifier u32; bound the
+	// freshly-read count before preallocating so a hostile value can't OOM.
+	if err := r.checkCount(elementCount, 4, "element"); err != nil {
+		return fmt.Errorf("wtg: %w", err)
+	}
 	t.Elements = make([]ElementRef, 0, elementCount)
 	for i := uint32(0); i < elementCount; i++ {
 		classifier := Classifier(r.readU32())
@@ -424,6 +434,11 @@ func loadVersion31(r *reader, t *Triggers, argc map[string]int) error {
 			if r.err != nil {
 				return fmt.Errorf("wtg: parse trigger %d header: %w", i, r.err)
 			}
+			// Each ECA consumes at minimum a 4-byte type + (>=1-byte) name +
+			// 4-byte enabled = 9 bytes; bound before allocating.
+			if err := r.checkCount(ecaCount, 9, "ECA"); err != nil {
+				return fmt.Errorf("wtg: parse trigger %d: %w", i, err)
+			}
 			tr.ECAs = make([]ECA, ecaCount)
 			for j := uint32(0); j < ecaCount; j++ {
 				if err := parseECA(r, &tr.ECAs[j], false, t.SubVersion, argc); err != nil {
@@ -461,6 +476,13 @@ func loadVersionPre31(r *reader, t *Triggers, argc map[string]int) error {
 	catCount := r.readU32()
 	if r.err != nil {
 		return fmt.Errorf("wtg(pre-31): read category count: %w", r.err)
+	}
+	// Each category consumes at minimum a 4-byte id + (>=1-byte) name = 5 bytes;
+	// bound the freshly-read count before preallocating so a hostile value
+	// can't OOM. (+2 accounts for the synthetic Map Header + Variables rows
+	// prepended below.)
+	if err := r.checkCount(catCount, 5, "category"); err != nil {
+		return fmt.Errorf("wtg(pre-31): %w", err)
 	}
 	maxID := int32(0)
 	t.Categories = make([]Category, 0, int(catCount)+2)
@@ -507,6 +529,13 @@ func loadVersionPre31(r *reader, t *Triggers, argc map[string]int) error {
 	if r.err != nil {
 		return fmt.Errorf("wtg(pre-31): read var count: %w", r.err)
 	}
+	// A Variable consumes at minimum name(>=1) + type(>=1) + unknown(4) +
+	// is_array(4) + is_initialized(4) + initial_value(>=1) + parent_id... but
+	// the smallest contiguous wire footprint is conservatively >= 4 bytes;
+	// bound before allocating.
+	if err := r.checkCount(varCount, 4, "variable"); err != nil {
+		return fmt.Errorf("wtg(pre-31): %w", err)
+	}
 	t.Variables = make([]Variable, 0, varCount)
 	for i := uint32(0); i < varCount; i++ {
 		v := Variable{}
@@ -531,6 +560,11 @@ func loadVersionPre31(r *reader, t *Triggers, argc map[string]int) error {
 	trigCount := r.readU32()
 	if r.err != nil {
 		return fmt.Errorf("wtg(pre-31): read trigger count: %w", r.err)
+	}
+	// A Trigger consumes at minimum name(>=1) + description(>=1) + several
+	// fixed u32s; conservatively >= 4 bytes. Bound before allocating.
+	if err := r.checkCount(trigCount, 4, "trigger"); err != nil {
+		return fmt.Errorf("wtg(pre-31): %w", err)
 	}
 	t.Triggers = make([]Trigger, 0, trigCount)
 	for i := uint32(0); i < trigCount; i++ {
@@ -566,6 +600,11 @@ func loadVersionPre31(r *reader, t *Triggers, argc map[string]int) error {
 		ecaCount := r.readU32()
 		if r.err != nil {
 			return fmt.Errorf("wtg(pre-31): parse trigger %d header: %w", i, r.err)
+		}
+		// Each ECA consumes at minimum a 4-byte type + (>=1-byte) name +
+		// 4-byte enabled = 9 bytes; bound before allocating.
+		if err := r.checkCount(ecaCount, 9, "ECA"); err != nil {
+			return fmt.Errorf("wtg(pre-31): parse trigger %d: %w", i, err)
 		}
 		tr.ECAs = make([]ECA, ecaCount)
 		for j := uint32(0); j < ecaCount; j++ {
@@ -605,6 +644,11 @@ func parseECA(r *reader, eca *ECA, isChild bool, version uint32, argc map[string
 		childCount := r.readU32()
 		if r.err != nil {
 			return r.err
+		}
+		// Each child ECA consumes at minimum type(4) + group(4) + name(>=1) +
+		// enabled(4) = 13 bytes; bound before allocating.
+		if err := r.checkCount(childCount, 13, "child ECA"); err != nil {
+			return fmt.Errorf("children of %q: %w", eca.Name, err)
 		}
 		eca.Children = make([]ECA, childCount)
 		for j := uint32(0); j < childCount; j++ {
@@ -703,6 +747,45 @@ type reader struct {
 
 func newReader(buf []byte) *reader {
 	return &reader{buf: buf}
+}
+
+// remaining reports how many unread bytes are left in the buffer.
+func (r *reader) remaining() int {
+	if r.off >= len(r.buf) {
+		return 0
+	}
+	return len(r.buf) - r.off
+}
+
+// checkCount validates an untrusted element count freshly read from the byte
+// stream before it is used to size an allocation. A count is implausible if the
+// bytes it would consume (count * minElemBytes) exceed the bytes remaining — no
+// legitimate file can describe more elements than it has bytes for. Rejecting up
+// front turns a malformed/truncated/protected war3map.wtg (parsed on every
+// GUI-trigger map open) into a fast decode error instead of an attempted
+// multi-gigabyte allocation that OOM-crashes the process. Same idiom as
+// unitsdoo.reader.checkCount.
+//
+// On a sticky prior error this is a no-op (the count is meaningless 0); callers
+// already gate on r.err before calling, but this keeps the helper composable.
+// On rejection it sets r.err (mirroring this reader's sticky-error convention)
+// AND returns the error so the call-site can wrap it with context.
+func (r *reader) checkCount(count uint32, minElemBytes int, what string) error {
+	if r.err != nil {
+		return r.err
+	}
+	if minElemBytes < 1 {
+		minElemBytes = 1
+	}
+	// remaining()/minElemBytes is an upper bound on how many elements could
+	// possibly follow; anything beyond it is corrupt. Division (rather than
+	// count*minElemBytes) avoids any multiply overflow on a hostile count.
+	if uint64(count) > uint64(r.remaining()/minElemBytes) {
+		r.err = io.ErrUnexpectedEOF
+		return fmt.Errorf("wtg: %s count %d exceeds %d bytes remaining (min %d bytes/element) at offset %d: %w",
+			what, count, r.remaining(), minElemBytes, r.off, io.ErrUnexpectedEOF)
+	}
+	return nil
 }
 
 func (r *reader) advance(n int64) {
