@@ -446,19 +446,15 @@
   let updateDownloading: boolean = $state(false)
   let updateDownloadPct: number = $state(0)
   let autoCheckUpdates: boolean = $state(localStorage.getItem('wc3-forge:auto-check-updates') !== '0')
-  let autoInstallUpdates: boolean = $state(localStorage.getItem('wc3-forge:auto-install-updates') === '1')
 
-  // Persist the toggles whenever the user flips them in the dialog.
+  // Persist the toggle whenever the user flips it in the dialog.
   $effect(() => {
     localStorage.setItem('wc3-forge:auto-check-updates', autoCheckUpdates ? '1' : '0')
   })
-  $effect(() => {
-    localStorage.setItem('wc3-forge:auto-install-updates', autoInstallUpdates ? '1' : '0')
-  })
 
   // Silent check fired on startup. Only surfaces something when an update
-  // exists: opens the dialog, or — if the user opted into auto-install —
-  // begins the download immediately (still gated on saving unsaved work).
+  // exists, and then always opens the dialog — the user decides whether to
+  // install (the installer needs elevation, so we never elevate unprompted).
   async function autoCheckForUpdate() {
     if (!autoCheckUpdates) return
     try {
@@ -466,11 +462,7 @@
       if (!res?.isNewer || !res.release?.installer) return
       updateResult = res
       updateError = ''
-      if (autoInstallUpdates) {
-        await startUpdate()
-      } else {
-        showUpdateDialog = true
-      }
+      showUpdateDialog = true
     } catch (e) {
       // Network hiccup / rate limit on a background check is non-fatal and
       // shouldn't nag — log it and stay quiet.
@@ -2936,7 +2928,6 @@
       downloadPct={updateDownloadPct}
       error={updateError}
       bind:autoCheck={autoCheckUpdates}
-      bind:autoInstall={autoInstallUpdates}
       onUpdate={startUpdate}
     />
   {/if}

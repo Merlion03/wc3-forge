@@ -18,7 +18,6 @@
     downloadPct = 0,
     error = '',
     autoCheck = $bindable(true),
-    autoInstall = $bindable(false),
     onClose,
     onUpdate,
   }: {
@@ -29,7 +28,6 @@
     downloadPct?: number
     error?: string
     autoCheck?: boolean
-    autoInstall?: boolean
     onClose?: () => void
     onUpdate?: () => void
   } = $props()
@@ -111,10 +109,6 @@
         <label class="flex items-center gap-2 text-sm pt-2 cursor-pointer">
           <input type="checkbox" bind:checked={autoCheck} disabled={downloading} />
           <span>Check for updates automatically on launch</span>
-        </label>
-        <label class="flex items-center gap-2 text-sm cursor-pointer" title="When a new version is found on launch, download and run the installer without asking.">
-          <input type="checkbox" bind:checked={autoInstall} disabled={downloading || !autoCheck} />
-          <span class:text-muted-foreground={!autoCheck}>Install updates automatically</span>
         </label>
       </div>
     </div>

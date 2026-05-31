@@ -86,6 +86,30 @@ Section
 
     SetOutPath $INSTDIR
 
+    # --- Self-update lock guard ---------------------------------------------
+    # The in-app updater launches this installer and then quits wc3-forge, but
+    # the elevated installer races the app's shutdown. If we reach wails.files
+    # while the old wc3-forge.exe is still mapped, NSIS can't open it for
+    # writing ("Error opening file for writing: ...wc3-forge.exe") and the
+    # install aborts. Wait (bounded) for the running binary to release its
+    # lock before copying. We probe by trying to Delete the target exe: a
+    # running image can't be deleted, so a failed Delete means it's still
+    # alive. Once the process exits the Delete succeeds (or the file never
+    # existed on a fresh install) and we proceed. Deleting the exe also
+    # implies the process released the CASC DLLs, so the File lines below are
+    # safe too. After ~15s we give up and let wails.files surface the original
+    # error rather than hang forever on a wedged shutdown.
+    StrCpy $R0 0 # attempt counter
+    wc3forge_waitlock:
+        ClearErrors
+        Delete "$INSTDIR\${PRODUCT_EXECUTABLE}"
+        IfErrors 0 wc3forge_unlocked
+        IntOp $R0 $R0 + 1
+        IntCmp $R0 30 wc3forge_unlocked 0 wc3forge_unlocked
+        Sleep 500
+        Goto wc3forge_waitlock
+    wc3forge_unlocked:
+
     !insertmacro wails.files
 
     # The wails.files macro only installs the binary. wc3-forge also needs the

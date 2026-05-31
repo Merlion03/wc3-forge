@@ -9,10 +9,13 @@ import (
 )
 
 // runInstaller launches the downloaded NSIS installer with the "runas" verb
-// so Windows shows the UAC elevation prompt (the installer writes to
-// Program Files). We deliberately run it interactively (no /S): the user
-// clicks through its UI, which gives wc3-forge time to exit and release the
-// lock on its own .exe before the installer reaches the file-copy step.
+// so Windows shows the UAC elevation prompt (the installer writes to Program
+// Files). The caller (DownloadAndRunInstaller) quits wc3-forge right after
+// this returns so the running .exe releases its lock — but ShellExecuteW is
+// async, so the elevated installer races that shutdown. The installer does
+// NOT rely on timing: project.nsi waits (bounded) for the old wc3-forge.exe
+// to become deletable before its file-copy step, which is what actually
+// closes the "Error opening file for writing" race.
 //
 // ShellExecuteW is used (via syscall.NewLazyDLL, matching internal/casc's
 // no-cgo DLL-binding style) rather than os/exec because os/exec can't request
