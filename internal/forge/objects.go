@@ -540,8 +540,14 @@ var (
 func ItemsConfig() *KindConfig {
 	itemsConfigOnce.Do(func() {
 		itemsConfigCfg = &KindConfig{
-			Kind:         "items",
-			MetaDataFile: "Units/ItemMetaData.slk",
+			Kind: "items",
+			// Items have NO dedicated metadata SLK in WC3 — their editable
+			// fields live in UnitMetaData.slk (shared with units), flagged by
+			// the `useItem` column and selected via AppliesToItems() below.
+			// Pointing this at a nonexistent "Units/ItemMetaData.slk" loaded
+			// EMPTY metadata, so item field edits failed with "unknown field"
+			// (listing still worked — that reads ItemData.slk). See AppliesFn.
+			MetaDataFile: "Units/UnitMetaData.slk",
 			BaseSLKs:     []string{"Units/ItemData.slk"},
 			BaseINIs: []string{
 				"Units/ItemFunc.txt",
