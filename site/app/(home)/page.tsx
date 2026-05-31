@@ -10,6 +10,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/warcraftcn/card";
+import { asset } from "@/lib/asset";
 
 const features = [
   {
@@ -52,7 +53,7 @@ export default function Home() {
           alt="wc3-forge"
           className="size-20 drop-shadow-[0_0_20px_rgba(255,171,1,0.35)]"
           height={96}
-          src="/logo.png"
+          src={asset("/logo.png")}
           width={96}
         />
         <div className="flex items-center gap-2">
@@ -64,7 +65,17 @@ export default function Home() {
           </Badge>
         </div>
         <h1 className="fantasy max-w-3xl font-bold text-4xl text-amber-300 md:text-6xl">
-          A Warcraft III map editor, driven by Claude Code
+          A Warcraft III map editor, driven by{" "}
+          <span className="inline-flex items-center gap-2 whitespace-nowrap">
+            <Image
+              alt="Claude"
+              className="inline-block size-9 align-middle md:size-12"
+              height={48}
+              src={asset("/claude.svg")}
+              width={48}
+            />
+            Claude Code
+          </span>
         </h1>
         <p className="max-w-2xl text-lg text-muted-foreground">
           wc3-forge is a native WC3 map editor with an embedded MCP server. Every
@@ -91,7 +102,7 @@ export default function Home() {
             height={1000}
             priority
             sizes="(max-width: 1024px) 100vw, 1024px"
-            src="/hero.png"
+            src={asset("/hero.png")}
             width={1600}
           />
         </div>

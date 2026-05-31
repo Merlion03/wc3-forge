@@ -7,6 +7,7 @@ import { usePathname } from "next/navigation";
 
 import { CursorPicker } from "@/components/cursor-picker";
 import { Button } from "@/components/ui/warcraftcn/button";
+import { asset } from "@/lib/asset";
 
 const LINKS = [
   { href: "/docs", label: "Docs" },
@@ -21,7 +22,7 @@ export function SiteNav() {
     <header className="sticky top-0 z-50 border-amber-900/40 border-b bg-background/80 backdrop-blur-md">
       <div className="mx-auto flex h-16 w-full max-w-7xl items-center gap-4 px-4">
         <Link className="flex items-center gap-2" href="/">
-          <Image alt="wc3-forge" height={28} src="/logo.png" width={28} />
+          <Image alt="wc3-forge" height={28} src={asset("/logo.png")} width={28} />
           <span className="fantasy font-bold text-amber-200 text-lg tracking-wide">
             wc3-forge
           </span>
