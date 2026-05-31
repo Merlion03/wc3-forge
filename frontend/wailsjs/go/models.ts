@@ -524,6 +524,7 @@ export namespace main {
 	    bytes: string;
 	    ext: string;
 	    found: boolean;
+	    generated: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new MinimapDTO(source);
@@ -534,6 +535,7 @@ export namespace main {
 	        this.bytes = source["bytes"];
 	        this.ext = source["ext"];
 	        this.found = source["found"];
+	        this.generated = source["generated"];
 	    }
 	}
 	export class NewMapParams {

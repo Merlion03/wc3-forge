@@ -27,7 +27,11 @@
   // Visibility is owned by App.svelte (which gates the mount), as is the
   // global 'M' hotkey — this component just renders when mounted.
 
-  import { GetMinimapBytes, GetTerrain } from '../wailsjs/go/main/App.js'
+  import {
+    GetMinimapBytes,
+    GenerateMinimapBytes,
+    GetTerrain,
+  } from '../wailsjs/go/main/App.js'
   import { decodeImageBytes } from './icon-loader'
   import type { SceneAPI } from './scene-instances'
 
@@ -49,6 +53,10 @@
   // returned by GetMinimapBytes; "" means we have no image (either no map
   // loaded, no baked preview in the map, or decode failed).
   let dataURL = $state('')
+  // True when dataURL came from an on-the-fly terrain bake (the map ships no
+  // baked minimap) rather than the map's own war3mapMap.blp/.dds/.tga. Drives a
+  // subtle "auto" badge so the preview reads as synthesized, not authored.
+  let generated = $state(false)
   // The image's natural aspect ratio. Defaults to 1:1 (square); updated once
   // the <img> reports its natural dimensions. Non-square preview images (rare)
   // get correctly proportioned via CSS aspect-ratio.
@@ -163,8 +171,24 @@
   async function reload() {
     dataURL = ''
     aspect = 1
+    generated = false
     try {
-      const dto = await GetMinimapBytes()
+      let dto = await GetMinimapBytes()
+      // No baked minimap in the map (e.g. a freshly-created or never-rendered
+      // map)? Fall back to a terrain-colored preview baked on the Go side. The
+      // generated image spans the same vertex extent the click-to-pan/frustum
+      // math assumes, so those affordances keep working unchanged.
+      if (!dto || !dto.found || !dto.bytes) {
+        try {
+          const gen = await GenerateMinimapBytes()
+          if (gen && gen.found && gen.bytes) {
+            dto = gen
+            generated = true
+          }
+        } catch (ge) {
+          console.warn('[Minimap] generate fallback failed:', ge)
+        }
+      }
       if (!dto || !dto.found || !dto.bytes) return
       // Decode base64 → Uint8Array, then dispatch to BLP/DDS/TGA decoder.
       const bin = atob(dto.bytes)
@@ -175,6 +199,7 @@
       // Silent failure — the placeholder renders if dataURL stays empty.
       console.warn('[Minimap] decode failed:', e)
       dataURL = ''
+      generated = false
     }
     // Cache terrain coords for click-to-pan. Side-band fetch; failures here
     // just mean clicks don't pan (image still displays fine).
@@ -313,6 +338,17 @@
           opacity="0.85"
         />
       </svg>
+    {/if}
+    {#if generated}
+      <!-- Subtle badge marking this as a synthesized terrain preview rather
+           than the map's own baked minimap. Bottom-left so it stays clear of
+           the typical camera frustum and click target. -->
+      <div
+        class="absolute left-1 bottom-1 px-1 py-px rounded-sm bg-black/55 text-[9px] leading-none uppercase tracking-wide text-white/80 pointer-events-none select-none"
+        title="Auto-generated from terrain — this map has no baked minimap"
+      >
+        auto
+      </div>
     {/if}
   {:else}
     <div

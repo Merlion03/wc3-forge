@@ -1211,6 +1211,10 @@ type MinimapDTO struct {
 	Bytes string `json:"bytes"` // base64
 	Ext   string `json:"ext"`
 	Found bool   `json:"found"`
+	// Generated is true when the bytes were baked on-the-fly from the terrain
+	// (GenerateMinimapBytes) rather than read from a baked file in the map. Lets
+	// the panel distinguish "the map's own minimap" from "a synthesized preview".
+	Generated bool `json:"generated"`
 }
 
 // GetMinimapBytes returns the baked minimap image embedded in the loaded map.
@@ -1249,6 +1253,29 @@ func (a *App) GetMinimapBytes() (MinimapDTO, error) {
 		}, nil
 	}
 	return MinimapDTO{Found: false}, nil
+}
+
+// GenerateMinimapBytes bakes a minimap from the currently-loaded map's terrain
+// and returns it as a BLP1/JPEG image (same wire shape as GetMinimapBytes).
+// The panel calls this as a fallback when GetMinimapBytes finds no baked image,
+// so any minimap-less map still shows a terrain preview (colored per ground
+// tile) instead of the "No minimap" placeholder. Returns Found=false when no
+// map/terrain is loaded.
+func (a *App) GenerateMinimapBytes() (MinimapDTO, error) {
+	t := forge.Current.Terrain()
+	if t == nil {
+		return MinimapDTO{Found: false}, nil
+	}
+	blpBytes, err := BakeMinimapBLP(t)
+	if err != nil || len(blpBytes) == 0 {
+		return MinimapDTO{Found: false}, err
+	}
+	return MinimapDTO{
+		Bytes:     base64.StdEncoding.EncodeToString(blpBytes),
+		Ext:       "blp",
+		Found:     true,
+		Generated: true,
+	}, nil
 }
 
 // SetUnitAnimation is a dev-only hook for poking unit animations from the JS

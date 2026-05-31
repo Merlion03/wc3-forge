@@ -146,6 +146,10 @@ export function GameplayConstantsGet() {
   return window['go']['main']['App']['GameplayConstantsGet']();
 }
 
+export function GenerateMinimapBytes() {
+  return window['go']['main']['App']['GenerateMinimapBytes']();
+}
+
 export function GenerateTriggerScript() {
   return window['go']['main']['App']['GenerateTriggerScript']();
 }

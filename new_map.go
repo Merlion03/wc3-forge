@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 
@@ -108,7 +109,8 @@ func writeNewMap(p NewMapParams) error {
 		ground = []string{"Ldrt"}
 	}
 
-	w3eBytes, err := w3e.Encode(buildNewTerrain(p.Width, p.Height, letter, ground, cliff))
+	terrain := buildNewTerrain(p.Width, p.Height, letter, ground, cliff)
+	w3eBytes, err := w3e.Encode(terrain)
 	if err != nil {
 		return fmt.Errorf("encode terrain: %w", err)
 	}
@@ -134,6 +136,18 @@ func writeNewMap(p NewMapParams) error {
 		{Name: "war3map.doo", Data: doodadBytes},
 		{Name: "war3mapUnits.doo", Data: unitBytes},
 	}
+
+	// Bake a minimap (war3mapMap.blp) from the terrain so the new map opens with
+	// a real minimap instead of the "No minimap" placeholder — and so the image
+	// is present in-game / on the loading screen too. A failure here is
+	// non-fatal: the map is still valid and the panel falls back to an on-the-fly
+	// generated preview (App.GenerateMinimapBytes).
+	if mm, mmErr := BakeMinimapBLP(terrain); mmErr != nil {
+		log.Printf("new map: minimap bake failed (continuing without baked minimap): %v", mmErr)
+	} else if len(mm) > 0 {
+		files = append(files, mpq.FileEntry{Name: "war3mapMap.blp", Data: mm})
+	}
+
 	if err := mpq.WriteFile(p.Path, files, buildHM3WHeader(name, 1)); err != nil {
 		return fmt.Errorf("write .w3x: %w", err)
 	}

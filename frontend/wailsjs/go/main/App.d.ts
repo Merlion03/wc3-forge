@@ -79,6 +79,8 @@ export function GameplayConstantsApply(arg1:Array<main.GameplayConstantRow>):Pro
 
 export function GameplayConstantsGet():Promise<Array<main.GameplayConstantRow>>;
 
+export function GenerateMinimapBytes():Promise<main.MinimapDTO>;
+
 export function GenerateTriggerScript():Promise<main.TriggerScriptResultDTO>;
 
 export function GetAppVersion():Promise<string>;
