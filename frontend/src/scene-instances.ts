@@ -2951,19 +2951,25 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         const t = await GetTerrain()
         cachedTerrainDTO = t
         cellHighlight?.setTerrain(t as unknown as any)
-        brushCursor?.setBrush(null)
         const gl = (viewer as any).gl as WebGLRenderingContext
-        if (terrain) { terrain.dispose(); terrain = null }
-        terrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
-        sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
-        if (cliffs) { cliffs.dispose(); cliffs = null }
+        // BUILD-THEN-SWAP: build the new meshes fully before disposing the old
+        // ones. The previous "dispose → null → await build" left terrain/cliffs/
+        // water null across the await, so the RAF drew nothing there for a frame
+        // or two — a visible flicker on every brush dab. Building first keeps the
+        // old composition on screen until the replacement is ready, then swaps
+        // atomically (no null gap, no flicker).
+        const newTerrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
         const cliffPlacements = computeCliffPlacements(t as unknown as any)
-        if (cliffPlacements.length > 0) {
-          cliffs = await renderCliffs(gl, viewer as any, pathSolver, cliffPlacements, t as unknown as any)
-        }
+        const newCliffs = cliffPlacements.length > 0
+          ? await renderCliffs(gl, viewer as any, pathSolver, cliffPlacements, t as unknown as any)
+          : null
         // Height edits change water depth blending, so rebuild water too.
-        if (water) { water.dispose(); water = null }
-        water = await buildWater(gl, viewer as any, pathSolver, t as unknown as any)
+        const newWater = await buildWater(gl, viewer as any, pathSolver, t as unknown as any)
+        // Atomic swap (synchronous — no await between dispose + reassign).
+        terrain?.dispose(); terrain = newTerrain
+        sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
+        cliffs?.dispose(); cliffs = newCliffs
+        water?.dispose(); water = newWater
       } while (terrainRebuildPending)
     } catch (e) {
       flog('[terrain rebuild]', e instanceof Error ? e.message : String(e))
