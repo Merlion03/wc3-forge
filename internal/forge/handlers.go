@@ -109,6 +109,15 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("terrain.set_tile", handleTerrainSetTile)
 	reg("terrain.set_height", handleTerrainSetHeight)
 	reg("terrain.get_tile", handleTerrainGetTile)
+	// Terrain brushes — region edits over a circular/square footprint of
+	// corners (the engine behind the GUI Terrain Palette). Each call is one
+	// atomic dab (one undo step); bracket a series with history.begin_group /
+	// history.end_group to collapse a multi-dab edit into one. Handlers in
+	// handlers_terrain.go; mutators in terrain_brush.go.
+	reg("terrain.paint_tile", handleTerrainPaintTile)
+	reg("terrain.brush_height", handleTerrainBrushHeight)
+	reg("terrain.brush_cliff", handleTerrainBrushCliff)
+	reg("terrain.brush_ramp", handleTerrainBrushRamp)
 	// Undo/redo + transactional grouping. AI clients can drive these the same
 	// way the UI does (Ctrl+Z is just a hotkey wrapper around history.undo);
 	// agents that batch multi-step edits should bracket them with

@@ -1462,6 +1462,81 @@ func (a *App) ScaleDoodad(creationNumber uint32, sx, sy, sz float32) error {
 	return forge.Current.ScaleDoodad(creationNumber, sx, sy, sz)
 }
 
+// ---------------------------------------------------------------------------
+// Terrain brush bindings. The Terrain Palette panel calls these on click-drag
+// over the viewport; each is one "dab" (a brush footprint resolved Go-side from
+// center/radius/shape) recorded as one undo step. A whole stroke is wrapped in
+// BeginUndoGroup/EndUndoGroup by the frontend so Ctrl+Z undoes the full drag.
+// col/row are 0-based corner grid indices; radius is in corner units; shape is
+// "circle" or "square". See internal/forge/terrain_brush.go for the contract.
+// ---------------------------------------------------------------------------
+
+// PaintTerrainTile paints groundTileID (a FourCC already in the map's ground
+// palette) over the brush footprint. Mirrors terrain.paint_tile (MCP).
+func (a *App) PaintTerrainTile(col, row int, radius float64, shape, groundTileID string) error {
+	return forge.Current.PaintTileBrush(col, row, radius, shape, groundTileID)
+}
+
+// BrushTerrainHeight raises/lowers/flattens/smooths the heightfield over the
+// footprint. mode ∈ {raise, lower, flatten, smooth}; strength is game-Z units
+// per dab (or a 0..1 fraction for smooth); target is the flatten level (game-Z).
+// Mirrors terrain.brush_height (MCP).
+func (a *App) BrushTerrainHeight(col, row int, radius float64, shape, mode string, strength, target float32) error {
+	return forge.Current.HeightBrush(col, row, radius, shape, mode, strength, target)
+}
+
+// BrushTerrainCliff raises/lowers/sets the integer cliff layer over the
+// footprint. mode ∈ {raise, lower, set}; level is the target layer for "set";
+// cliffTileID picks the cliff tileset (empty → slot 0). Mirrors
+// terrain.brush_cliff (MCP).
+func (a *App) BrushTerrainCliff(col, row int, radius float64, shape, mode string, level int, cliffTileID string) error {
+	return forge.Current.CliffBrush(col, row, radius, shape, mode, level, cliffTileID)
+}
+
+// BrushTerrainRamp toggles the ramp flag over the footprint (on → walkable
+// slope, off → sheer wall). Mirrors terrain.brush_ramp (MCP).
+func (a *App) BrushTerrainRamp(col, row int, radius float64, shape string, on bool) error {
+	return forge.Current.RampBrush(col, row, radius, shape, on)
+}
+
+// GetTerrainTile reads back the ground tile + height at one corner. The Terrain
+// Palette's Flatten tool calls this on stroke start to capture the height to
+// flatten toward. Mirrors terrain.get_tile (MCP).
+func (a *App) GetTerrainTile(col, row int) (forge.TerrainTileInfo, error) {
+	return forge.Current.GetTerrainTile(col, row)
+}
+
+// TerrainPaletteThumbs carries data-URL PNG thumbnails for the loaded map's
+// ground + cliff palette FourCCs (keyed by FourCC), so the Terrain Palette can
+// render the real tile texture instead of a flat color swatch. Empty string per
+// FourCC on a decode miss — the frontend falls back to the swatch.
+type TerrainPaletteThumbs struct {
+	Ground map[string]string `json:"ground"`
+	Cliff  map[string]string `json:"cliff"`
+}
+
+// GetTerrainPaletteThumbs builds (cached) thumbnails for the currently-loaded
+// map's ground + cliff palettes — the same tile/cliff thumbnail cache the Swap
+// Tileset dialog warms via ListTilesets.
+func (a *App) GetTerrainPaletteThumbs() TerrainPaletteThumbs {
+	out := TerrainPaletteThumbs{Ground: map[string]string{}, Cliff: map[string]string{}}
+	t := forge.Current.Terrain()
+	if t == nil {
+		return out
+	}
+	for _, fc := range t.GroundTilesets {
+		if _, done := out.Ground[fc]; !done {
+			out.Ground[fc] = tileThumbnail(fc)
+		}
+	}
+	for _, fc := range t.CliffTilesets {
+		if _, done := out.Cliff[fc]; !done {
+			out.Cliff[fc] = cliffThumbnail(fc)
+		}
+	}
+	return out
+}
+
 // Undo reverts the most-recent mutation on the session's history stack.
 // No-op when the stack is empty. The reverted command is pushed onto the
 // redo stack so the user can re-apply it. Bound to Ctrl+Z in the UI.

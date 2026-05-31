@@ -9,6 +9,8 @@
     GetUnitTypeIndex, GetDoodadTypeIndex,
     NewMapDialog as NewMapSaveDialog, CreateNewMap, WriteNewMap, ReportDiagnostics,
     MoveUnit, MoveDoodad, CreateDoodad, DeleteSelection, IsDirty, SaveMap,
+    PaintTerrainTile, BrushTerrainHeight, BrushTerrainCliff, BrushTerrainRamp, GetTerrainTile,
+    BeginUndoGroup, EndUndoGroup,
     LaunchInWC3,
     Undo, Redo, CanUndo, CanRedo, HistoryList,
     CheckConvertToLua,
@@ -38,6 +40,7 @@
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
   import DoodadPalette from './DoodadPalette.svelte'
+  import TerrainPalette, { type TerrainBrush } from './TerrainPalette.svelte'
   import UpdateDialog from './UpdateDialog.svelte'
   import CameraOrbitGizmo from './CameraOrbitGizmo.svelte'
   import DiagnosticsOverlay from './DiagnosticsOverlay.svelte'
@@ -115,6 +118,22 @@
   // null = nothing armed. Owned here; mirrored to the scene via
   // scene.setPlacementMode and read by the palette to highlight the armed icon.
   let armedDoodadType: string | null = $state(null)
+
+  // Terrain-brush state. The Terrain Palette reports the armed brush here; we
+  // mirror its size/shape to the scene's footprint cursor and put the scene in
+  // brush mode. A brush stroke (mousedown→drag→mouseup) arrives via
+  // handleTerrainBrushStroke, which brackets the Go brush calls in one undo
+  // group. null = nothing armed.
+  let terrainBrush: TerrainBrush | null = $state(null)
+  // Serializes the async brush calls of a single stroke so BeginUndoGroup, the
+  // dabs, and EndUndoGroup always run in order even as paint events fire fast.
+  let terrainBrushChain: Promise<unknown> = Promise.resolve()
+  // Flatten target Z, captured on stroke start (the height under the first dab).
+  let terrainFlattenTarget = 0
+  // True between BeginUndoGroup and EndUndoGroup so 'end' always closes the
+  // group even if the brush was disarmed mid-stroke (which would otherwise leak
+  // an open group and wedge undo).
+  let terrainStrokeOpen = false
 
   // Diagnostics: top-left overlay + in-canvas heartbeat (F9). Verbose logging
   // drops the log threshold to 'debug' so per-frame/per-asset traces are
@@ -419,6 +438,8 @@
   // opt-in). The Go side (update_app.go) owns the GitHub query + download +
   // elevated relaunch; this drives the UI and the dirty-state guard.
   let appVersion: string = $state('dev')
+  // Help → About dialog (version + author + credits). Read-only; no Go calls.
+  let showAboutDialog: boolean = $state(false)
   let showUpdateDialog: boolean = $state(false)
   let updateResult: update.CheckResult | null = $state(null)
   let updateError: string = $state('')
@@ -729,6 +750,7 @@
       scene.onPick(handlePick)
       scene.onTerrainPick(handleTerrainPick)
       scene.onPlacementPick(handlePlacementPick)
+      scene.onTerrainBrushStroke(handleTerrainBrushStroke)
       // Re-apply persisted diagnostics / verbose-logging settings now that the
       // scene + logger exist.
       scene.setDiagnosticsMode(diagnosticsOn)
@@ -889,12 +911,19 @@
       bumpEvent(ENTITY_EVENT)
       if (!payload) return
       if (payload.kind === 'terrain') {
-        // Tileset swap (initial Apply, Undo, or Redo) — palette + per-tile
-        // texture indices have changed. Rebuild the terrain renderer's atlas
-        // + minimap so the viewport reflects the new state. Keep camera so
-        // the undo doesn't yank the user's viewpoint.
-        mapLoadGen += 1
-        await reloadMap({ keepCamera: true })
+        // Only a TILESET SWAP (field "tileset": initial Apply, Undo, or Redo)
+        // needs a full map reload — the palette changed, so the atlas + minimap
+        // must rebake. Keep camera so undo doesn't yank the viewpoint.
+        //
+        // Brush edits (field tile/height/cliff/ramp) must NOT reload here: the
+        // scene-instances terrain listener already re-renders them live
+        // (throttled). A full reloadMap per dab re-placed every unit/doodad/
+        // cliff/water ~40×/s during a drag — the terrain-tool lag + flicker,
+        // worse the more content the map had.
+        if (payload.field === 'tileset') {
+          mapLoadGen += 1
+          await reloadMap({ keepCamera: true })
+        }
         return
       }
       // Entity removed (Delete key, MCP doodads.delete/units.delete, or undo of
@@ -1481,8 +1510,103 @@
       showToast('Open a map before placing doodads', 'error')
       return
     }
+    if (typeId) onTerrainBrushChange(null) // doodad + terrain brush are exclusive
     armedDoodadType = typeId
     scene?.setPlacementMode(!!typeId)
+    // Drive the cursor preview ghost: arming builds/swaps it, disarming drops
+    // it (setPlacementMode(false) also drops it, so the null case is belt-and-
+    // suspenders). doodadTypes is the same index the scene placed the map from.
+    scene?.setPlacementGhost(typeId, doodadTypes as unknown as Record<string, any>)
+  }
+
+  // Terrain Palette → scene wiring. The palette (shown only in Terrain Mode)
+  // reports the armed brush (tool + size/shape/strength + selected tiles) or
+  // null to disarm. We mirror the footprint to the scene's cursor and toggle
+  // brush mode. The scene's mousedown prioritizes brush over the cell-inspect
+  // pick, so both stay enabled in Terrain Mode: a tool selected → drag paints;
+  // no tool → click inspects the cell.
+  function onTerrainBrushChange(brush: TerrainBrush | null) {
+    terrainBrush = brush
+    if (brush) {
+      scene?.setTerrainBrushShape({ radius: brush.radius, shape: brush.shape })
+      scene?.setTerrainBrushMode(true)
+    } else {
+      scene?.setTerrainBrushMode(false)
+    }
+  }
+
+  // A terrain brush stroke: 'start' opens an undo group + paints the first dab,
+  // 'paint' paints each subsequent dab as the cursor crosses cells, 'end' closes
+  // the group. Calls are chained on terrainBrushChain so they apply in order
+  // (BeginUndoGroup must land before any dab, EndUndoGroup after the last).
+  function handleTerrainBrushStroke(cell: TerrainCellInfo | null, phase: 'start' | 'paint' | 'end') {
+    // 'end' must always close an open group, even if the brush was disarmed
+    // mid-stroke (so undo never wedges on a dangling group).
+    if (phase === 'end') {
+      if (!terrainStrokeOpen) return
+      terrainStrokeOpen = false
+      terrainBrushChain = terrainBrushChain.then(() => EndUndoGroup()).catch(() => {})
+      return
+    }
+    const b = terrainBrush
+    if (!b) return
+    if (phase === 'start') {
+      // Always open the group (even on an off-map click) so every dab in the
+      // stroke is grouped; an empty group is dropped by EndUndoGroup.
+      terrainStrokeOpen = true
+      terrainBrushChain = terrainBrushChain.then(() => BeginUndoGroup(brushLabel(b.tool)))
+      if (!cell) return
+      terrainBrushChain = terrainBrushChain
+        .then(async () => {
+          // Flatten needs the height under the first dab as its target level.
+          if (b.tool === 'flatten') {
+            try { terrainFlattenTarget = (await GetTerrainTile(cell.col, cell.row)).height } catch { terrainFlattenTarget = 0 }
+          }
+        })
+        .then(() => applyBrushDab(b, cell))
+        .catch(() => {})
+      return
+    }
+    // phase === 'paint'
+    if (!cell) return
+    terrainBrushChain = terrainBrushChain.then(() => applyBrushDab(b, cell)).catch(() => {})
+  }
+
+  function brushLabel(tool: TerrainBrush['tool']): string {
+    if (tool === 'paint') return 'Paint terrain'
+    if (tool === 'ramp' || tool === 'rampOff') return 'Edit ramp'
+    if (tool === 'cliffSet') return 'Edit cliff'
+    return 'Edit terrain height'
+  }
+
+  // Dispatch one dab to the matching Go brush. col/row are the footprint center.
+  function applyBrushDab(b: TerrainBrush, cell: TerrainCellInfo): Promise<unknown> {
+    const { col, row } = cell
+    switch (b.tool) {
+      case 'paint':
+        return PaintTerrainTile(col, row, b.radius, b.shape, b.groundTileId)
+      case 'raise':
+        return BrushTerrainHeight(col, row, b.radius, b.shape, 'raise', b.strength, 0)
+      case 'lower':
+        return BrushTerrainHeight(col, row, b.radius, b.shape, 'lower', b.strength, 0)
+      case 'flatten':
+        return BrushTerrainHeight(col, row, b.radius, b.shape, 'flatten', 0, terrainFlattenTarget)
+      case 'smooth':
+        return BrushTerrainHeight(col, row, b.radius, b.shape, 'smooth', b.strength, 0)
+      case 'cliffSet': {
+        // The palette's level is relative to the map's default height (0); the
+        // w3e layer baseline is 2, so the absolute target layer is level + 2,
+        // clamped to the valid 0..15 range.
+        const layer = Math.max(0, Math.min(15, b.cliffLevel + 2))
+        return BrushTerrainCliff(col, row, b.radius, b.shape, 'set', layer, b.cliffTileId)
+      }
+      case 'ramp':
+        return BrushTerrainRamp(col, row, b.radius, b.shape, true)
+      case 'rampOff':
+        return BrushTerrainRamp(col, row, b.radius, b.shape, false)
+      default:
+        return Promise.resolve()
+    }
   }
 
   // Place the armed doodad at a clicked ground point. The scene gives us the
@@ -1683,9 +1807,9 @@
     scene?.setTerrainPickMode(terrainPickModeOn)
     if (!terrainPickModeOn) {
       terrainCell = null
-      // Drop the yellow wireframe overlay when leaving terrain mode — the
-      // user has switched to doodad mode and the persistent highlight would
-      // otherwise sit at a cell they're no longer working with.
+      // Leaving Terrain Mode: disarm any armed terrain brush (the palette
+      // unmounts) so the scene exits brush mode, and drop the cell highlight.
+      if (terrainBrush) onTerrainBrushChange(null)
       scene?.setHighlightedCell(null)
     }
   }
@@ -2181,14 +2305,6 @@
         <DropdownMenu.Item onSelect={runMenuAction(close)} disabled={!status.loaded || busy}>
           <span class="flex-1">Close</span>
         </DropdownMenu.Item>
-        <DropdownMenu.Separator />
-        <DropdownMenu.Item
-          onSelect={runMenuAction(checkForUpdatesManual)}
-          title="Check GitHub for a newer wc3-forge release."
-        >
-          <span class="flex-1">Check for Updates…</span>
-          <DropdownMenu.Shortcut>v{appVersion}</DropdownMenu.Shortcut>
-        </DropdownMenu.Item>
       </DropdownMenu.Content>
     </DropdownMenu.Root>
 
@@ -2244,6 +2360,35 @@
               onOverlayToggle={onOverlayToggle}
               onExtraToggle={onExtraToggle}
               onThemeChange={setTheme} />
+
+    <!-- Help menu. Hosts the manual update check (moved here from File) and
+         the About dialog. -->
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger>
+        {#snippet child({ props })}
+          <Button {...props} variant="ghost" size="sm" title="Help menu">
+            Help
+            <ChevronDownIcon class="text-muted-foreground" />
+          </Button>
+        {/snippet}
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content class="min-w-[220px]" align="start">
+        <DropdownMenu.Item
+          onSelect={runMenuAction(checkForUpdatesManual)}
+          title="Check GitHub for a newer wc3-forge release."
+        >
+          <span class="flex-1">Check for Updates…</span>
+          <DropdownMenu.Shortcut>v{appVersion}</DropdownMenu.Shortcut>
+        </DropdownMenu.Item>
+        <DropdownMenu.Separator />
+        <DropdownMenu.Item
+          onSelect={runMenuAction(() => { showAboutDialog = true })}
+          title="About wc3-forge — version, author, and credits."
+        >
+          <span class="flex-1">About wc3-forge</span>
+        </DropdownMenu.Item>
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
 
     <div class="flex-1 truncate text-xs text-muted-foreground">
       {#if status.loaded}
@@ -2378,13 +2523,18 @@
         {/if}
         <CameraOrbitGizmo camera={scene.getCamera()} />
       {/if}
-      <!-- Doodad palette: floating "+" launcher (bottom-left) + panel. Owns
-           its own open state; reports the armed type via onArm so App drives
-           the scene's placement mode and the click-to-place flow. Only mounts
-           with a map loaded — there's nothing to place doodads onto otherwise,
-           and unmounting also disarms/closes it on map close. -->
-      {#if status.loaded}
+      <!-- Doodad palette: floating "+" launcher (bottom-left) + panel. Shown in
+           Doodad Mode only (the terrain palette takes the same slot in Terrain
+           Mode). Reports the armed type via onArm so App drives the scene's
+           placement mode and the click-to-place flow. -->
+      {#if status.loaded && !terrainPickModeOn}
         <DoodadPalette armedTypeId={armedDoodadType} {reforged} onArm={armDoodad} />
+      {/if}
+      <!-- Terrain palette: floating "mountain" launcher (bottom-left). Shown in
+           Terrain Mode only. Reports the armed brush via onChange; App drives
+           the scene's brush mode + the Go brush calls. -->
+      {#if status.loaded && terrainPickModeOn}
+        <TerrainPalette loaded={status.loaded} onChange={onTerrainBrushChange} />
       {/if}
     </section>
 
@@ -2790,6 +2940,44 @@
       onUpdate={startUpdate}
     />
   {/if}
+
+  <!-- Help → About. Static info card: app identity, version, author, and the
+       open-source projects wc3-forge is built on (see CREDITS.md). -->
+  <Dialog.Root bind:open={showAboutDialog}>
+    <Dialog.Content class="max-w-md">
+      <Dialog.Header>
+        <Dialog.Title>About wc3-forge</Dialog.Title>
+        <Dialog.Description>
+          A modern, agent-driven Warcraft III map editor.
+        </Dialog.Description>
+      </Dialog.Header>
+      <div class="space-y-3 text-sm">
+        <div class="flex items-baseline justify-between">
+          <span class="text-muted-foreground">Version</span>
+          <span class="font-medium">v{appVersion}</span>
+        </div>
+        <div class="flex items-baseline justify-between">
+          <span class="text-muted-foreground">Author</span>
+          <span class="font-medium">Stephen Horton</span>
+        </div>
+        <div class="flex items-baseline justify-between">
+          <span class="text-muted-foreground">License</span>
+          <span class="font-medium">GPL-3.0-or-later</span>
+        </div>
+        <p class="text-muted-foreground leading-relaxed">
+          wc3-forge stands on the shoulders of prior open-source work —
+          <span class="text-foreground">HiveWE</span> (Stijn Herfst),
+          <span class="text-foreground">mdx-m3-viewer</span> (Ghostwolf),
+          <span class="text-foreground">CascLib</span> &amp;
+          <span class="text-foreground">StormLib</span> (Ladislav Zezula).
+          See CREDITS.md for the full attribution.
+        </p>
+      </div>
+      <Dialog.Footer>
+        <Button onclick={() => { showAboutDialog = false }}>Close</Button>
+      </Dialog.Footer>
+    </Dialog.Content>
+  </Dialog.Root>
 
   <!-- Unsaved-changes confirmation. Driven by the wc3-forge:close-requested
        event emitted from Go's OnBeforeClose when the user X-es a dirty

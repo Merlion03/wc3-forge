@@ -133,6 +133,24 @@ export namespace forge {
 		    return a;
 		}
 	}
+	export class TerrainTileInfo {
+	    col: number;
+	    row: number;
+	    ground_tile_id: string;
+	    height: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TerrainTileInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.col = source["col"];
+	        this.row = source["row"];
+	        this.ground_tile_id = source["ground_tile_id"];
+	        this.height = source["height"];
+	    }
+	}
 
 }
 
@@ -776,6 +794,20 @@ export namespace main {
 		    }
 		    return a;
 		}
+	}
+	export class TerrainPaletteThumbs {
+	    ground: Record<string, string>;
+	    cliff: Record<string, string>;
+	
+	    static createFrom(source: any = {}) {
+	        return new TerrainPaletteThumbs(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ground = source["ground"];
+	        this.cliff = source["cliff"];
+	    }
 	}
 	export class TileInfoDTO {
 	    fourcc: string;
