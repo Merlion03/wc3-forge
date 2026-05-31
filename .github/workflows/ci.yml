@@ -112,8 +112,15 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
+      # -race is what actually PROVES the "two concurrent writers (GUI + bridge)
+      # on one Session" safety bar — the project's own history shows count-only
+      # checks produce false "it works" confirmations. The race detector needs
+      # cgo; the windows-2025 runner ships mingw-w64 gcc, so CGO_ENABLED=1 is set
+      # explicitly here (it would otherwise be 0 in some toolchain configs).
       - name: Go test
-        run: go test ./...
+        env:
+          CGO_ENABLED: 1
+        run: go test -race ./...
 
       - name: Go build
         run: go build ./...

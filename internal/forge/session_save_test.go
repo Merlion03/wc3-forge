@@ -16,29 +16,9 @@ import (
 // reopen the map, and confirm the new position survived. Also verifies dirty
 // listeners fire on the right transitions.
 func TestMoveUnit_Save_RoundTrip(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-
-	// Copy the extracted map to a tempdir so we don't disturb the source.
-	tmp := t.TempDir()
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		t.Fatalf("read fixture dir: %v", err)
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(src, e.Name()))
-		if err != nil {
-			t.Fatalf("read %s: %v", e.Name(), err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644); err != nil {
-			t.Fatalf("write %s: %v", e.Name(), err)
-		}
-	}
+	// Copy the committed extracted-map fixture to a tempdir so we don't disturb
+	// the source.
+	tmp := copyCommittedMapFixture(t)
 
 	// Open via a fresh Session (avoid the global to keep this test isolated).
 	s := &Session{}
@@ -116,19 +96,7 @@ func TestMoveUnit_Save_RoundTrip(t *testing.T) {
 // change (e.g. user clicked into the field and Escape-blurred without typing),
 // so without this short-circuit the Save pill flips to amber for no real edit.
 func TestMoveUnit_NoOpDoesNotDirty(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-	tmp := t.TempDir()
-	entries, _ := os.ReadDir(src)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
-		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
-	}
+	tmp := copyCommittedMapFixture(t)
 	s := &Session{}
 	var dirtyHistory []bool
 	s.OnDirtyChanged(func(d bool) { dirtyHistory = append(dirtyHistory, d) })
@@ -170,19 +138,7 @@ func TestMoveUnit_NoOpDoesNotDirty(t *testing.T) {
 // TestMoveUnit_UnknownCN asserts MoveUnit surfaces a clear error for a
 // creation_number that doesn't exist (and doesn't mark the session dirty).
 func TestMoveUnit_UnknownCN(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-	tmp := t.TempDir()
-	entries, _ := os.ReadDir(src)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
-		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
-	}
+	tmp := copyCommittedMapFixture(t)
 	s := &Session{}
 	if err := s.Open(tmp); err != nil {
 		t.Fatalf("Open: %v", err)
@@ -204,19 +160,7 @@ func TestMoveUnit_UnknownCN(t *testing.T) {
 // Also verifies the no-op short-circuit does NOT fire entity-changed (no
 // real mutation, no need to repaint).
 func TestMoveUnit_FiresEntityChanged(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-	tmp := t.TempDir()
-	entries, _ := os.ReadDir(src)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
-		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
-	}
+	tmp := copyCommittedMapFixture(t)
 	s := &Session{}
 	var changes []EntityChange
 	s.OnEntityChanged(func(c EntityChange) { changes = append(changes, c) })
@@ -277,27 +221,7 @@ func TestMoveUnit_FiresEntityChanged(t *testing.T) {
 // round-trip shape — the dirtyInfo flag, MutateInfo path, and Save's
 // w3i.Encode dispatch all light up here.
 func TestMutateInfo_Save_RoundTrip(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-	tmp := t.TempDir()
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		t.Fatalf("read fixture dir: %v", err)
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(src, e.Name()))
-		if err != nil {
-			t.Fatalf("read %s: %v", e.Name(), err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644); err != nil {
-			t.Fatalf("write %s: %v", e.Name(), err)
-		}
-	}
+	tmp := copyCommittedMapFixture(t)
 
 	s := &Session{}
 	var dirtyHistory []bool
@@ -611,27 +535,7 @@ func TestApplyInfoUpdates_CustomLightTileset(t *testing.T) {
 // TestRotateUnit_Save_RoundTrip mirrors TestMoveUnit_Save_RoundTrip but for
 // rotation. Open, mutate Rotation, save, reopen, assert the new angle survived.
 func TestRotateUnit_Save_RoundTrip(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-	tmp := t.TempDir()
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		t.Fatalf("read fixture dir: %v", err)
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(src, e.Name()))
-		if err != nil {
-			t.Fatalf("read %s: %v", e.Name(), err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644); err != nil {
-			t.Fatalf("write %s: %v", e.Name(), err)
-		}
-	}
+	tmp := copyCommittedMapFixture(t)
 
 	s := &Session{}
 	var dirtyHistory []bool
@@ -688,27 +592,7 @@ func TestRotateUnit_Save_RoundTrip(t *testing.T) {
 // scale. The key assertion is that scaleRaw invalidation works end-to-end:
 // the re-opened entity must carry the NEW scale, not the old on-disk bits.
 func TestScaleUnit_Save_RoundTrip(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-	tmp := t.TempDir()
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		t.Fatalf("read fixture dir: %v", err)
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(src, e.Name()))
-		if err != nil {
-			t.Fatalf("read %s: %v", e.Name(), err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644); err != nil {
-			t.Fatalf("write %s: %v", e.Name(), err)
-		}
-	}
+	tmp := copyCommittedMapFixture(t)
 
 	s := &Session{}
 	var dirtyHistory []bool
@@ -766,19 +650,7 @@ func TestScaleUnit_Save_RoundTrip(t *testing.T) {
 
 // TestRotateUnit_NoOp_DoesNotDirty asserts same-value RotateUnit is a no-op.
 func TestRotateUnit_NoOp_DoesNotDirty(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-	tmp := t.TempDir()
-	entries, _ := os.ReadDir(src)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
-		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
-	}
+	tmp := copyCommittedMapFixture(t)
 	s := &Session{}
 	var dirtyHistory []bool
 	s.OnDirtyChanged(func(d bool) { dirtyHistory = append(dirtyHistory, d) })
@@ -806,19 +678,7 @@ func TestRotateUnit_NoOp_DoesNotDirty(t *testing.T) {
 // TestRotateUnit_FiresEntityChanged asserts RotateUnit emits an entity-changed
 // event with Field="rotation" and the correct Rotation value in the payload.
 func TestRotateUnit_FiresEntityChanged(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-	tmp := t.TempDir()
-	entries, _ := os.ReadDir(src)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
-		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
-	}
+	tmp := copyCommittedMapFixture(t)
 	s := &Session{}
 	var changes []EntityChange
 	s.OnEntityChanged(func(c EntityChange) { changes = append(changes, c) })
@@ -854,19 +714,7 @@ func TestRotateUnit_FiresEntityChanged(t *testing.T) {
 // TestScaleUnit_FiresEntityChanged asserts ScaleUnit emits an entity-changed
 // event with Field="scale" and the correct Scale values in the payload.
 func TestScaleUnit_FiresEntityChanged(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-	tmp := t.TempDir()
-	entries, _ := os.ReadDir(src)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
-		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
-	}
+	tmp := copyCommittedMapFixture(t)
 	s := &Session{}
 	var changes []EntityChange
 	s.OnEntityChanged(func(c EntityChange) { changes = append(changes, c) })
@@ -967,27 +815,7 @@ func mustRead(t *testing.T, path string) []byte {
 // confirm both .w3e and .w3i picked up the new tileset letter + palette and
 // every Tilepoint.GroundTexture is in the new range.
 func TestSwapTileset_Save_RoundTrip(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-	tmp := t.TempDir()
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		t.Fatalf("read fixture dir: %v", err)
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(src, e.Name()))
-		if err != nil {
-			t.Fatalf("read %s: %v", e.Name(), err)
-		}
-		if err := os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644); err != nil {
-			t.Fatalf("write %s: %v", e.Name(), err)
-		}
-	}
+	tmp := copyCommittedMapFixture(t)
 
 	s := &Session{}
 	if err := s.Open(tmp); err != nil {
@@ -1057,19 +885,7 @@ func TestSwapTileset_Save_RoundTrip(t *testing.T) {
 // undo must preserve the per-tile values that were ALREADY using the old
 // palette (not "any tile pointing at slot 0 → slot 0" — actual originals).
 func TestSwapTileset_UndoRedo(t *testing.T) {
-	src := `C:\Users\4step\projects\wc3-survival-game\map\extracted`
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("fixture %q not available: %v", src, err)
-	}
-	tmp := t.TempDir()
-	entries, _ := os.ReadDir(src)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
-		_ = os.WriteFile(filepath.Join(tmp, e.Name()), b, 0o644)
-	}
+	tmp := copyCommittedMapFixture(t)
 	s := &Session{}
 	if err := s.Open(tmp); err != nil {
 		t.Fatalf("Open: %v", err)

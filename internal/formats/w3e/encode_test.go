@@ -3,43 +3,51 @@ package w3e
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
-// TestRoundTrip_v1_6 takes the real Reforged-era survival map fixture used by
-// the Parse test, re-encodes it, and asserts byte-for-byte equality. A drift
-// of even one bit here means a tileset swap would corrupt the map on save.
-func TestRoundTrip_v1_6(t *testing.T) {
-	data, err := os.ReadFile(fixturePath)
-	if err != nil {
-		t.Skipf("fixture not available: %v", err)
-	}
-
-	f, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-
-	encoded, err := Encode(f)
-	if err != nil {
-		t.Fatalf("Encode: %v", err)
-	}
-
-	if !bytes.Equal(encoded, data) {
-		// Locate the first divergence so the failure is debuggable.
-		n := len(data)
-		if len(encoded) < n {
-			n = len(encoded)
-		}
-		var firstDiff = -1
-		for i := 0; i < n; i++ {
-			if encoded[i] != data[i] {
-				firstDiff = i
-				break
+// TestRoundTrip_Fixtures takes each committed, self-contained terrain fixture
+// (both wire layouts — v12 Reforged and v11 Classic), re-encodes it, and
+// asserts byte-for-byte equality. A drift of even one bit here means a tileset
+// swap would corrupt the map on save. The fixtures live in testdata/ so this
+// proof RUNS on a clean checkout / in CI rather than Skipf'ing on an
+// out-of-repo path.
+func TestRoundTrip_Fixtures(t *testing.T) {
+	for _, path := range []string{fixtureV12, fixtureV11} {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read fixture %q: %v", path, err)
 			}
-		}
-		t.Fatalf("round-trip drift: encoded %d bytes, original %d bytes, first diff at byte %d",
-			len(encoded), len(data), firstDiff)
+
+			f, err := Parse(data)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+
+			encoded, err := Encode(f)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+
+			if !bytes.Equal(encoded, data) {
+				// Locate the first divergence so the failure is debuggable.
+				n := len(data)
+				if len(encoded) < n {
+					n = len(encoded)
+				}
+				var firstDiff = -1
+				for i := 0; i < n; i++ {
+					if encoded[i] != data[i] {
+						firstDiff = i
+						break
+					}
+				}
+				t.Fatalf("round-trip drift: encoded %d bytes, original %d bytes, first diff at byte %d",
+					len(encoded), len(data), firstDiff)
+			}
+		})
 	}
 }
 
@@ -48,9 +56,9 @@ func TestRoundTrip_v1_6(t *testing.T) {
 // Tilepoint.GroundTexture / CliffTexture, then assert Parse(Encode(f)) sees
 // exactly the post-swap state.
 func TestRoundTrip_AfterSwap(t *testing.T) {
-	data, err := os.ReadFile(fixturePath)
+	data, err := os.ReadFile(fixtureV12)
 	if err != nil {
-		t.Skipf("fixture not available: %v", err)
+		t.Fatalf("read fixture %q: %v", fixtureV12, err)
 	}
 	f, err := Parse(data)
 	if err != nil {

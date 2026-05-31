@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/mpq"
@@ -60,27 +61,13 @@ func TestEncodeRoundTripSecretValley(t *testing.T) {
 	roundTripMap(t, `C:\Users\4step\Documents\Warcraft III\Maps\Download\Season8\(2)SecretValley_S2_v2.0.w3x`)
 }
 
-// TestEncodeRoundTripSurvival exercises the survival-game source map. It's
-// the most likely to diverge if a future parser/encoder tweak breaks
-// pre-existing maps in the user's working set.
+// TestEncodeRoundTripSurvival exercises a real, committed war3map.wtg lifted
+// from the user's GPL survival map. This proves Parse → Encode is byte-equal
+// on a real-world Reforged Lua map (the FFB / SecretValley tests above cover
+// JASS maps but Skipf when their .w3x isn't on the machine). The fixture is
+// small (678 bytes) and lives in testdata/, so this RUNS on a clean checkout.
 func TestEncodeRoundTripSurvival(t *testing.T) {
-	candidates := []string{
-		`C:\Users\4step\projects\wc3-survival-game\map\survival.w3x`,
-		`C:\Users\4step\projects\wc3-survival-game\map\extracted\war3map.wtg`,
-	}
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			// If we got a raw .wtg file path (folder-extracted map), test it
-			// directly instead of going through MPQ.
-			if isWTGFile(p) {
-				roundTripRawWTG(t, p)
-				return
-			}
-			roundTripMap(t, p)
-			return
-		}
-	}
-	t.Skip("no survival-game fixture available")
+	roundTripRawWTG(t, filepath.Join("testdata", "wc3_survival_v1_6.wtg"))
 }
 
 // TestEncodeMinimalRoundTrip exercises Encode against a hand-built minimal
@@ -187,13 +174,6 @@ func min0(x, cap int) int {
 		return cap
 	}
 	return x
-}
-
-func isWTGFile(p string) bool {
-	if len(p) < 4 {
-		return false
-	}
-	return p[len(p)-4:] == ".wtg"
 }
 
 func roundTripRawWTG(t *testing.T, path string) {

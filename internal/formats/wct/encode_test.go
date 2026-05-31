@@ -3,6 +3,7 @@ package wct
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/mpq"
@@ -89,6 +90,55 @@ func bindForTest(t *wtg.Triggers, w *File) {
 	}
 }
 
+// roundTripRawWCT reads a raw war3map.wct + its sibling war3map.wtg from disk
+// (a folder-extracted map) and asserts Parse(.wct) → Encode is byte-equal. The
+// encoder needs the wtg to recover the per-trigger blob order. Unlike
+// roundTripWCT (which Skipf's on a missing out-of-repo .w3x), this reads
+// committed testdata fixtures and fails loudly if they're absent.
+func roundTripRawWCT(t *testing.T, wctPath, wtgPath string) {
+	t.Helper()
+	origWCT, err := os.ReadFile(wctPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", wctPath, err)
+	}
+	f, err := Parse(origWCT)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	origWTG, err := os.ReadFile(wtgPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", wtgPath, err)
+	}
+	td, err := wtg.ParseTriggerData(data.TriggerDataTXT)
+	if err != nil {
+		t.Fatalf("ParseTriggerData: %v", err)
+	}
+	trig, err := wtg.Parse(origWTG, td.ArgumentCounts)
+	if err != nil {
+		t.Fatalf("wtg.Parse: %v", err)
+	}
+	bindForTest(trig, f)
+	out, err := Encode(f, trig)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !bytes.Equal(origWCT, out) {
+		div := firstDiff(origWCT, out)
+		t.Fatalf("round-trip not byte-equal: orig=%d bytes, out=%d bytes, first diff @ byte %d", len(origWCT), len(out), div)
+	}
+}
+
+// TestEncodeWCTRoundTripSurvival proves Parse(.wct) → Encode is byte-equal on a
+// real, committed war3map.wct lifted from the user's GPL survival map (a
+// Reforged Lua map). The fixtures are small (.wct 310 B, .wtg 678 B) and live
+// in testdata/, so this RUNS on a clean checkout — the FFB/SecretValley tests
+// above Skipf when their .w3x isn't on the machine.
+func TestEncodeWCTRoundTripSurvival(t *testing.T) {
+	roundTripRawWCT(t,
+		filepath.Join("testdata", "wc3_survival_v1_6.wct"),
+		filepath.Join("testdata", "wc3_survival_v1_6.wtg"))
+}
+
 func TestEncodeWCTRoundTripFFB(t *testing.T) {
 	roundTripWCT(t, `C:\Users\4step\Documents\Warcraft III\Maps\Download\Enfo FFB - v2.64f.w3x`)
 }
@@ -102,8 +152,8 @@ func TestEncodeWCTRoundTripSecretValley(t *testing.T) {
 func TestEncodeWCTMinimal(t *testing.T) {
 	// Build a wct File manually + a matching wtg with one trigger.
 	f := &File{
-		Version:    0x80000004,
-		SubVersion: 1,
+		Version:           0x80000004,
+		SubVersion:        1,
 		GlobalJASSComment: "Global JASS header (any text)",
 		GlobalJASS:        "function Foo takes nothing returns nothing\nendfunction\n",
 		CustomTexts:       []string{"// my custom script\n"},
