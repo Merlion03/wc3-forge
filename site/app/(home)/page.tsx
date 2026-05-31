@@ -1,6 +1,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { DownloadButton } from "@/components/download-button";
+import { Badge } from "@/components/ui/warcraftcn/badge";
 import { Button } from "@/components/ui/warcraftcn/button";
 import {
   Card,
@@ -54,6 +55,14 @@ export default function Home() {
           src="/logo.png"
           width={96}
         />
+        <div className="flex items-center gap-2">
+          <Badge faction="alliance" size="sm">
+            Alpha
+          </Badge>
+          <Badge size="sm" variant="secondary">
+            Go + Wails + MCP
+          </Badge>
+        </div>
         <h1 className="fantasy max-w-3xl font-bold text-4xl text-amber-300 md:text-6xl">
           A Warcraft III map editor, driven by Claude Code
         </h1>

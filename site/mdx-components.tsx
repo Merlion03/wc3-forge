@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/warcraftcn/card";
 import { Checkbox } from "@/components/ui/warcraftcn/checkbox";
 import { Cursor } from "@/components/ui/warcraftcn/cursor";
+import { Showcase } from "@/components/docs/showcase";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -79,6 +80,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     Accordion: FdAccordion,
     Accordions,
     Cursor,
+    Showcase,
     WcButton: Button,
     WcBadge: Badge,
     WcAvatar: Avatar,
