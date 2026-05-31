@@ -1494,7 +1494,7 @@
   function brushLabel(tool: TerrainBrush['tool']): string {
     if (tool === 'paint') return 'Paint terrain'
     if (tool === 'ramp' || tool === 'rampOff') return 'Edit ramp'
-    if (tool === 'cliffRaise' || tool === 'cliffLower') return 'Edit cliff'
+    if (tool === 'cliffSet') return 'Edit cliff'
     return 'Edit terrain height'
   }
 
@@ -1512,10 +1512,13 @@
         return BrushTerrainHeight(col, row, b.radius, b.shape, 'flatten', 0, terrainFlattenTarget)
       case 'smooth':
         return BrushTerrainHeight(col, row, b.radius, b.shape, 'smooth', b.strength, 0)
-      case 'cliffRaise':
-        return BrushTerrainCliff(col, row, b.radius, b.shape, 'raise', b.cliffLevels, b.cliffTileId)
-      case 'cliffLower':
-        return BrushTerrainCliff(col, row, b.radius, b.shape, 'lower', b.cliffLevels, b.cliffTileId)
+      case 'cliffSet': {
+        // The palette's level is relative to the map's default height (0); the
+        // w3e layer baseline is 2, so the absolute target layer is level + 2,
+        // clamped to the valid 0..15 range.
+        const layer = Math.max(0, Math.min(15, b.cliffLevel + 2))
+        return BrushTerrainCliff(col, row, b.radius, b.shape, 'set', layer, b.cliffTileId)
+      }
       case 'ramp':
         return BrushTerrainRamp(col, row, b.radius, b.shape, true)
       case 'rampOff':

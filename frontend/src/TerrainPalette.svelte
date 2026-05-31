@@ -23,7 +23,7 @@
   export type TerrainTool =
     | 'paint'
     | 'raise' | 'lower' | 'flatten' | 'smooth'
-    | 'cliffRaise' | 'cliffLower'
+    | 'cliffSet'
     | 'ramp' | 'rampOff'
   export interface TerrainBrush {
     tool: TerrainTool
@@ -32,7 +32,9 @@
     strength: number
     groundTileId: string
     cliffTileId: string
-    cliffLevels: number
+    // Cliff level relative to the map's default height (0 = default; + raises,
+    // - lowers). App maps this to the absolute w3e layer.
+    cliffLevel: number
   }
 
   let {
@@ -60,8 +62,9 @@
   let radius = $state(1)
   let shape: 'circle' | 'square' = $state('circle')
   let strength = $state(16)
-  // How many cliff levels Raise/Lower move per application (the "how high/low").
-  let cliffLevels = $state(1)
+  // Target cliff level relative to the map's default height: 0 = default,
+  // positive raises, negative lowers. The Cliff tool sets the footprint to this.
+  let cliffLevel = $state(1)
 
   function rgb(c: number[] | undefined): string {
     if (!c || c.length < 3) return 'rgb(110,110,110)'
@@ -131,7 +134,7 @@
   }
   function pickCliff(fourcc: string) {
     selectedCliff = fourcc
-    if (activeTool !== 'cliffRaise' && activeTool !== 'cliffLower') activeTool = 'cliffRaise'
+    activeTool = 'cliffSet'
   }
 
   // The armed brush, recomputed from UI state. Reported to App via the effect
@@ -146,7 +149,7 @@
       strength,
       groundTileId: selectedGround,
       cliffTileId: selectedCliff,
-      cliffLevels,
+      cliffLevel,
     }
   })
   $effect(() => {
@@ -240,13 +243,12 @@
         <div class="section">
           <div class="section-title">Cliffs</div>
           <label class="ctl">
-            <span>Levels</span>
-            <input type="range" min="1" max="12" step="1" bind:value={cliffLevels} />
-            <span class="ctl-val">{cliffLevels}</span>
+            <span>Level</span>
+            <input type="range" min="-2" max="12" step="1" bind:value={cliffLevel} />
+            <span class="ctl-val">{cliffLevel > 0 ? '+' : ''}{cliffLevel}</span>
           </label>
           <div class="tool-row">
-            <button class="tool-btn" class:armed={activeTool === 'cliffRaise'} onclick={() => pickTool('cliffRaise')}>Raise</button>
-            <button class="tool-btn" class:armed={activeTool === 'cliffLower'} onclick={() => pickTool('cliffLower')}>Lower</button>
+            <button class="tool-btn" class:armed={activeTool === 'cliffSet'} onclick={() => pickTool('cliffSet')}>Cliff</button>
             <button class="tool-btn" class:armed={activeTool === 'ramp'} onclick={() => pickTool('ramp')}>Ramp</button>
             <button class="tool-btn" class:armed={activeTool === 'rampOff'} onclick={() => pickTool('rampOff')}>No Ramp</button>
           </div>
@@ -255,7 +257,7 @@
               {#each cliffs as c (c.fourcc)}
                 <button
                   class="tile"
-                  class:armed={(activeTool === 'cliffRaise' || activeTool === 'cliffLower') && selectedCliff === c.fourcc}
+                  class:armed={activeTool === 'cliffSet' && selectedCliff === c.fourcc}
                   title={`${c.fourcc}${c.texture ? ' — ' + c.texture : ''}`}
                   onclick={() => pickCliff(c.fourcc)}
                 >
