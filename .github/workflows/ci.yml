@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2025
     # Cap Go build/compile parallelism. `go test ./...` otherwise fans out one
     # compiler per core; the wails/webview2/casc dependency tree then reserves
     # enough address space across those concurrent processes to blow the
