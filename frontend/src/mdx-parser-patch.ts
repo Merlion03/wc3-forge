@@ -87,6 +87,13 @@ import * as MV_ns from 'mdx-m3-viewer'
 // in commit dc0aaa0 — that fix lived in scene-instances.ts as a re-patch;
 // we now consolidate it here at the source.
 import animationMapModule from 'mdx-m3-viewer/dist/cjs/parsers/mdlx/animationmap.js'
+// Runtime handler classes (deep imports, same approach as animationmap above).
+// We patch their render/bind so the HD path respects per-layer blending — the
+// lib's HD batch render hardcodes blend-off + depth-write-on, which turns
+// additive/blended HD layers (e.g. the Circle of Power's glow rings) into
+// opaque dark quads. See patchHdBlending below.
+import batchGroupModule from 'mdx-m3-viewer/dist/cjs/viewer/handlers/mdx/batchgroup.js'
+import geosetModule from 'mdx-m3-viewer/dist/cjs/viewer/handlers/mdx/geoset.js'
 
 const MV: any = (MV_ns as any).default ?? MV_ns
 const animationMap: Record<string, [string, any]> | null =
@@ -402,6 +409,67 @@ export function patchMdxParser(): void {
         }
       }
     }
+  }
+
+  // ---- HD per-layer blending (Circle-of-Power glow rings, etc.) ----
+  //
+  // The lib's HD batch render (handlers/mdx/batchgroup.js) hardcodes, once per
+  // batch group: `gl.disable(BLEND); gl.depthMask(true)` — then draws every HD
+  // batch with that state, ignoring each layer's filterMode for blending (it
+  // only uses filterMode in the shader, for the 1-bit-alpha discard). So HD
+  // materials authored as Blend/Additive (filterMode >= 2) — the Circle of
+  // Power's AuraRune glow rings, magic effects, etc. — render as OPAQUE, depth-
+  // writing quads. A dark-with-alpha glow texture then paints big black quads
+  // over the model and terrain. (The SD path is fine: it calls layer.bind(),
+  // which sets per-layer blend.)
+  //
+  // The runtime Layer already precomputes `.blended/.blendSrc/.blendDst` and
+  // `.depthMaskValue` from filterMode. So: in BatchGroup.render, before the lib
+  // draws, stash the diffuse layer's blend state on each HD batch's geoset;
+  // then in Geoset.bindHd (called per batch immediately before the draw) apply
+  // it. Opaque/1-bit materials (filterMode 0/1 — including trees) resolve to
+  // blended=false + depthMask=true, i.e. exactly the lib's current behavior, so
+  // only genuinely-blended HD layers change.
+  const BatchGroup: any = (batchGroupModule as any)?.default ?? batchGroupModule
+  const Geoset: any = (geosetModule as any)?.default ?? geosetModule
+  if (BatchGroup?.prototype && Geoset?.prototype && !(Geoset.prototype as any).__wc3ForgeHdBlend) {
+    const origBindHd = Geoset.prototype.bindHd
+    Geoset.prototype.bindHd = function patchedBindHd(this: any, shader: any, skinningType: any, coordId: any): void {
+      origBindHd.call(this, shader, skinningType, coordId)
+      const b = this.__wc3HdBlend
+      if (b) {
+        const gl = this.model.viewer.gl
+        if (b.blended) {
+          gl.enable(gl.BLEND)
+          gl.blendFunc(b.src, b.dst)
+        } else {
+          gl.disable(gl.BLEND)
+        }
+        gl.depthMask(b.depthMask)
+      }
+    }
+
+    const origRender = BatchGroup.prototype.render
+    BatchGroup.prototype.render = function patchedRender(this: any, instance: any): void {
+      // Only HD batch groups need the fix; SD already blends via layer.bind().
+      if (this.isHd) {
+        const batches = this.model?.batches || []
+        for (const idx of this.objects) {
+          const batch = batches[idx]
+          const dl = batch?.material?.layers?.[0] // runtime diffuse layer
+          if (batch?.geoset && dl) {
+            batch.geoset.__wc3HdBlend = {
+              blended: !!dl.blended,
+              src: dl.blendSrc,
+              dst: dl.blendDst,
+              depthMask: !!dl.depthMaskValue,
+            }
+          }
+        }
+      }
+      return origRender.call(this, instance)
+    }
+    ;(Geoset.prototype as any).__wc3ForgeHdBlend = true
   }
 
   ;(globalThis as any)[PATCHED_FLAG] = true
