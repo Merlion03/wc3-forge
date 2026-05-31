@@ -67,9 +67,15 @@ export function DeleteCustomObject(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteCustomUnit(arg1:string):Promise<void>;
 
+export function DeleteDoodad(arg1:number):Promise<void>;
+
+export function DeleteSelection():Promise<number>;
+
 export function DeleteTriggerECA(arg1:number,arg2:Array<number>):Promise<main.TriggerMutationResultDTO>;
 
 export function DeleteTriggerNode(arg1:number):Promise<main.TriggerMutationResultDTO>;
+
+export function DeleteUnit(arg1:number):Promise<void>;
 
 export function DiscardTo(arg1:number):Promise<void>;
 

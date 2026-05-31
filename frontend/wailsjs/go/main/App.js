@@ -122,12 +122,24 @@ export function DeleteCustomUnit(arg1) {
   return window['go']['main']['App']['DeleteCustomUnit'](arg1);
 }
 
+export function DeleteDoodad(arg1) {
+  return window['go']['main']['App']['DeleteDoodad'](arg1);
+}
+
+export function DeleteSelection() {
+  return window['go']['main']['App']['DeleteSelection']();
+}
+
 export function DeleteTriggerECA(arg1, arg2) {
   return window['go']['main']['App']['DeleteTriggerECA'](arg1, arg2);
 }
 
 export function DeleteTriggerNode(arg1) {
   return window['go']['main']['App']['DeleteTriggerNode'](arg1);
+}
+
+export function DeleteUnit(arg1) {
+  return window['go']['main']['App']['DeleteUnit'](arg1);
 }
 
 export function DiscardTo(arg1) {

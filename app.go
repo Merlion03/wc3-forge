@@ -1380,6 +1380,66 @@ func (a *App) MoveDoodad(creationNumber uint32, x, y, z float32) error {
 	return forge.Current.MoveDoodad(creationNumber, x, y, z)
 }
 
+// DeleteDoodad removes the doodad with the given creation_number from the map.
+// Mirrors the MCP doodads.delete wire contract; the session mutator snapshots
+// the removed record for undo and emits an entity-changed event with Field
+// "deleted" (which the viewport listens for to detach the rendered instance).
+func (a *App) DeleteDoodad(creationNumber uint32) error {
+	return forge.Current.DeleteDoodad(creationNumber)
+}
+
+// DeleteUnit removes the unit with the given creation_number from the map.
+// Companion to DeleteDoodad with the same undo + entity-changed("deleted")
+// contract.
+func (a *App) DeleteUnit(creationNumber uint32) error {
+	return forge.Current.DeleteUnit(creationNumber)
+}
+
+// DeleteSelection removes every unit and doodad in the current selection,
+// batched into a single undo group, then clears the selection. Selection
+// entries of other kinds (regions/triggers/etc.) are ignored. Returns the
+// number of entities actually deleted; if any individual delete errored, the
+// first such error is returned alongside the partial count (the group is still
+// closed and the selection still cleared). Bound to the Delete key in the
+// viewport.
+func (a *App) DeleteSelection() (int, error) {
+	sel := forge.Current.Selection()
+	type target struct {
+		kind string
+		id   uint32
+	}
+	targets := make([]target, 0, len(sel.Items))
+	for _, it := range sel.Items {
+		if it.Kind == "unit" || it.Kind == "doodad" {
+			targets = append(targets, target{it.Kind, it.ID})
+		}
+	}
+	if len(targets) == 0 {
+		return 0, nil
+	}
+	forge.Current.BeginUndoGroup("Delete")
+	deleted := 0
+	var firstErr error
+	for _, t := range targets {
+		var err error
+		if t.kind == "unit" {
+			err = forge.Current.DeleteUnit(t.id)
+		} else {
+			err = forge.Current.DeleteDoodad(t.id)
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		deleted++
+	}
+	forge.Current.EndUndoGroup()
+	forge.Current.SetSelection(nil, -1)
+	return deleted, firstErr
+}
+
 // ReportDiagnostics receives the frontend's live render/camera/GL diagnostics
 // snapshot (raw JSON) and caches it on the session so the diagnostics.get MCP
 // handler can read it back. Called a few times a second by the viewport so an

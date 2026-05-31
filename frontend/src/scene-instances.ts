@@ -689,6 +689,14 @@ export interface SceneAPI {
    */
   addDoodadLive(d: any, types: Record<string, DoodadTypeInfo>): Promise<boolean>
   /**
+   * Whether a unit/doodad creation_number currently has a rendered instance in
+   * the scene. Used by the entity-changed `created` handler to skip a redundant
+   * reload when the instance was already added live (e.g. the Doodad Palette's
+   * own addDoodadLive). Returns false for kinds without per-cn MDX instances
+   * (slocs, path blockers) and for any other kind.
+   */
+  hasInstance(kind: string, cn: number): boolean
+  /**
    * Set the currently-highlighted terrain cell (yellow wireframe overlay).
    * `null` clears the highlight. The cell persists across frames until
    * replaced or cleared — caller controls when to drop it (e.g. on map open
@@ -3023,6 +3031,34 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     ;(inst as any).setLocation([x, y, z])
   }
 
+  // Remove a deleted entity's rendered instance from the scene. Detaches the
+  // mdx-m3-viewer instance (drops it from the render walk) and clears the
+  // per-cn bookkeeping the same way clearInstances() does on map reload, but
+  // for a single entity. Fired from the entity-changed handler on Field
+  // "deleted" so GUI deletes, the MCP doodads.delete / units.delete tools, and
+  // undo of a create all converge on the same teardown.
+  function removeEntityImpl(kind: string, cn: number): void {
+    if (kind === 'unit') {
+      const inst = unitInstances.get(cn)
+      if (inst) {
+        try { inst.detach() } catch { /* already detached */ }
+        unitInstances.delete(cn)
+      }
+      manualAnimCns.delete(cn)
+    } else if (kind === 'doodad') {
+      const inst = doodadInstances.get(cn)
+      if (inst) {
+        try { inst.detach() } catch { /* already detached */ }
+        doodadInstances.delete(cn)
+        doodadInstancesToReroll.delete(inst)
+      }
+      doodadCategoryByCn.delete(cn)
+      // A removed doodad may have been the last of its category — refresh the
+      // present-categories list so the View menu drops the now-empty entry.
+      recomputeDoodadCategories()
+    }
+  }
+
   // Subscribe to Go-side entity-change events. Any mutation that fires
   // OnEntityChanged (MoveUnit + MoveDoodad today; future SetRotation/etc.)
   // flows through here, regardless of whether the mutator was the JS
@@ -3215,6 +3251,8 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (!s || s.length < 3) return
       const inst = kind === 'unit' ? unitInstances.get(payload.id) : doodadInstances.get(payload.id)
       if (inst) applyScale(inst, s)
+    } else if (payload.field === 'deleted') {
+      removeEntityImpl(kind, payload.id)
     } else if (payload.field === 'sky_model' && kind === 'info') {
       // Sky changed via undo/redo/discard (or any source — picker, MCP).
       // The EntityChange payload doesn't carry a string, so refetch the
@@ -3901,6 +3939,11 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       // loadMap builds.
       recomputeDoodadCategories()
       return true
+    },
+    hasInstance(kind: string, cn: number) {
+      if (kind === 'unit') return unitInstances.has(cn)
+      if (kind === 'doodad') return doodadInstances.has(cn)
+      return false
     },
     setHighlightedCell(cell: { col: number; row: number } | null) {
       cellHighlight?.setCell(cell)
