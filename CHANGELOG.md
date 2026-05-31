@@ -4,6 +4,40 @@ All notable changes to wc3-forge are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-31
+
+### Added
+
+- **Terrain Palette.** A dedicated Terrain Mode panel to paint tiles, raise and
+  lower height, and edit cliffs by hand. Tiles render as real texture thumbnails
+  (not flat color swatches), and the brush supports a fractional radius.
+- **Cliff editing.** A single Cliff tool raises or lowers terrain by a chosen
+  signed number of levels from the default, rippling edits into a valid
+  one-level staircase and rebuilding cliffs in lockstep with the terrain.
+- **Entity deletion by keyboard.** Press Delete to remove the selected units and
+  doodads.
+- **Placement ghost preview.** Doodad and unit placement now shows a cursor
+  preview ghost, with right-click to disarm.
+- **Viewport selection polish.** Glowing hover and selection outlines,
+  model-accurate picking, and box-select.
+- **New Map tileset picker** with live tileset thumbnails.
+- **Help menu** with Check for Updates and an About dialog.
+- **Project website + documentation** at
+  [the GitHub Pages site](https://github.com/StephenSHorton/wc3-forge) — landing
+  page, download, and full docs.
+
+### Fixed
+
+- **Reforged HD rendering.** Post-1100 HD models no longer stretch from the
+  origin (skin-stretch fix), HD per-slot textures resolve correctly for "tree"
+  replaceable ids, and the HD render path honors per-layer blending.
+- **Minimap.** New maps bake a correct `war3mapMap.blp` with a live terrain PNG
+  render; fixed the garbled new-map minimap and added a terrain fallback.
+- **Terrain brush performance.** Brush edits no longer trigger a full map reload
+  on every dab — live rebuilds are throttled and differentiated, meshes update
+  in place, and an open undo group can no longer leak across a stroke. Together
+  these remove the brush lag and flicker.
+
 ## [0.3.0] - 2026-05-29
 
 ### Added
@@ -73,6 +107,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Relicensed to GPL-3.0-or-later with `CREDITS.md` enumerating the ported
   HiveWE subsystems.
 
+[0.6.0]: https://github.com/StephenSHorton/wc3-forge/compare/v0.5.1...v0.6.0
 [0.3.0]: https://github.com/StephenSHorton/wc3-forge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/StephenSHorton/wc3-forge/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/StephenSHorton/wc3-forge/releases/tag/v0.1.0
