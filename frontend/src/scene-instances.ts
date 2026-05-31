@@ -2939,6 +2939,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // handler below (brush, MCP, undo/redo — any source emits Kind="terrain").
   let terrainRebuildRunning = false
   let terrainRebuildPending = false
+  // Identity of the ground palette a terrain mesh was baked against. When this
+  // is unchanged between rebuilds, terrain.update() can reuse the atlas; when it
+  // changes (tileset swap), we rebuild the mesh so the atlas matches.
+  function terrainPaletteKey(t: any): string {
+    return Array.isArray(t?.palette) ? t.palette.join('|') : ''
+  }
   async function rebuildTerrainFromGo() {
     if (terrainRebuildRunning) {
       terrainRebuildPending = true
@@ -2948,26 +2954,32 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     try {
       do {
         terrainRebuildPending = false
+        const prevPaletteKey = terrainPaletteKey(cachedTerrainDTO)
         const t = await GetTerrain()
         cachedTerrainDTO = t
         cellHighlight?.setTerrain(t as unknown as any)
         const gl = (viewer as any).gl as WebGLRenderingContext
-        // BUILD-THEN-SWAP: build the new meshes fully before disposing the old
-        // ones. The previous "dispose → null → await build" left terrain/cliffs/
-        // water null across the await, so the RAF drew nothing there for a frame
-        // or two — a visible flicker on every brush dab. Building first keeps the
-        // old composition on screen until the replacement is ready, then swaps
-        // atomically (no null gap, no flicker).
-        const newTerrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
+        // TERRAIN: a brush edit never changes the palette, so re-mesh in place —
+        // terrain.update() re-uploads geometry while REUSING the baked palette
+        // atlas + program. That skips the render-to-texture atlas bake (FBO +
+        // SCISSOR_TEST toggle), which was the per-dab flicker. Only when the
+        // palette FourCCs actually change (tileset swap) do we build a fresh
+        // mesh so the atlas matches.
+        const paletteChanged = terrainPaletteKey(t) !== prevPaletteKey
+        if (terrain && !paletteChanged) {
+          terrain.update(t as unknown as any)
+        } else {
+          const newTerrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
+          terrain?.dispose(); terrain = newTerrain
+        }
+        sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
+        // CLIFFS + WATER: build-then-swap (placements / depth blending can change).
+        // No null gap — the old meshes stay drawn until the replacements are ready.
         const cliffPlacements = computeCliffPlacements(t as unknown as any)
         const newCliffs = cliffPlacements.length > 0
           ? await renderCliffs(gl, viewer as any, pathSolver, cliffPlacements, t as unknown as any)
           : null
-        // Height edits change water depth blending, so rebuild water too.
         const newWater = await buildWater(gl, viewer as any, pathSolver, t as unknown as any)
-        // Atomic swap (synchronous — no await between dispose + reassign).
-        terrain?.dispose(); terrain = newTerrain
-        sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
         cliffs?.dispose(); cliffs = newCliffs
         water?.dispose(); water = newWater
       } while (terrainRebuildPending)
