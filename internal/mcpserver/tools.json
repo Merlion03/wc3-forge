@@ -1357,7 +1357,7 @@
         },
         "level": {
           "type": "integer",
-          "description": "target layer (0..15) for mode 'set'"
+          "description": "for raise/lower: number of cliff steps to move (default 1); for 'set': absolute target layer (0..15)"
         },
         "cliff_tile_id": {
           "type": "string",

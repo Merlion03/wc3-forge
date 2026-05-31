@@ -324,9 +324,13 @@ func neighborAvgZLocked(s *Session, idx, w, h int) float32 {
 
 // CliffBrush adjusts the integer cliff LayerHeight over the footprint. mode:
 //
-//	"raise" — LayerHeight += 1 (clamped to 15).
-//	"lower" — LayerHeight -= 1 (clamped to 0).
+//	"raise" — LayerHeight += level (level<1 ⇒ 1), clamped to 15.
+//	"lower" — LayerHeight -= level (level<1 ⇒ 1), clamped to 0.
 //	"set"   — LayerHeight = level (clamped to [0,15]).
+//
+// For raise/lower, `level` is the number of cliff steps to move (how high/low);
+// for set it's the absolute target layer. Either way the staircase ripple below
+// keeps adjacent corners within one level.
 //
 // CRITICAL: WC3 cliff models only exist for a ONE-level step between adjacent
 // corners (the Cliffs<ABCD>N.mdx names encode each corner's height above the
@@ -354,14 +358,18 @@ func (s *Session) CliffBrush(centerCol, centerRow int, radius float64, shape, mo
 	for _, idx := range corners {
 		footprint[idx] = true
 		oldLayer := int(s.terrain.Tiles[idx].LayerHeight)
+		step := level
+		if step < 1 {
+			step = 1 // raise/lower default + guard against a 0/empty amount
+		}
 		var newLayer int
 		switch mode {
 		case "lower":
-			newLayer = oldLayer - 1
+			newLayer = oldLayer - step
 		case "set":
 			newLayer = level
 		default: // "raise"
-			newLayer = oldLayer + 1
+			newLayer = oldLayer + step
 		}
 		if newLayer < 0 {
 			newLayer = 0

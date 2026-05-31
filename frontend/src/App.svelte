@@ -1513,9 +1513,9 @@
       case 'smooth':
         return BrushTerrainHeight(col, row, b.radius, b.shape, 'smooth', b.strength, 0)
       case 'cliffRaise':
-        return BrushTerrainCliff(col, row, b.radius, b.shape, 'raise', 0, b.cliffTileId)
+        return BrushTerrainCliff(col, row, b.radius, b.shape, 'raise', b.cliffLevels, b.cliffTileId)
       case 'cliffLower':
-        return BrushTerrainCliff(col, row, b.radius, b.shape, 'lower', 0, b.cliffTileId)
+        return BrushTerrainCliff(col, row, b.radius, b.shape, 'lower', b.cliffLevels, b.cliffTileId)
       case 'ramp':
         return BrushTerrainRamp(col, row, b.radius, b.shape, true)
       case 'rampOff':

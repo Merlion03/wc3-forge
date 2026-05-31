@@ -1040,7 +1040,7 @@ function registerContractTools(server: McpServer): void {
       radius: z.number().optional().describe("brush radius in corner units, fractional allowed (0 = single corner)"),
       shape: z.enum(["circle", "square"]).optional().describe("brush shape (default circle)"),
       mode: z.enum(["raise", "lower", "set"]).describe("cliff brush mode"),
-      level: z.number().int().optional().describe("target layer (0..15) for mode 'set'"),
+      level: z.number().int().optional().describe("for raise/lower: number of cliff steps to move (default 1); for 'set': absolute target layer (0..15)"),
       cliff_tile_id: z.string().optional().describe("4-char cliff-tileset FourCC (empty → slot 0)"),
     },
     wrap("terrain.brush_cliff")

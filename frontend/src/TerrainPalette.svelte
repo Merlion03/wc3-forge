@@ -32,6 +32,7 @@
     strength: number
     groundTileId: string
     cliffTileId: string
+    cliffLevels: number
   }
 
   let {
@@ -59,6 +60,8 @@
   let radius = $state(1)
   let shape: 'circle' | 'square' = $state('circle')
   let strength = $state(16)
+  // How many cliff levels Raise/Lower move per application (the "how high/low").
+  let cliffLevels = $state(1)
 
   function rgb(c: number[] | undefined): string {
     if (!c || c.length < 3) return 'rgb(110,110,110)'
@@ -143,6 +146,7 @@
       strength,
       groundTileId: selectedGround,
       cliffTileId: selectedCliff,
+      cliffLevels,
     }
   })
   $effect(() => {
@@ -235,6 +239,11 @@
         <!-- Cliffs group -->
         <div class="section">
           <div class="section-title">Cliffs</div>
+          <label class="ctl">
+            <span>Levels</span>
+            <input type="range" min="1" max="12" step="1" bind:value={cliffLevels} />
+            <span class="ctl-val">{cliffLevels}</span>
+          </label>
           <div class="tool-row">
             <button class="tool-btn" class:armed={activeTool === 'cliffRaise'} onclick={() => pickTool('cliffRaise')}>Raise</button>
             <button class="tool-btn" class:armed={activeTool === 'cliffLower'} onclick={() => pickTool('cliffLower')}>Lower</button>
