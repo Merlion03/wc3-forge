@@ -2778,7 +2778,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
           const cell = pickTerrainCell(e.clientX - r.left, e.clientY - r.top, canvas, scene, cachedTerrainDTO)
           if (cell) {
             const z = sampleTerrainHeight(cell.worldX, cell.worldY)
-            placementGhostInst.move([cell.worldX, cell.worldY, z])
+            // setLocation (absolute), NOT move (relative += offset) — the hover
+            // handler fires every frame, so a relative move would accumulate
+            // and fling the ghost off the map after frame one.
+            placementGhostInst.setLocation([cell.worldX, cell.worldY, z])
             if (!placementGhostPlaced) { placementGhostInst.show(); placementGhostPlaced = true }
           }
         }
