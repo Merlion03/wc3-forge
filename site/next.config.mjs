@@ -14,6 +14,9 @@ const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const config = {
   output: "export",
   basePath,
+  // Emit each route as <route>/index.html so both /docs and /docs/ resolve on
+  // GitHub Pages (without this, only the no-slash form works).
+  trailingSlash: true,
   images: { unoptimized: true },
   reactStrictMode: true,
   turbopack: { root },
