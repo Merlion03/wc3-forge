@@ -166,10 +166,15 @@ export function createCamera(canvas: HTMLCanvasElement, viewerCamera: any): RTSC
   function pan(dxScreen: number, dyScreen: number) {
     const cy = Math.cos(yaw)
     const sy = Math.sin(yaw)
-    // Screen-right axis in world XY (yaw rotation, no Z component): (cy, sy, 0)
-    // Screen-up axis in world XY (forward, projected to ground): (-sy, cy, 0)
-    pivot[0] += dxScreen * cy - dyScreen * sy
-    pivot[1] += dxScreen * sy + dyScreen * cy
+    // Screen axes projected onto the ground, derived from the current yaw:
+    //   forward-on-ground (screen "up")   = ( sy,  cy)   [viewDir_xy]
+    //   screen-right = cross(forward, +Z) = ( cy, -sy)
+    // Move the pivot by dxScreen·right + dyScreen·up. The previous version had
+    // both sin(yaw) terms sign-flipped — invisible at the default yaw (0, where
+    // sin=0), but it rotated panning the WRONG way once the camera yawed off
+    // the default, which is why dragging felt weird after orbiting.
+    pivot[0] += dxScreen * cy + dyScreen * sy
+    pivot[1] += -dxScreen * sy + dyScreen * cy
     applyToViewer()
   }
 

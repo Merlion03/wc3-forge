@@ -75,8 +75,13 @@ export interface PathBlockerPickInfo {
 }
 
 export interface PathBlockerRenderer {
-  /** Draw all blockers; `selected` lets us brighten / outline picks. */
-  draw(viewProj: Float32Array, selected: Set<number>): void
+  /**
+   * Draw all blockers. `selected` gets the white selection wash; `hovered`
+   * (a single creation_number, or null) and any cn in `preview` (the live
+   * rubber-band set, or null) get the cyan hover wash — matching the white/cyan
+   * outline used for MDX units & doodads, which a procedural box can't receive.
+   */
+  draw(viewProj: Float32Array, selected: Set<number>, hovered: number | null, preview: Set<number> | null): void
   /** Replace the marker list (called on map open). */
   setMarkers(ms: PathBlockerMarker[]): void
   /** AABB info for ray-vs-AABB picking — one entry per marker. */
@@ -183,12 +188,14 @@ void main() {
 // upward so the top face reads brighter than the sides. This sells the box
 // as a 3D form rather than a flat sticker.
 //
-// `u_selected` brightens the pattern when the blocker is in the selection
-// set so click feedback matches the rest of the editor (slocs, units,
-// doodads all tint when selected).
+// `u_selected` / `u_hover` wash the box white / cyan to mirror the white
+// selection outline and cyan hover outline that MDX units & doodads get (a
+// procedural box can't go through the silhouette-outline pass, so it carries
+// its own highlight).
 const FRAG_SHADER = `
 precision mediump float;
 uniform float u_selected;
+uniform float u_hover;
 varying vec3 v_worldPos;
 varying vec3 v_normal;
 void main() {
@@ -218,11 +225,14 @@ void main() {
   col *= diffuse;
   // Extra brighten on the top face so the cap reads at any zoom.
   if (n.z > 0.5) col += vec3(0.08);
-  // Selection tint: pulse warm yellow over the checker so picked blockers
-  // are obvious in dense areas. Matches the warm-yellow boost the unit and
-  // doodad pickers use (SELECT_TINT in scene-instances).
+  // Selection / hover wash so picked or pointed-at blockers are obvious in
+  // dense areas. Selected = white (matches the white selection outline),
+  // hover = cyan (matches the cyan hover outline). A blocker is never both
+  // (hover defers to selection upstream), so selection wins if ever both set.
   if (u_selected > 0.5) {
-    col = mix(col, vec3(1.0, 0.95, 0.4), 0.55);
+    col = mix(col, vec3(1.0, 1.0, 1.0), 0.6) + vec3(0.08);
+  } else if (u_hover > 0.5) {
+    col = mix(col, vec3(0.35, 0.95, 1.0), 0.55) + vec3(0.04);
   }
   gl_FragColor = vec4(col, 0.7);
 }
@@ -259,6 +269,7 @@ function buildProgram(gl: WebGLRenderingContext) {
     uHalf: gl.getUniformLocation(program, 'u_half')!,
     uHeight: gl.getUniformLocation(program, 'u_height')!,
     uSelected: gl.getUniformLocation(program, 'u_selected')!,
+    uHover: gl.getUniformLocation(program, 'u_hover')!,
   }
 }
 
@@ -302,7 +313,7 @@ export function buildPathBlockerRenderer(gl: WebGLRenderingContext): PathBlocker
       return out
     },
 
-    draw(viewProj: Float32Array, selected: Set<number>) {
+    draw(viewProj: Float32Array, selected: Set<number>, hovered: number | null, preview: Set<number> | null) {
       if (markers.length === 0) return
       // Re-establish every bit of GL state we touch — the lib's render loop
       // leaves attribs / programs / blend state in unknown configuration.
@@ -351,6 +362,7 @@ export function buildPathBlockerRenderer(gl: WebGLRenderingContext): PathBlocker
         )
         gl.uniform2f(prog.uHalf, m.halfX, m.halfY)
         gl.uniform1f(prog.uSelected, selected.has(m.creationNumber) ? 1 : 0)
+        gl.uniform1f(prog.uHover, (hovered === m.creationNumber || preview?.has(m.creationNumber)) ? 1 : 0)
         gl.drawElements(gl.TRIANGLES, BOX_INDICES.length, gl.UNSIGNED_SHORT, 0)
       }
 

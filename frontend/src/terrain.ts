@@ -522,6 +522,15 @@ void main() {
 
 export interface TerrainMesh {
   draw(viewProj: Float32Array): void
+  /**
+   * Re-mesh the grid from a new TerrainDTO in place, re-uploading the geometry
+   * buffers but REUSING the baked palette atlas + shader program. Use for live
+   * brush edits (paint / height / cliff) where the palette is unchanged — it
+   * skips the render-to-texture atlas bake that otherwise flickers per dab. If
+   * the palette FourCCs actually change (tileset swap), build a fresh mesh
+   * instead so the atlas matches.
+   */
+  update(t: TerrainDTO): void
   dispose(): void
   drawCallCount: number
 }
@@ -709,6 +718,25 @@ export async function buildTerrain(
   //   normal = normalize(hL - hR, hD - hU, 256.0)
   // and after normalize gives identical direction to HiveWE's per-tile
   // formula. Verified: flat ground (all heights equal) yields (0,0,1).
+
+  // STRIDE_F (floats per vertex) lives in the outer scope because draw() reads
+  // it for the attribute stride too.
+  const STRIDE_F = 18
+  // Geometry buffers are created ONCE and re-uploaded by rebuildGeometry on each
+  // terrain edit. The palette atlas + shader program (built above) are reused,
+  // so a brush dab re-meshes the grid WITHOUT re-baking the atlas. The bake is a
+  // render-to-texture pass that binds an FBO and disables SCISSOR_TEST (relying
+  // on "next frame" to restore it) — running it per-dab was the visible flicker.
+  // triCount / indexType are set by rebuildGeometry and read live by draw().
+  const vbo = gl.createBuffer()!
+  const ibo = gl.createBuffer()!
+  let triCount = 0
+  let indexType: number = gl.UNSIGNED_SHORT
+
+  // Rebuild the whole-map geometry from `t` and upload it into vbo/ibo. Reused
+  // for the initial build and every in-place update(). Returns false (leaving
+  // the prior buffers intact) when the map can't be meshed.
+  function rebuildGeometry(t: TerrainDTO): boolean {
   const NORMAL_Z_SCALE = 256.0
   const normals = new Float32Array(N * 3) // per-corner (x,y,z)
   for (let j = 0; j < H; j++) {
@@ -743,7 +771,7 @@ export async function buildTerrain(
   }
   if (emittedCells === 0) {
     flog(`[terrain] all ${numCells} cells skipped (entire map is cliff?) — aborting`)
-    return null
+    return false
   }
   flog(`[terrain] cell-skip: rendering ${emittedCells}/${numCells} cells (skipped ${numCells - emittedCells} cliff cells)`)
 
@@ -761,14 +789,12 @@ export async function buildTerrain(
   const need32 = vCount > 65535
   if (need32 && !has32Bit) {
     flog(`[terrain] needs uint32 indices (${vCount} verts) but OES_element_index_uint missing`)
-    return null
+    return false
   }
-  const STRIDE_F = 18
   const verts = new Float32Array(vCount * STRIDE_F)
   const indices = need32
     ? new Uint32Array(emittedCells * 6)
     : new Uint16Array(emittedCells * 6)
-  const indexType = need32 ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT
 
   const cx = t.center_offset[0]
   const cy = t.center_offset[1]
@@ -936,16 +962,25 @@ export async function buildTerrain(
     }
   }
 
-  const vbo = gl.createBuffer()!
   gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
   gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW)
-  const ibo = gl.createBuffer()!
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo)
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
+  triCount = emittedCells * 2
+  indexType = need32 ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT
+  return true
+  } // end rebuildGeometry
+
+  // Initial geometry upload. A false here means the map can't be meshed.
+  if (!rebuildGeometry(t)) {
+    gl.deleteBuffer(vbo)
+    gl.deleteBuffer(ibo)
+    gl.deleteTexture(atlas)
+    return null
+  }
 
   const prog = buildProgram(gl)
   const STRIDE_B = STRIDE_F * 4
-  const triCount = emittedCells * 2
 
   // HiveWE map.ixx: light_direction = normalize(vec3(1, 1, -3)). Pre-computed
   // so the per-frame draw doesn't redo the sqrt.
@@ -964,6 +999,11 @@ export async function buildTerrain(
 
   return {
     drawCallCount: 1,
+    update(t: TerrainDTO) {
+      // Geometry-only re-upload; atlas + program stay put. No-op-safe: a false
+      // return leaves the prior buffers (and the last good frame) intact.
+      rebuildGeometry(t)
+    },
     draw(viewProj: Float32Array) {
       gl.useProgram(prog.program)
       gl.uniformMatrix4fv(prog.uViewProj, false, viewProj)

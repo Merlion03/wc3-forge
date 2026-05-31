@@ -38,6 +38,18 @@ export function BrowseForWC3Install() {
   return window['go']['main']['App']['BrowseForWC3Install']();
 }
 
+export function BrushTerrainCliff(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
+  return window['go']['main']['App']['BrushTerrainCliff'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+}
+
+export function BrushTerrainHeight(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
+  return window['go']['main']['App']['BrushTerrainHeight'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+}
+
+export function BrushTerrainRamp(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['BrushTerrainRamp'](arg1, arg2, arg3, arg4, arg5);
+}
+
 export function CanRedo() {
   return window['go']['main']['App']['CanRedo']();
 }
@@ -198,6 +210,14 @@ export function GetTerrain() {
   return window['go']['main']['App']['GetTerrain']();
 }
 
+export function GetTerrainPaletteThumbs() {
+  return window['go']['main']['App']['GetTerrainPaletteThumbs']();
+}
+
+export function GetTerrainTile(arg1, arg2) {
+  return window['go']['main']['App']['GetTerrainTile'](arg1, arg2);
+}
+
 export function GetTranspilePreview() {
   return window['go']['main']['App']['GetTranspilePreview']();
 }
@@ -356,6 +376,10 @@ export function OpenMapFileDialog() {
 
 export function OpenMapInNewWindow(arg1) {
   return window['go']['main']['App']['OpenMapInNewWindow'](arg1);
+}
+
+export function PaintTerrainTile(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['PaintTerrainTile'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function Redo() {

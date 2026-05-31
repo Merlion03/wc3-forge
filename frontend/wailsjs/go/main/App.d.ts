@@ -3,8 +3,8 @@
 import {main} from '../models';
 import {update} from '../models';
 import {doodadsdoo} from '../models';
-import {unitsdoo} from '../models';
 import {forge} from '../models';
+import {unitsdoo} from '../models';
 import {w3i} from '../models';
 
 export function AddCommentTrigger(arg1:string,arg2:number):Promise<main.TriggerMutationResultDTO>;
@@ -24,6 +24,12 @@ export function AddTriggerVariable(arg1:string,arg2:string,arg3:boolean,arg4:num
 export function BeginUndoGroup(arg1:string):Promise<void>;
 
 export function BrowseForWC3Install():Promise<string>;
+
+export function BrushTerrainCliff(arg1:number,arg2:number,arg3:number,arg4:string,arg5:string,arg6:number,arg7:string):Promise<void>;
+
+export function BrushTerrainHeight(arg1:number,arg2:number,arg3:number,arg4:string,arg5:string,arg6:number,arg7:number):Promise<void>;
+
+export function BrushTerrainRamp(arg1:number,arg2:number,arg3:number,arg4:string,arg5:boolean):Promise<void>;
 
 export function CanRedo():Promise<boolean>;
 
@@ -105,6 +111,10 @@ export function GetSelection():Promise<main.SelectionDTO>;
 
 export function GetTerrain():Promise<main.TerrainDTO>;
 
+export function GetTerrainPaletteThumbs():Promise<main.TerrainPaletteThumbs>;
+
+export function GetTerrainTile(arg1:number,arg2:number):Promise<forge.TerrainTileInfo>;
+
 export function GetTranspilePreview():Promise<main.TranspilePreviewDTO>;
 
 export function GetTrigger(arg1:number):Promise<main.TriggerDetailDTO>;
@@ -184,6 +194,8 @@ export function OpenMapDialog():Promise<string>;
 export function OpenMapFileDialog():Promise<string>;
 
 export function OpenMapInNewWindow(arg1:string):Promise<void>;
+
+export function PaintTerrainTile(arg1:number,arg2:number,arg3:number,arg4:string,arg5:string):Promise<void>;
 
 export function Redo():Promise<void>;
 

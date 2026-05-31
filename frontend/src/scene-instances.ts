@@ -47,6 +47,10 @@ import {
   buildSlocRenderer, type SlocRenderer, type SlocMarker,
 } from './sloc-markers'
 import { buildCellHighlight, type CellHighlight } from './cell-highlight'
+import { buildBrushCursor, type BrushCursor } from './brush-cursor'
+import { buildInstanceOutline, type InstanceOutline } from './instance-outline'
+import { buildBoundsDebug, type BoundsDebug } from './bounds-debug'
+import { buildPickBuffer, type PickBuffer } from './pick-buffer'
 import { buildPathBlockerRenderer, type PathBlockerRenderer, type PathBlockerMarker } from './path-blockers'
 import { buildGizmo, type GizmoRenderer, type SelectionItem as GizmoSelectionItem } from './gizmo'
 
@@ -466,6 +470,20 @@ import { pickTerrainCell, rayGroundPlane, type TerrainCellInfo } from './terrain
 export type { TerrainCellInfo } from './terrain-picker'
 export type TerrainPickCallback = (cell: TerrainCellInfo | null) => void
 /**
+ * A terrain BRUSH stroke event while the Terrain Palette is armed. `phase`
+ * tracks the drag lifecycle so the caller can bracket the whole stroke in one
+ * undo group:
+ *   - 'start' fires on mousedown (open the undo group, paint the first dab),
+ *   - 'paint' fires as the cursor crosses into a new cell during the drag,
+ *   - 'end'   fires on mouseup / Escape (close the undo group). On 'end' `cell`
+ *             is the last-painted cell (or null if the stroke never landed).
+ * `cell` carries the footprint CENTER (BL-corner col/row + world XY).
+ */
+export type TerrainBrushPhase = 'start' | 'paint' | 'end'
+export type TerrainBrushCallback = (cell: TerrainCellInfo | null, phase: TerrainBrushPhase) => void
+/** Brush footprint descriptor the palette pushes to the scene for the cursor. */
+export interface TerrainBrushShape { radius: number; shape: 'circle' | 'square' }
+/**
  * A click-to-place hit while placement mode is armed. `worldX`/`worldY` are
  * the game-coordinate intersection of the click ray with the ground, and `z`
  * is the terrain height sampled (bilinearly) at that point so a newly-placed
@@ -624,6 +642,20 @@ export interface SceneAPI {
    */
   onTerrainPick(cb: TerrainPickCallback): void
   /**
+   * Toggle terrain-BRUSH mode (the Terrain Palette's paint engine). When active,
+   * a plain LMB press-drag-release on the canvas streams a brush stroke to the
+   * onTerrainBrushStroke callback (start → paint… → end) instead of selecting.
+   * Takes priority over terrain-pick + placement. Camera pan (RMB/MMB) still
+   * works; Escape ends the stroke. Cursor shows the footprint ring.
+   */
+  setTerrainBrushMode(active: boolean): void
+  /** Current terrain-brush-mode flag — for UI display. */
+  isTerrainBrushMode(): boolean
+  /** Register the terrain-brush stroke callback (see TerrainBrushCallback). */
+  onTerrainBrushStroke(cb: TerrainBrushCallback): void
+  /** Set the brush footprint (radius in corner units + shape) for the cursor. */
+  setTerrainBrushShape(shape: TerrainBrushShape): void
+  /**
    * Toggle doodad-placement mode. When active, a plain LMB click on the canvas
    * fires the onPlacementPick callback with the ground-plane intersection and
    * sampled terrain height (instead of entity ray-pick or terrain inspect).
@@ -637,6 +669,15 @@ export interface SceneAPI {
   isPlacementMode(): boolean
   /** Register the placement callback (see setPlacementMode / PlacementHit). */
   onPlacementPick(cb: PlacementPickCallback): void
+  /**
+   * Arm (or swap) the preview ghost — a tinted, non-interactive instance of
+   * `typeId` that follows the cursor across the terrain while placement mode
+   * is active, so the user sees the model and its footprint before clicking.
+   * Pass null to drop the preview. The ghost is purely visual: it never enters
+   * selection, the View-menu visibility toggles, pick tests, or the saved map.
+   * Disarming placement mode (setPlacementMode(false)) also drops it.
+   */
+  setPlacementGhost(typeId: string | null, types: Record<string, DoodadTypeInfo>): void
   /**
    * Add a single doodad to the live scene from its DTO, without a full map
    * reload. Used by the Doodad Palette after CreateDoodad allocates a
@@ -854,6 +895,53 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // in WC3 — same reason the selected* sets above are split.
   const unitInstances = new Map<number, any>()
   const doodadInstances = new Map<number, any>()
+  // Path blockers are doodads but NOT MDX instances (they're procedural boxes
+  // in path-blockers.ts), so they aren't in doodadInstances and the gizmo can't
+  // find them. We keep a lightweight proxy per blocker exposing just what the
+  // gizmo reads — worldLocation (= the marker's position array, so live drags
+  // and the gizmo centroid track it) and setLocation (mutates that array so the
+  // box re-renders at the new spot). All other fields the gizmo touches have
+  // safe defaults, and moveHeight is 0 for doodads, so MoveDoodad persists the
+  // drag exactly like a normal doodad. Rebuilt whenever the marker list changes.
+  const blockerProxies = new Map<number, { worldLocation: [number, number, number]; setLocation(p: [number, number, number]): void }>()
+  function rebuildBlockerProxies(markers: PathBlockerMarker[]) {
+    blockerProxies.clear()
+    for (const m of markers) {
+      blockerProxies.set(m.creationNumber, {
+        worldLocation: m.position, // same array ref path-blockers renders from
+        setLocation(p: [number, number, number]) {
+          m.position[0] = p[0]; m.position[1] = p[1]; m.position[2] = p[2]
+        },
+      })
+    }
+  }
+  // Doodad lookup the GIZMO sees: real MDX doodads, falling back to blocker
+  // proxies. Passed to gizmo.draw / gizmo.beginDrag so path blockers move like
+  // any doodad. The gizmo only ever calls .get() on this, so a thin shim is
+  // enough (and avoids polluting doodadInstances, which the outline pass walks).
+  const gizmoDoodadLookup = {
+    get: (id: number) => doodadInstances.get(id) ?? blockerProxies.get(id),
+  } as unknown as Map<number, any>
+  // Creation-number of the doodad currently under the cursor (null = none).
+  // Declared up here with the other instance state — the render loop reads it
+  // each frame to drive the hover-outline pass, and the loop is kicked off
+  // BEFORE the hover-helpers block below, so a later `let` would TDZ on frame 1.
+  let hoveredDoodad: number | null = null
+  // Creation-number of the unit/building under the cursor (null = none). Units
+  // get the cyan hover OUTLINE but no vertex fill (a fill would clobber their
+  // team-colour). At most one of hoveredDoodad / hoveredUnit is set at a time.
+  let hoveredUnit: number | null = null
+  // Live rubber-band preview: while a selection box is being dragged, these hold
+  // the creation-numbers currently inside it so the render loop can cyan-outline
+  // everything that WOULD be selected on release. Empty when not dragging.
+  // (Doodad set includes path-blocker cns — they're kind 'doodad'.)
+  const rubberPreviewUnits = new Set<number>()
+  const rubberPreviewDoodads = new Set<number>()
+  // Outline-glow colours for the two effects, read by the render loop (so they
+  // live here, ahead of the loop kickoff, to dodge the same frame-1 TDZ).
+  // Selection = white; hover = cyan. Tunable.
+  const SELECT_OUTLINE_COLOR: readonly [number, number, number] = [1, 1, 1]
+  const HOVER_OUTLINE_COLOR: readonly [number, number, number] = [0.35, 0.95, 1.0]
   // Per-doodad-instance category tag (resolved at placement time from the
   // SLK type-index). Lets setDoodadCategoryVisible flip a whole category's
   // visibility in O(visible-instances) without re-walking the type index.
@@ -887,12 +975,38 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   let terrainPickMode = false
   let terrainPickCallback: TerrainPickCallback | null = null
   let cachedTerrainDTO: any = null
+  // Terrain-BRUSH mode state (Terrain Palette paint engine). When active, a
+  // plain LMB press-drag-release streams a brush stroke; `brushStroking` tracks
+  // an in-progress drag, `brushLastCellKey` dedupes dabs so we only fire when
+  // the cursor crosses into a new cell. brushShape drives the footprint cursor.
+  let terrainBrushMode = false
+  let terrainBrushCallback: TerrainBrushCallback | null = null
+  let brushStroking = false
+  let brushLastCellKey = -1
+  let brushShape: TerrainBrushShape = { radius: 1, shape: 'circle' }
   // Doodad-placement mode state. When true, plain LMB clicks fire the
   // placement callback (with the ground intersection + sampled terrain Z)
   // instead of entity-pick / terrain-inspect. Checked BEFORE terrainPickMode
   // in the click handler so an armed palette brush wins over terrain mode.
   let placementMode = false
   let placementCallback: PlacementPickCallback | null = null
+  // Placement ghost — a translucent-tinted preview instance of the armed
+  // doodad that follows the cursor across the terrain (HiveWE / World Editor
+  // behavior) so the user sees what they're about to drop and where. Built by
+  // setPlacementGhost when a type is armed, repositioned in the hover handler,
+  // and torn down whenever placement mode turns off. It lives OUTSIDE
+  // doodadInstances/doodadCategoryByCn (it's not a real map entity) so it never
+  // leaks into selection, visibility toggles, pick tests, or save. The load
+  // token guards against a stale async model load landing after a re-arm or
+  // disarm raced ahead of it.
+  let placementGhostInst: any = null
+  let placementGhostTypeId: string | null = null
+  let placementGhostLoadToken = 0
+  let placementGhostPlaced = false // shown only after the first positioned move
+  // Cool cyan wash so the preview reads as "not placed yet." Alpha is ignored
+  // by opaque doodad layers (no blend mode), so the tint — not transparency —
+  // is what distinguishes the ghost from a real instance.
+  const GHOST_TINT: [number, number, number, number] = [0.4, 0.85, 1.2, 1]
   // Doodad instances whose model has at least one 'stand' sequence AND that
   // sequence may end (either non-looping, or multi-variation where we want
   // to re-roll a new variation when the current one ends). These need
@@ -949,6 +1063,50 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   } catch (e) {
     flog('[cell-highlight] init failed:', e instanceof Error ? e.message : String(e))
   }
+  // Terrain-brush footprint ring (shown under the cursor while the Terrain
+  // Palette is armed). Same overlay lifetime as cellHighlight; non-fatal build.
+  let brushCursor: BrushCursor | null = null
+  try {
+    brushCursor = buildBrushCursor((viewer as any).gl as WebGLRenderingContext)
+  } catch (e) {
+    flog('[brush-cursor] init failed:', e instanceof Error ? e.message : String(e))
+  }
+  // Instance-outline overlay (glowing silhouette). Drives two effects from one
+  // builder: white outline around selected units/doodads, cyan outline around
+  // the hovered doodad. Built once per scene; the mask FBO is sized lazily in
+  // the draw loop to match the canvas. Non-fatal if build fails — selection /
+  // hover simply render without an outline.
+  let outline: InstanceOutline | null = null
+  try {
+    outline = buildInstanceOutline((viewer as any).gl as WebGLRenderingContext)
+  } catch (e) {
+    flog('[instance-outline] init failed:', e instanceof Error ? e.message : String(e))
+  }
+  // DEBUG: when true, hovering an entity draws its rayPick bounding SPHERE
+  // (magenta wireframe) instead of the cyan outline, to diagnose hover accuracy.
+  // Now off — picking is pixel-accurate (see pickBuffer / rayPick narrow phase),
+  // so hover shows the normal cyan outline. Toggle live from devtools via
+  // window.__wc3ForgeHoverBounds = true.
+  const DEBUG_HOVER_BOUNDS = false
+  let boundsDebug: BoundsDebug | null = null
+  try {
+    boundsDebug = buildBoundsDebug((viewer as any).gl as WebGLRenderingContext)
+  } catch (e) {
+    flog('[bounds-debug] init failed:', e instanceof Error ? e.message : String(e))
+  }
+  // Pixel-accurate pick refinement: silhouette-coverage test that turns the
+  // loose bounding-sphere broad phase into an on-the-model hit test. Non-fatal
+  // if build fails — rayPick falls back to the nearest bounding-volume hit.
+  let pickBuffer: PickBuffer | null = null
+  try {
+    pickBuffer = buildPickBuffer((viewer as any).gl as WebGLRenderingContext)
+  } catch (e) {
+    flog('[pick-buffer] init failed:', e instanceof Error ? e.message : String(e))
+  }
+  // Safety cap on narrow-phase silhouette tests per pick (each is a GPU render
+  // + readback). Nearest-first ordering means we usually hit on the 1st; the
+  // cap bounds the worst case of many overlapping bounding spheres.
+  const PICK_NARROW_CAP = 16
   // Path-blocker overlay (pink/black checker quads at "Pathing Blockers"
   // category doodad positions). Built once per scene, lifetime matches the
   // other overlay renderers. Non-fatal if build fails — path blockers stay
@@ -1175,7 +1333,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // when they're behind something tall. Picking treats the blockers
         // as 'doodad' kind (they ARE doodads) — selectedDoodadSet is the
         // right tint state to pass in.
-        if (pathBlockers) pathBlockers.draw(scene.camera.viewProjectionMatrix, selectedDoodadSet)
+        if (pathBlockers) pathBlockers.draw(scene.camera.viewProjectionMatrix, selectedDoodadSet, hoveredDoodad, rubberPreviewDoodads)
         // Pathing overlay — alpha-blended, depth-test on, depth-write off
         // (see pathing.ts). Drawn after slocs so it shades the markers' base
         // too, before water so submerged pathing flags stay readable under
@@ -1186,10 +1344,116 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // pass already ran inside viewer.render(); water sits above that.
         if (water) water.draw(scene.camera.viewProjectionMatrix)
         glChk('water')
+        // Instance-outline overlays — glowing silhouettes drawn by rendering
+        // the target instance(s) into an offscreen mask (via a temporary swap
+        // of the scene's render list, reusing the lib's own render path — no
+        // reimplemented skinning) and compositing an edge glow over the frame.
+        // The lib's shader-state cache must be invalidated on BOTH sides of each
+        // mask render: before, because the water/sloc/pathing custom programs
+        // left a foreign GL program bound while the lib still believes its MDX
+        // shader is current (same trap as the pre-render reset above); after, so
+        // the next pass / frame re-binds cleanly.
+        //
+        // Each pass swaps scene.instances to its target array, draws, and always
+        // restores it in a finally — selection (white) then hover (cyan).
+        if (outline) {
+          outline.setSize(canvas.width, canvas.height)
+          // Selection pass (white, near-steady): every selected unit + doodad.
+          const selInsts: any[] = []
+          for (const cn of selectedSet) {
+            const i = unitInstances.get(cn)
+            if (i && i.rendered !== false) selInsts.push(i)
+          }
+          for (const cn of selectedDoodadSet) {
+            const i = doodadInstances.get(cn)
+            if (i && i.rendered !== false) selInsts.push(i)
+          }
+          if (selInsts.length) {
+            ;(viewer as any).webgl.currentShader = null
+            outline.draw(() => {
+              const savedList = (scene as any).instances
+              ;(scene as any).instances = selInsts
+              try {
+                ;(scene as any).renderOpaque()
+                ;(scene as any).renderTranslucent()
+              } finally {
+                ;(scene as any).instances = savedList
+              }
+            }, nowTs, SELECT_OUTLINE_COLOR, 0.12)
+            ;(viewer as any).webgl.currentShader = null
+          }
+          // Rubber-band preview pass (cyan): everything currently inside the
+          // drag box — a live "this is what would be selected on release" hint.
+          // One mask render for the whole set (path blockers wash cyan via their
+          // own shader below, since they aren't MDX instances).
+          if (rubberPreviewUnits.size || rubberPreviewDoodads.size) {
+            const preInsts: any[] = []
+            for (const cn of rubberPreviewUnits) {
+              const i = unitInstances.get(cn)
+              if (i && i.rendered !== false) preInsts.push(i)
+            }
+            for (const cn of rubberPreviewDoodads) {
+              const i = doodadInstances.get(cn)
+              if (i && i.rendered !== false) preInsts.push(i)
+            }
+            if (preInsts.length) {
+              ;(viewer as any).webgl.currentShader = null
+              outline.draw(() => {
+                const savedList = (scene as any).instances
+                ;(scene as any).instances = preInsts
+                try {
+                  ;(scene as any).renderOpaque()
+                  ;(scene as any).renderTranslucent()
+                } finally {
+                  ;(scene as any).instances = savedList
+                }
+              }, nowTs, HOVER_OUTLINE_COLOR, 0.45)
+              ;(viewer as any).webgl.currentShader = null
+            }
+          }
+          // Hover pass (cyan, lively pulse): the single entity under the cursor
+          // — a doodad or a unit/building (at most one is hovered at a time).
+          const hInst = hoveredDoodad !== null
+            ? doodadInstances.get(hoveredDoodad)
+            : hoveredUnit !== null
+              ? unitInstances.get(hoveredUnit)
+              : null
+          if (hInst && hInst.rendered !== false) {
+            // DEBUG: draw the rayPick bounding sphere instead of the outline.
+            // window.__wc3ForgeHoverBounds (true/false) overrides the compile
+            // default at runtime via devtools.
+            const debugBounds = (window as any).__wc3ForgeHoverBounds ?? DEBUG_HOVER_BOUNDS
+            if (debugBounds && boundsDebug) {
+              const wb = instanceWorldBounds(hInst)
+              if (wb) {
+                ;(viewer as any).webgl.currentShader = null
+                boundsDebug.draw(scene.camera.viewProjectionMatrix, wb.cx, wb.cy, wb.cz, wb.r)
+                ;(viewer as any).webgl.currentShader = null
+              }
+            } else {
+              ;(viewer as any).webgl.currentShader = null
+              outline.draw(() => {
+                const savedList = (scene as any).instances
+                ;(scene as any).instances = [hInst]
+                try {
+                  ;(scene as any).renderOpaque()
+                  ;(scene as any).renderTranslucent()
+                } finally {
+                  ;(scene as any).instances = savedList
+                }
+              }, nowTs, HOVER_OUTLINE_COLOR, 0.45)
+              ;(viewer as any).webgl.currentShader = null
+            }
+          }
+        }
+        glChk('instance-outline')
         // Cell-highlight overlay (yellow wireframe quad for picked cell).
         // Drawn LAST before the gizmo so the wireframe sits visually on top
         // of every other layer including water.
         if (cellHighlight) cellHighlight.draw(scene.camera.viewProjectionMatrix)
+        // Terrain-brush footprint ring (only visible while the palette is armed
+        // and the cursor is over the map). Same always-on-top overlay tier.
+        if (brushCursor) brushCursor.draw(scene.camera.viewProjectionMatrix)
         // Transform gizmo — drawn LAST of all overlays. Always-on-top via
         // gl.disable(DEPTH_TEST) in draw(). Always invoked (the gate used to
         // be `gizmoSelectionItems.length > 0`) so that when selection clears,
@@ -1204,7 +1468,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
             viewer, scene, canvas,
             gizmoSelectionItems,
             unitInstances,
-            doodadInstances,
+            gizmoDoodadLookup, // real doodads + path-blocker proxies
             camera.getEye(),
           )
         }
@@ -1269,7 +1533,34 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // Note: selectedSet, selectedDoodadSet, unitInstances, doodadInstances are
   // all declared earlier in this function (before the render loop runs) to
   // avoid a TDZ trap — the loop closure captures them on first invocation.
-  const SELECT_TINT: [number, number, number, number] = [1.2, 1.4, 0.6, 1] // warm yellow boost
+  // Pre-click hover hint: a cyan vertex-colour fill under the cyan hover
+  // outline, so the doodad under the cursor reads warm even before the glow.
+  // (Selection no longer uses a vertex tint at all — it's the white outline
+  // pass — so a hovered doodad's resting colour is always plain white.)
+  const HOVER_TINT: [number, number, number, number] = [0.7, 1.1, 1.5, 1]
+  // hoveredDoodad (the doodad painted with HOVER_TINT / cyan-outlined) is
+  // declared earlier with the instance maps to avoid a frame-1 TDZ in the loop.
+  function clearDoodadHover() {
+    if (hoveredDoodad === null) return
+    const inst = doodadInstances.get(hoveredDoodad)
+    if (inst) inst.setVertexColor([1, 1, 1, 1])
+    hoveredDoodad = null
+  }
+  function setDoodadHover(cn: number) {
+    if (hoveredDoodad === cn) return
+    clearDoodadHover()
+    // Don't fill a doodad that's already selected — its white outline stands.
+    if (selectedDoodadSet.has(cn)) return
+    const inst = doodadInstances.get(cn)
+    if (inst) inst.setVertexColor(HOVER_TINT)
+    hoveredDoodad = cn
+  }
+  // Clear ALL hover state (doodad fill + outline, and the unit outline). Used
+  // wherever the pointer leaves an entity or a gesture/mode takes over.
+  function clearHover() {
+    clearDoodadHover()
+    hoveredUnit = null
+  }
 
   // Unit type index: stock-only and process-stable (we don't yet apply
   // per-map w3u modifications), so cache for process lifetime.
@@ -1345,9 +1636,8 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     }
     inst.setScene(scene)
     rollSequence(inst, 'stand')
-    if (selectedSet.has(unit.creation_number)) {
-      inst.setVertexColor(SELECT_TINT)
-    }
+    // Selection is shown by the white instance-outline pass (driven by
+    // selectedSet in the render loop), not a vertex tint — nothing to paint here.
     return inst
   }
 
@@ -1362,13 +1652,20 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   //
   // Doodad scale is stored RAW in war3map.doo (memory note: no /128 divide),
   // so we pass unit.scale through verbatim, multiplied by the SLK base scale.
-  async function placeDoodad(d: any, types: Record<string, DoodadTypeInfo>): Promise<any | null> {
-    const info = types[d.type_id]
-    if (!info || !info.file) return null
+  // Resolve + load the MDX/MDL model for a doodad type, trying the variant
+  // path, the unsuffixed fallback, and the other extension in order (see the
+  // inline notes for why). Returns the loaded model and the path that worked,
+  // or null when none loaded. Shared by placeDoodad (real instances) and the
+  // placement ghost (cursor preview) so both honor the same extension-
+  // exhaustion order.
+  async function resolveDoodadModel(
+    info: DoodadTypeInfo,
+    variation: number,
+  ): Promise<{ model: any; chosenPath: string } | null> {
     const extMatch = info.file.match(/\.(mdl|mdx)$/i)
     const declaredExt = extMatch ? extMatch[0] : '.mdx'
     const stem = extMatch ? info.file.slice(0, -extMatch[0].length) : info.file
-    const variantIdx = Math.min(Math.max(0, d.variation), Math.max(0, info.num_var - 1))
+    const variantIdx = Math.min(Math.max(0, variation), Math.max(0, info.num_var - 1))
 
     // Try (in order):
     //   1. variant path with the declared extension
@@ -1387,7 +1684,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (model && typeof model.addInstance === 'function') break
       try { model = await viewer.load(p, pathSolver); chosenPath = p } catch { /* swallow, try next */ }
     }
-    if (!model || typeof model.addInstance !== 'function') { sceneDiag.doodadModelFails++; return null }
+    if (!model || typeof model.addInstance !== 'function') return null
+    return { model, chosenPath: chosenPath! }
+  }
+
+  async function placeDoodad(d: any, types: Record<string, DoodadTypeInfo>): Promise<any | null> {
+    const info = types[d.type_id]
+    if (!info || !info.file) return null
+    const resolved = await resolveDoodadModel(info, d.variation)
+    if (!resolved) { sceneDiag.doodadModelFails++; return null }
+    const { model, chosenPath } = resolved
 
     // Placed-but-invisible guard (same rationale as placeUnit): a doodad model
     // that parsed with zero geosets renders nothing but counts as placed.
@@ -1494,10 +1800,60 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     const singleStandNonLooping = standCount === 1
       && (model.sequences?.[standSeqs[0].index]?.nonLooping ?? 0) !== 0
     if (standCount > 1 || singleStandNonLooping) doodadInstancesToReroll.add(inst)
-    if (selectedDoodadSet.has(d.creation_number)) {
-      inst.setVertexColor(SELECT_TINT)
-    }
+    // Selection is shown by the white instance-outline pass (driven by
+    // selectedDoodadSet in the render loop), not a vertex tint.
     return inst
+  }
+
+  // Tear down the placement ghost (if any). Detaches it from the scene's
+  // render list — same removal path clearInstances uses for real doodads —
+  // and bumps the load token so any model load still in flight discards its
+  // result instead of attaching an orphan. The model itself stays in the
+  // viewer cache for instant re-arm.
+  function disposePlacementGhost() {
+    placementGhostLoadToken++
+    placementGhostTypeId = null
+    placementGhostPlaced = false
+    if (placementGhostInst) {
+      doodadInstancesToReroll.delete(placementGhostInst)
+      try { placementGhostInst.detach() } catch { /* already detached */ }
+      placementGhostInst = null
+    }
+  }
+
+  // (Re)build the placement ghost for `typeId`. Drops any prior ghost first, so
+  // arming a different doodad swaps the preview. Passing null just disarms the
+  // preview. The instance is created hidden and positioned (then shown) on the
+  // first hover-move so it doesn't flash at the map origin before the cursor
+  // reports a terrain cell. Transform mirrors placeDoodad's defaults for a
+  // fresh drop: rotation 0, base model scale, the per-type fixed pitch/roll.
+  async function rebuildPlacementGhost(typeId: string | null, types: Record<string, DoodadTypeInfo>) {
+    disposePlacementGhost()
+    if (!typeId) return
+    const info = types[typeId]
+    if (!info || !info.file) return
+    placementGhostTypeId = typeId
+    const token = placementGhostLoadToken
+    const resolved = await resolveDoodadModel(info, 0)
+    // A newer arm/disarm superseded this load while it was in flight — discard.
+    if (token !== placementGhostLoadToken || placementGhostTypeId !== typeId) return
+    if (!resolved) return
+    const inst = resolved.model.addInstance()
+    let rot = quatZ(0)
+    const mp = info.max_pitch || 0
+    if (mp < 0) rot = quatMul(rot, quatY(-mp))
+    const mr = info.max_roll || 0
+    if (mr < 0) rot = quatMul(rot, quatX(-mr))
+    inst.rotateLocal(rot)
+    const ms = info.model_scale || 1
+    if (typeof inst.setScale === 'function') inst.setScale([ms, ms, ms])
+    else inst.uniformScale(ms)
+    inst.setScene(scene)
+    inst.setVertexColor(GHOST_TINT)
+    rollSequence(inst, 'stand')
+    inst.hide() // revealed by the first positioned hover-move
+    placementGhostInst = inst
+    placementGhostPlaced = false
   }
 
   // Sample the terrain surface height at a game-coord (worldX, worldY) by
@@ -1554,6 +1910,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   }
 
   function clearInstances() {
+    // A reload/close invalidates any armed placement ghost (its model may not
+    // even exist in the next map's catalog). Drop it before detaching the rest.
+    disposePlacementGhost()
     // Manual-anim pins are scoped to a loaded map — drop them so a fresh
     // map opens with all units back in the idle-reroll pool.
     manualAnimCns.clear()
@@ -1576,6 +1935,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // Same shape for path-blocker markers: clear the renderer's list so a
     // map close + open doesn't leave the previous map's blockers visible.
     pathBlockers?.setMarkers([])
+    rebuildBlockerProxies([]) // drop stale gizmo proxies with the markers
     if (terrain) {
       terrain.dispose()
       terrain = null
@@ -1597,6 +1957,17 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       sky = null
     }
   }
+
+  // Serializes loadMap() runs. Placement awaits viewer.load (async), so two
+  // overlapping loadMap calls would BOTH clear+place into the shared instance
+  // maps — and since each entry is keyed by creation_number, the later set()
+  // orphans the earlier instance: it stays attached to the scene (rendering,
+  // animating its own random stand sequence) but is no longer in the map, so
+  // it can't be picked or detached. That's the "every entity rendered twice,
+  // only one selectable" ghost. Chaining each load after the previous one
+  // guarantees a full clear+place cycle finishes before the next begins, so a
+  // superseded run's instances are detached by the next run's clearInstances().
+  let loadMapSerial: Promise<void> = Promise.resolve()
 
   // --- Picking: ray vs instance bounds ---
   //
@@ -1718,9 +2089,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     if (len < 1e-6) return null
     const rx = dx / len, ry = dy / len, rz = dz / len
 
-    let bestHit: PickHit | null = null
-    let bestT = Infinity
-    const considerSphere = (cx: number, cy: number, cz: number, r: number, hit: PickHit) => {
+    // Broad phase: collect every candidate whose bounding volume the ray hits,
+    // tagged with entry distance t and (for MDX entities) the instance, so the
+    // narrow phase below can refine each to pixel-accurate silhouette coverage.
+    type PickCand = { t: number; hit: PickHit; inst: unknown | null }
+    const cands: PickCand[] = []
+    const considerSphere = (cx: number, cy: number, cz: number, r: number, hit: PickHit, inst: unknown) => {
       // Ray-sphere intersection. Standard quadratic:
       //   |o + t*d - c|² = r²  →  t² - 2t·(d·(c-o)) + |c-o|²-r² = 0
       const lx = cx - ox, ly = cy - oy, lz = cz - oz
@@ -1730,19 +2104,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (d2 > r * r) return // ray misses sphere
       const thc = Math.sqrt(r * r - d2)
       const t = tca - thc // nearest intersection in front of camera
-      if (t < bestT) {
-        bestT = t
-        bestHit = hit
-      }
+      cands.push({ t, hit, inst })
     }
 
     for (const [cn, inst] of unitInstances) {
       const wb = instanceWorldBounds(inst)
-      if (wb) considerSphere(wb.cx, wb.cy, wb.cz, wb.r, { kind: 'unit', id: cn })
+      if (wb) considerSphere(wb.cx, wb.cy, wb.cz, wb.r, { kind: 'unit', id: cn }, inst)
     }
     for (const [cn, inst] of doodadInstances) {
       const wb = instanceWorldBounds(inst)
-      if (wb) considerSphere(wb.cx, wb.cy, wb.cz, wb.r, { kind: 'doodad', id: cn })
+      if (wb) considerSphere(wb.cx, wb.cy, wb.cz, wb.r, { kind: 'doodad', id: cn }, inst)
     }
 
     // Path-blocker overlays — ray vs AABB (slab method). Same picker shape
@@ -1779,10 +2150,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (skip) continue
       const t = tmin >= 0 ? tmin : tmax
       if (t < 0) continue
-      if (t < bestT) {
-        bestT = t
-        bestHit = { kind: 'doodad', id: s.creationNumber }
-      }
+      cands.push({ t, hit: { kind: 'doodad', id: s.creationNumber }, inst: null })
     }
 
     // Sloc markers — ray vs AABB (slab method). Slocs have no MDX so they're
@@ -1825,12 +2193,38 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       // behind the camera, skip.
       const t = tmin >= 0 ? tmin : tmax
       if (t < 0) continue
-      if (t < bestT) {
-        bestT = t
-        bestHit = { kind: 'unit', id: s.creationNumber }
-      }
+      cands.push({ t, hit: { kind: 'unit', id: s.creationNumber }, inst: null })
     }
-    return bestHit
+
+    // Narrow phase: nearest-first, refine MDX candidates by ACTUAL silhouette
+    // coverage at the cursor pixel (renders the one instance into the pick
+    // buffer and reads the cursor pixel — proven by the outline that this
+    // produces a correct silhouette). AABB entities (slocs / path blockers)
+    // have no MDX model, so they're accepted as-is. Without a pick buffer we
+    // fall back to the nearest bounding-volume hit (the old sphere behaviour).
+    if (cands.length === 0) return null
+    cands.sort((a, b) => a.t - b.t)
+    if (!pickBuffer) return cands[0].hit
+    pickBuffer.setSize(canvas.width, canvas.height)
+    let tested = 0
+    for (const c of cands) {
+      if (c.inst === null) return c.hit // sloc / blocker: bounding box is the shape
+      if (tested++ >= PICK_NARROW_CAP) return c.hit // bound worst case → accept nearest remaining
+      const covered = pickBuffer.testCoverage(() => {
+        ;(viewer as any).webgl.currentShader = null
+        const savedList = (scene as any).instances
+        ;(scene as any).instances = [c.inst]
+        try {
+          ;(scene as any).renderOpaque()
+          ;(scene as any).renderTranslucent()
+        } finally {
+          ;(scene as any).instances = savedList
+        }
+        ;(viewer as any).webgl.currentShader = null
+      }, px, py)
+      if (covered) return c.hit
+    }
+    return null
   }
 
   // Rubber-band: collect every instance whose world-space bound-center
@@ -1915,6 +2309,11 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     } | null
   }
   let downAt: DownState | null = null
+  // Where the most recent right-mouse-button press landed (client px), or null.
+  // Used to tell a right-CLICK (disarm the placement brush) from a right-DRAG
+  // (camera pan) on the contextmenu event — only a near-stationary release
+  // counts as a click. Camera panning owns RMB-drag and is left untouched.
+  let rmbDownAt: { x: number; y: number } | null = null
 
   // The rubber-band rectangle is rendered as a positioned DOM div. WebGL
   // would be lower-overhead but a one-element DOM overlay is dramatically
@@ -1986,12 +2385,35 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       downAt = null
       return
     }
+    // Remember where RMB went down so the contextmenu handler can distinguish
+    // a click (disarm placement) from a pan-drag (a right-drag moves far).
+    if (e.button === 2) rmbDownAt = { x: e.clientX, y: e.clientY }
     if (e.button !== 0) return
+    // Gesture is starting — drop the pre-click hover hint. If this click selects
+    // the entity it gets the white selection outline; otherwise the next free
+    // hover move re-applies the cyan hint.
+    clearHover()
     const r = canvas.getBoundingClientRect()
     const px = e.clientX - r.left
     const py = e.clientY - r.top
     const shift = e.shiftKey
     const ctrl = e.ctrlKey || e.metaKey
+
+    // ── TERRAIN BRUSH STROKE ──────────────────────────────────────────
+    // The Terrain Palette owns plain LMB press-drag-release: open a stroke
+    // and paint the first dab now, then stream more dabs as the cursor crosses
+    // into new cells (onDocMouseMove) until release (onDocMouseUp). We DON'T
+    // set downAt — brushStroking gates the doc handlers and leaving downAt null
+    // keeps the rubber-band / drag-move / gizmo paths inert. Modifier-held
+    // clicks fall through so the user can briefly select without disarming.
+    if (terrainBrushMode && !shift && !ctrl) {
+      brushStroking = true
+      brushLastCellKey = -1
+      const cell = cachedTerrainDTO ? pickTerrainCell(px, py, canvas, scene, cachedTerrainDTO) : null
+      terrainBrushCallback?.(cell, 'start')
+      if (cell) brushLastCellKey = cell.row * 100000 + cell.col
+      return
+    }
 
     // ── GIZMO PRIORITY PICK (design §1.3) ─────────────────────────────
     // Check gizmo handle BEFORE entity selection / drag-to-move logic.
@@ -2006,7 +2428,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         gizmo.beginDrag(
           gizmoHit, px, py, scene, canvas,
           gizmoSelectionItems,
-          unitInstances, doodadInstances,
+          unitInstances, gizmoDoodadLookup, // real doodads + path-blocker proxies
           unitTypeIndexCache,
         )
         gizmoDragging = true
@@ -2092,6 +2514,22 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // the canvas mid-gesture (rubber-band should survive a wobble over the
   // app chrome — matches what every other editor does).
   function onDocMouseMove(e: MouseEvent) {
+    // ── Terrain brush stroke (no downAt) ────────────────────────────────
+    // Stream a dab whenever the cursor crosses into a new cell. Painting the
+    // same cell repeatedly is suppressed via brushLastCellKey so a held-still
+    // brush doesn't spam identical edits (raise/lower still accumulates as the
+    // user drags across cells, matching the editor's feel).
+    if (brushStroking) {
+      if (!terrainBrushCallback || !cachedTerrainDTO) return
+      const r = canvas.getBoundingClientRect()
+      const cell = pickTerrainCell(e.clientX - r.left, e.clientY - r.top, canvas, scene, cachedTerrainDTO)
+      if (!cell) return
+      const key = cell.row * 100000 + cell.col
+      if (key === brushLastCellKey) return
+      brushLastCellKey = key
+      terrainBrushCallback(cell, 'paint')
+      return
+    }
     if (!downAt) return
 
     // ── Gizmo drag path ─────────────────────────────────────────────────
@@ -2128,22 +2566,55 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       return
     }
     if (!downAt.rubberBanding) {
-      // Promote to rubber-band only if shift was held at mousedown AND the
-      // pointer has actually moved enough to look like a drag, not a click.
-      // (Without the shift gate, a plain LMB drag — which does nothing
-      // useful today — would steal selection on every accidental tiny drag.)
-      if (!downAt.shift) return
+      // Promote to rubber-band once the pointer has moved far enough to read as
+      // a drag rather than a click. Plain drag box-selects (replace on release);
+      // shift+drag adds to the existing selection. The pixel threshold keeps an
+      // accidental tiny drag from clearing the selection. Gizmo drags and
+      // drag-to-move are handled earlier and return before reaching here, so a
+      // drag that gets this far is an empty-space / unselected-entity drag.
       const dist = Math.hypot(e.clientX - downAt.clientX, e.clientY - downAt.clientY)
       if (dist <= CLICK_PIXEL_THRESHOLD) return
       downAt.rubberBanding = true
     }
     const rect = currentRubberRect(e.clientX, e.clientY)
-    if (rect) updateOverlayRect(rect)
+    if (rect) updateOverlayRect(rect) // box outline tracks every mouse event
+    // Live preview: recompute what's inside the box so the render loop can
+    // cyan-outline everything that would be selected on release. Throttled to
+    // ~60Hz — rubberBandPick walks every instance, and raw mousemove can fire
+    // at 1000Hz; the box outline above still updates every event.
+    const previewNow = performance.now()
+    if (rect && previewNow - lastRubberPreviewTs >= RUBBER_PREVIEW_MS) {
+      lastRubberPreviewTs = previewNow
+      rubberPreviewUnits.clear()
+      rubberPreviewDoodads.clear()
+      for (const hit of rubberBandPick(rect)) {
+        if (hit.kind === 'unit') rubberPreviewUnits.add(hit.id)
+        else rubberPreviewDoodads.add(hit.id)
+      }
+    }
   }
+  let lastRubberPreviewTs = 0
+  const RUBBER_PREVIEW_MS = 16
 
   function onDocMouseUp(e: MouseEvent) {
+    // ── Terrain brush stroke end ────────────────────────────────────────
+    // Close the stroke (the callback closes the undo group). Fires on any
+    // button release while a stroke is open — only LMB starts one, so this is
+    // the matching LMB-up in practice.
+    if (brushStroking) {
+      brushStroking = false
+      brushLastCellKey = -1
+      terrainBrushCallback?.(null, 'end')
+      return
+    }
     const d = downAt
     downAt = null
+    // NOTE: we deliberately do NOT clear the rubber-band preview here. If this
+    // gesture commits a selection, the cyan preview is left on screen until the
+    // authoritative selection arrives (setSelected clears it) — otherwise the
+    // cyan would vanish and leave a highlight-less gap during the Go round-trip,
+    // which read as "lag before things get selected". Non-committing rubber-band
+    // paths below clear it explicitly.
 
     // ── Gizmo drag commit ────────────────────────────────────────────────
     if (gizmoDragging) {
@@ -2193,15 +2664,42 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     }
 
     if (d.rubberBanding) {
-      // Commit the rubber-band: collect everything inside the final rect
-      // and union it into the current selection (mode='add'). Empty boxes
-      // are a no-op (don't clear selection when the user just barely
-      // dragged then released with nothing inside).
+      // Commit the rubber-band. Shift = add to the current selection; plain =
+      // replace it. A degenerate (sub-2px) rect is treated as a non-gesture and
+      // left alone. For 'add', an empty rect is a no-op (don't wipe selection
+      // when shift-dragging over nothing); for 'set', an empty rect clears
+      // (matches click-on-empty), so dragging an empty box deselects.
       overlay.style.display = 'none'
-      const rect = currentRubberRect(e.clientX, e.clientY)
-      if (!rect || rect.w < 2 || rect.h < 2) return
+      // Compute the rect from the CAPTURED down-state `d` — `downAt` was nulled
+      // at the top of this handler, and currentRubberRect() reads `downAt`, so
+      // calling it here would always return null (the bug that made box-select
+      // silently select nothing). `d.x/d.y` and the release point are both
+      // canvas-relative DOM-top px, matching worldToCanvasPx in rubberBandPick.
+      const rr = canvas.getBoundingClientRect()
+      const cx = e.clientX - rr.left
+      const cy = e.clientY - rr.top
+      const rect = {
+        x: Math.min(d.x, cx),
+        y: Math.min(d.y, cy),
+        w: Math.abs(cx - d.x),
+        h: Math.abs(cy - d.y),
+      }
+      // Helper: a non-committing exit must drop the preview itself, since no
+      // setSelected will arrive to do it.
+      const dropPreview = () => { rubberPreviewUnits.clear(); rubberPreviewDoodads.clear() }
+      if (rect.w < 2 || rect.h < 2) { dropPreview(); return }
       const hits = rubberBandPick(rect)
-      if (hits.length > 0 && pickCallback) pickCallback(hits, 'add')
+      if (!pickCallback) { dropPreview(); return }
+      if (d.shift) {
+        // Shift = add. Empty box is a no-op (keep selection) → no setSelected,
+        // so clear the preview here; otherwise setSelected clears it.
+        if (hits.length > 0) pickCallback(hits, 'add')
+        else dropPreview()
+      } else {
+        // Plain = replace (clears on empty). setSelected always fires → it
+        // clears the preview, so the cyan→white handoff has no gap.
+        pickCallback(hits, 'set')
+      }
       return
     }
 
@@ -2266,6 +2764,14 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (a.isContentEditable) return
     }
+    // Mid-stroke Escape closes the terrain brush stroke (ends the undo group)
+    // so the partial stroke is committed as one step rather than left dangling.
+    if (brushStroking) {
+      brushStroking = false
+      brushLastCellKey = -1
+      terrainBrushCallback?.(null, 'end')
+      return
+    }
     // Placement mode Escape: disarm the palette brush (callback handles the
     // UI-side disarm). Takes priority over selection-clear so a user mid-place
     // who hits Escape exits placement rather than wiping their selection.
@@ -2308,7 +2814,22 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // cancel a gizmo drag. Otherwise both the cancel-drag and the menu fire,
   // and the menu lingers until dismissed.
   function onCanvasContextMenu(e: MouseEvent) {
-    if (gizmoDragging && gizmo?.isDragging()) e.preventDefault()
+    if (gizmoDragging && gizmo?.isDragging()) { e.preventDefault(); return }
+    // Right-click while a placement brush is armed disarms it (the callback
+    // does the UI-side disarm, which routes back through setPlacementMode and
+    // drops the ghost). Only a stationary click counts — a right-DRAG is a
+    // camera pan and must keep the brush armed. Suppress the WebView menu so
+    // it doesn't pop on the disarming click.
+    if (placementMode && rmbDownAt) {
+      const dist = Math.hypot(e.clientX - rmbDownAt.x, e.clientY - rmbDownAt.y)
+      rmbDownAt = null
+      if (dist <= CLICK_PIXEL_THRESHOLD) {
+        e.preventDefault()
+        placementCallback?.(null)
+        return
+      }
+    }
+    rmbDownAt = null
   }
   canvas.addEventListener('contextmenu', onCanvasContextMenu)
   // Listen on document for move/up so the rubber-band gesture survives the
@@ -2327,7 +2848,37 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // need to reflect what's under it.
   let lastHoverTs = 0
   const HOVER_THROTTLE_MS = 33
+  // Reposition the brush footprint ring under the given client coords (or hide
+  // it when the pointer is off the map). Sampled to terrain height each move so
+  // the ring hugs the surface.
+  function updateBrushCursorAt(clientX: number, clientY: number) {
+    if (!brushCursor) return
+    const r = canvas.getBoundingClientRect()
+    const xy = groundPlaneXY(clientX - r.left, clientY - r.top)
+    if (!xy) {
+      brushCursor.setBrush(null)
+      return
+    }
+    brushCursor.setBrush({
+      cx: xy[0],
+      cy: xy[1],
+      // Match the Go circle threshold's (r+0.5) reach so the ring frames the
+      // cells actually edited.
+      radius: (brushShape.radius + 0.5) * 128,
+      shape: brushShape.shape,
+      sampleZ: (x, y) => sampleTerrainHeight(x, y),
+    })
+  }
+
   function onCanvasHoverMove(e: MouseEvent) {
+    // Terrain-brush cursor ring follows the pointer — including while painting
+    // with LMB held (no downAt during a brush stroke). Owns the cursor; skips
+    // the entity hover-pick entirely.
+    if (terrainBrushMode) {
+      updateBrushCursorAt(e.clientX, e.clientY)
+      if (canvas.style.cursor !== 'crosshair') canvas.style.cursor = 'crosshair'
+      return
+    }
     if (downAt) return // suppress hover-pick during any active gesture
     // e.buttons bit 0=LMB, bit 1=RMB, bit 2=MMB. Any held button means an
     // ongoing drag (LMB without downAt is weird but safe to ignore; RMB/MMB
@@ -2341,7 +2892,29 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     // Placement mode owns the cursor for the same reason terrain-pick does —
     // a crosshair signals "click to drop here" regardless of what's underneath.
     if (placementMode || terrainPickMode) {
+      clearHover() // crosshair modes own the cursor; drop any pre-click hint
       if (canvas.style.cursor !== 'crosshair') canvas.style.cursor = 'crosshair'
+      // Slide the preview ghost to the terrain cell under the cursor (same
+      // pick + height-sample the click-to-place path uses, so the preview
+      // lands exactly where the drop will). Throttled with the shared hover
+      // gate — 30 Hz is smooth and keeps pickTerrainCell off the 1000 Hz mouse
+      // firehose. A miss (cursor off the map) just freezes the ghost in place.
+      if (placementMode && placementGhostInst && cachedTerrainDTO) {
+        const now = performance.now()
+        if (now - lastHoverTs >= HOVER_THROTTLE_MS) {
+          lastHoverTs = now
+          const r = canvas.getBoundingClientRect()
+          const cell = pickTerrainCell(e.clientX - r.left, e.clientY - r.top, canvas, scene, cachedTerrainDTO)
+          if (cell) {
+            const z = sampleTerrainHeight(cell.worldX, cell.worldY)
+            // setLocation (absolute), NOT move (relative += offset) — the hover
+            // handler fires every frame, so a relative move would accumulate
+            // and fling the ghost off the map after frame one.
+            placementGhostInst.setLocation([cell.worldX, cell.worldY, z])
+            if (!placementGhostPlaced) { placementGhostInst.show(); placementGhostPlaced = true }
+          }
+        }
+      }
       return
     }
     const now = performance.now()
@@ -2355,21 +2928,41 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     if (gizmo && gizmoSelectionItems.length > 0) {
       const gHit = gizmo.rayPick(px, py, scene, canvas)
       if (gHit) {
+        clearHover() // gizmo handle under pointer — not an entity pre-click
         if (canvas.style.cursor !== 'crosshair') canvas.style.cursor = 'crosshair'
         return
       }
     }
     const hit = rayPick(px, py)
-    let cursor = 'default'
-    if (hit) {
-      if (hit.kind === 'unit' && selectedSet.has(hit.id)) cursor = 'move'
-      else if (hit.kind === 'doodad' && selectedDoodadSet.has(hit.id)) cursor = 'move'
-      else cursor = 'pointer'
+    // Pre-click highlight: glow the entity under the pointer so the user can see
+    // what a click would select before committing. Doodads get a cyan fill +
+    // outline; units/buildings get the cyan outline only (no fill — it'd clobber
+    // their team-colour). Already-selected entities keep their white selection
+    // outline (we skip hover on them); anything else clears the hint.
+    if (hit && hit.kind === 'doodad') {
+      setDoodadHover(hit.id)
+      hoveredUnit = null
+    } else if (hit && hit.kind === 'unit' && !selectedSet.has(hit.id)) {
+      clearDoodadHover()
+      hoveredUnit = hit.id
+    } else {
+      clearHover()
     }
+    // Any entity under the cursor → 'pointer' (it's clickable to select). We do
+    // NOT switch to 'move' for selected entities: moving is done with the gizmo
+    // (which shows its own crosshair when a handle is under the pointer), so a
+    // move cursor on the entity body is misleading — especially for doodads,
+    // which can only be moved via the gizmo in the first place.
+    const cursor = hit ? 'pointer' : 'default'
     if (canvas.style.cursor !== cursor) canvas.style.cursor = cursor
   }
   function onCanvasHoverLeave() {
+    clearHover() // pointer left the canvas — drop the pre-click hint
     if (canvas.style.cursor !== '') canvas.style.cursor = ''
+    // Hide the brush ring when the pointer leaves the canvas (unless a stroke
+    // is mid-flight, in which case the doc-level move keeps painting and the
+    // ring re-appears on re-entry).
+    if (!brushStroking) brushCursor?.setBrush(null)
   }
   canvas.addEventListener('mousemove', onCanvasHoverMove)
   canvas.addEventListener('mouseleave', onCanvasHoverLeave)
@@ -2479,9 +3072,134 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     inst.__wc3ForgeScale = [s[0], s[1], s[2]]
     nudgeSkeletonRefresh(inst)
   }
+  // Live terrain re-render during brush strokes, split into two tiers by cost
+  // (measured via the bridge-paint + diagnostics harness):
+  //
+  //   TERRAIN geometry — cheap: terrain.update() re-uploads vertex buffers and
+  //     reuses the baked atlas. Runs THROTTLED (~every 90ms) so the user sees
+  //     paint/height land live. On an empty 65² map this held ~78fps, no stall.
+  //
+  //   WATER + CLIFFS — expensive: buildWater / renderCliffs rebuild whole meshes
+  //     and tanked the RAF to ~15fps with 200ms stalls (age_ms) when run per
+  //     dab — THIS was the "flicker + lag, worse on full maps." They don't need
+  //     to track every dab, so they run on a TRAILING DEBOUNCE: the timer resets
+  //     on each edit and only fires ~350ms after editing STOPS. During a
+  //     continuous drag they never rebuild; a moment after you pause/release
+  //     they update once. (Water/cliff geometry only depends on the final
+  //     heights/layers, so a single settle-time rebuild is correct.)
+  const TERRAIN_THROTTLE_MS = 90
+  const HEAVY_DEBOUNCE_MS = 350
+  let terrainDirty = false
+  let cliffsDirty = false
+  let waterDirty = false
+  let terrainRunning = false
+  let terrainTimer: ReturnType<typeof setTimeout> | null = null
+  let lastTerrainTs = -1e9
+  let heavyRunning = false
+  let heavyTimer: ReturnType<typeof setTimeout> | null = null
+  // Identity of the ground palette a terrain mesh was baked against. When this
+  // is unchanged between rebuilds, terrain.update() can reuse the atlas; when it
+  // changes (tileset swap), we rebuild the mesh so the atlas matches.
+  function terrainPaletteKey(t: any): string {
+    return Array.isArray(t?.palette) ? t.palette.join('|') : ''
+  }
+  // Translate the entity-changed field into which surfaces need rebuilding, then
+  // schedule the appropriate tier. Terrain AND cliffs go in the fast throttled
+  // tier and rebuild from the SAME fresh fetch, in lockstep: terrain.update
+  // skips cliff cells (holes) the instant a layer changes, so the cliff walls
+  // MUST rebuild at the same cadence or you get voids ("invisible cliffs").
+  // Cliffs are rebuilt exactly as loadMap does (fresh GetTerrain → compute →
+  // render) — reusing a cached DTO produced fewer/no placements. Only water
+  // (expensive, never edited by these brushes) is deferred to the slow tier.
+  function markTerrainDirty(field: string) {
+    switch (field) {
+      case 'tile': terrainDirty = true; break
+      case 'height': terrainDirty = true; waterDirty = true; break
+      case 'cliff': terrainDirty = true; cliffsDirty = true; break
+      case 'ramp': terrainDirty = true; cliffsDirty = true; break
+      default: terrainDirty = true; cliffsDirty = true; waterDirty = true; break // unknown → all
+    }
+    if (terrainDirty || cliffsDirty) scheduleTerrain()
+    if (waterDirty) scheduleHeavy()
+  }
+  // --- Tier 1: terrain geometry + cliffs (throttled, in lockstep) ---
+  function scheduleTerrain() {
+    if (terrainTimer !== null || terrainRunning) return
+    const wait = Math.max(0, TERRAIN_THROTTLE_MS - (performance.now() - lastTerrainTs))
+    terrainTimer = setTimeout(() => { terrainTimer = null; void runTerrain() }, wait)
+  }
+  async function runTerrain() {
+    if (terrainRunning) { scheduleTerrain(); return }
+    if (!terrainDirty && !cliffsDirty) return
+    terrainRunning = true
+    lastTerrainTs = performance.now()
+    const doTerrain = terrainDirty, doCliffs = cliffsDirty
+    terrainDirty = cliffsDirty = false
+    try {
+      const prevPaletteKey = terrainPaletteKey(cachedTerrainDTO)
+      const t = await GetTerrain()
+      cachedTerrainDTO = t
+      cellHighlight?.setTerrain(t as unknown as any)
+      const gl = (viewer as any).gl as WebGLRenderingContext
+      if (doTerrain) {
+        const paletteChanged = terrainPaletteKey(t) !== prevPaletteKey
+        if (terrain && !paletteChanged) {
+          terrain.update(t as unknown as any)
+        } else {
+          const newTerrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
+          terrain?.dispose(); terrain = newTerrain
+        }
+        sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
+      }
+      if (doCliffs) {
+        // Build-then-swap (no null gap), same path + same fresh `t` as loadMap.
+        const cliffPlacements = computeCliffPlacements(t as unknown as any)
+        const newCliffs = cliffPlacements.length > 0
+          ? await renderCliffs(gl, viewer as any, pathSolver, cliffPlacements, t as unknown as any)
+          : null
+        cliffs?.dispose(); cliffs = newCliffs
+      }
+    } catch (e) {
+      flog('[terrain update]', e instanceof Error ? e.message : String(e))
+    } finally {
+      terrainRunning = false
+      if (terrainDirty || cliffsDirty) scheduleTerrain()
+    }
+  }
+  // --- Tier 2: water (trailing debounce — fires after editing stops) ---
+  function scheduleHeavy() {
+    if (heavyTimer !== null) clearTimeout(heavyTimer)
+    heavyTimer = setTimeout(() => { heavyTimer = null; void runHeavy() }, HEAVY_DEBOUNCE_MS)
+  }
+  async function runHeavy() {
+    if (heavyRunning) { scheduleHeavy(); return }
+    if (!waterDirty) return
+    heavyRunning = true
+    waterDirty = false
+    try {
+      // The fast terrain tier fetched fresh moments ago; reuse it for water.
+      const t = cachedTerrainDTO ?? (await GetTerrain())
+      const gl = (viewer as any).gl as WebGLRenderingContext
+      const newWater = await buildWater(gl, viewer as any, pathSolver, t as unknown as any)
+      water?.dispose(); water = newWater
+    } catch (e) {
+      flog('[terrain water rebuild]', e instanceof Error ? e.message : String(e))
+    } finally {
+      heavyRunning = false
+      if (waterDirty) scheduleHeavy()
+    }
+  }
+
   EventsOn(ENTITY_EVENT, (payload: EntityChangedPayload) => {
     if (!payload) return
     const kind = payload.kind
+    // Terrain edits (brush dab, MCP terrain.*, undo/redo). The field names what
+    // changed (tile/height/cliff/ramp) so we throttle + rebuild only the
+    // affected surface instead of the whole composition per event.
+    if (kind === 'terrain') {
+      markTerrainDirty(payload.field || '')
+      return
+    }
     if (payload.field === 'position') {
       const p = payload.position
       if (!p || p.length < 3) return
@@ -2541,6 +3259,13 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       }
     },
     async loadMap(opts?: { keepCamera?: boolean }) {
+      // Serialize against any in-flight loadMap (see loadMapSerial above) so two
+      // placement walks never race and leave orphaned ghost instances. Each call
+      // waits for the prior one to finish its full clear+place cycle first.
+      const prior = loadMapSerial
+      let releaseSerial!: () => void
+      loadMapSerial = new Promise<void>((r) => { releaseSerial = r })
+      try { await prior } catch { /* a prior load failing must not block this one */ }
       const keepCamera = !!opts?.keepCamera
       // U5 scene-load stats: mark in-flight, bump generation, start the timer.
       // loadMs / lastLoad are committed in the finally below so a thrown
@@ -2565,6 +3290,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
           cellHighlight.setTerrain(t as unknown as any)
           cellHighlight.setCell(null)
         }
+        // Drop any stale brush ring from a prior map (it re-samples the new
+        // heightfield on the next hover-move).
+        brushCursor?.setBrush(null)
         const gl = (viewer as any).gl as WebGLRenderingContext
         terrain = await buildTerrain(gl, viewer as any, pathSolver, t as unknown as any)
         sceneDiag.terrainDrawCalls = terrain?.drawCallCount ?? 0
@@ -2781,6 +3509,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       // double-stack blockers. Done BEFORE the audit log so its count is
       // accurate in the same flog line.
       pathBlockers?.setMarkers(pathBlockerMarkers)
+      rebuildBlockerProxies(pathBlockerMarkers) // keep gizmo-movable proxies in sync
       flog(`[loadMap] units placed=${uPlaced} skipped=${uSkipped}, doodads placed=${dPlaced} skipped=${dSkipped} pathBlockers=${pathBlockerCount} doodad-bbox=x[${xmin.toFixed(0)},${xmax.toFixed(0)}] y[${ymin.toFixed(0)},${ymax.toFixed(0)}] slocs=${slocMarkers.length}`)
       // Top skipped type-ids, sorted by skip count desc — same ordering the
       // audit log uses, kept as a string[] for the diagnostics summary.
@@ -2813,6 +3542,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // at loadingMap=true.
         sceneDiag.loadMs = Math.round(performance.now() - loadStartTs)
         sceneDiag.loadingMap = false
+        releaseSerial() // let the next queued loadMap proceed
       }
     },
     clear() {
@@ -2848,6 +3578,22 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         cellHighlight.dispose()
         cellHighlight = null
       }
+      if (brushCursor) {
+        brushCursor.dispose()
+        brushCursor = null
+      }
+      if (outline) {
+        outline.dispose()
+        outline = null
+      }
+      if (boundsDebug) {
+        boundsDebug.dispose()
+        boundsDebug = null
+      }
+      if (pickBuffer) {
+        pickBuffer.dispose()
+        pickBuffer = null
+      }
       if (pathBlockers) {
         pathBlockers.dispose()
         pathBlockers = null
@@ -2858,30 +3604,22 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       }
     },
     setSelected(units: Set<number>, doodads: Set<number>) {
-      // Units: clear tint on no-longer-selected, paint tint on newly-selected.
-      // Doodads: same dance against the doodad set + map.
-      for (const cn of selectedSet) {
-        if (units.has(cn)) continue
-        const inst = unitInstances.get(cn)
-        if (inst) inst.setVertexColor([1, 1, 1, 1])
-      }
-      for (const cn of units) {
-        if (selectedSet.has(cn)) continue
-        const inst = unitInstances.get(cn)
-        if (inst) inst.setVertexColor(SELECT_TINT)
-      }
+      // The authoritative selection has arrived — retire the rubber-band preview
+      // now (not on mouse-up), so the cyan preview hands off to the white
+      // selection outline in the same frame with no highlight-less gap.
+      rubberPreviewUnits.clear()
+      rubberPreviewDoodads.clear()
+      // Selection is shown by the white instance-outline pass in the render
+      // loop (driven straight off these sets), NOT a vertex tint — so here we
+      // only track the sets. Not repainting vertex colours also stops the old
+      // behaviour of clobbering unit team-colours when selecting/deselecting.
       selectedSet = new Set(units)
-
-      for (const cn of selectedDoodadSet) {
-        if (doodads.has(cn)) continue
-        const inst = doodadInstances.get(cn)
-        if (inst) inst.setVertexColor([1, 1, 1, 1])
-      }
-      for (const cn of doodads) {
-        if (selectedDoodadSet.has(cn)) continue
-        const inst = doodadInstances.get(cn)
-        if (inst) inst.setVertexColor(SELECT_TINT)
-      }
+      // If the entity under the cursor just became selected, drop its cyan hover
+      // hint so it doesn't double up under the white selection outline. The
+      // click-to-select path already clears hover on mousedown; this covers
+      // MCP / side-panel selection that lands here mid-hover.
+      if (hoveredUnit !== null && units.has(hoveredUnit)) hoveredUnit = null
+      if (hoveredDoodad !== null && doodads.has(hoveredDoodad)) clearDoodadHover()
       selectedDoodadSet = new Set(doodads)
 
       // Update gizmo selection items. Cancel any active drag when selection changes.
@@ -3105,6 +3843,32 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     onTerrainPick(cb: TerrainPickCallback) {
       terrainPickCallback = cb
     },
+    setTerrainBrushMode(active: boolean) {
+      if (active === terrainBrushMode) return
+      terrainBrushMode = active
+      if (active) {
+        canvas.style.cursor = 'crosshair'
+      } else {
+        // Leaving brush mode: drop any in-progress stroke + the footprint ring,
+        // and release the cursor (unless another mode still wants the crosshair).
+        if (brushStroking) {
+          brushStroking = false
+          brushLastCellKey = -1
+          terrainBrushCallback?.(null, 'end')
+        }
+        brushCursor?.setBrush(null)
+        if (!terrainPickMode && !placementMode) canvas.style.cursor = ''
+      }
+    },
+    isTerrainBrushMode() { return terrainBrushMode },
+    onTerrainBrushStroke(cb: TerrainBrushCallback) {
+      terrainBrushCallback = cb
+    },
+    setTerrainBrushShape(shape: TerrainBrushShape) {
+      // Keep the radius fractional — the footprint reach + cursor ring both use
+      // it as a float (radius+0.5), so e.g. 1.25 grows the brush smoothly.
+      brushShape = { radius: Math.max(0, shape.radius), shape: shape.shape }
+    },
     setPlacementMode(active: boolean) {
       if (active === placementMode) return
       placementMode = active
@@ -3114,10 +3878,18 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       // shouldn't reset a cursor terrain mode still wants).
       if (active) canvas.style.cursor = 'crosshair'
       else if (!terrainPickMode) canvas.style.cursor = ''
+      // Leaving placement mode always retires the preview ghost — it only
+      // makes sense while a brush is armed. Re-entry rebuilds it via
+      // setPlacementGhost. This is the single chokepoint every disarm path
+      // (palette cancel, Escape, right-click, map close) funnels through.
+      if (!active) disposePlacementGhost()
     },
     isPlacementMode() { return placementMode },
     onPlacementPick(cb: PlacementPickCallback) {
       placementCallback = cb
+    },
+    setPlacementGhost(typeId: string | null, types: Record<string, DoodadTypeInfo>) {
+      void rebuildPlacementGhost(typeId, types)
     },
     async addDoodadLive(d: any, types: Record<string, DoodadTypeInfo>) {
       const inst = await placeDoodad(d, types)
