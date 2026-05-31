@@ -1431,16 +1431,15 @@
     scene?.setPlacementMode(!!typeId)
   }
 
-  // Terrain Palette → scene wiring. The palette reports the armed brush (tool +
-  // size/shape/strength + selected tiles) or null to disarm. We mirror the
-  // footprint to the scene's cursor and toggle brush mode; arming a terrain
-  // brush is mutually exclusive with doodad placement + terrain-pick so the
-  // canvas's click routing stays unambiguous.
+  // Terrain Palette → scene wiring. The palette (shown only in Terrain Mode)
+  // reports the armed brush (tool + size/shape/strength + selected tiles) or
+  // null to disarm. We mirror the footprint to the scene's cursor and toggle
+  // brush mode. The scene's mousedown prioritizes brush over the cell-inspect
+  // pick, so both stay enabled in Terrain Mode: a tool selected → drag paints;
+  // no tool → click inspects the cell.
   function onTerrainBrushChange(brush: TerrainBrush | null) {
     terrainBrush = brush
     if (brush) {
-      if (armedDoodadType) { armedDoodadType = null; scene?.setPlacementMode(false) }
-      if (terrainPickModeOn) { terrainPickModeOn = false; terrainCell = null; scene?.setTerrainPickMode(false); scene?.setHighlightedCell(null) }
       scene?.setTerrainBrushShape({ radius: brush.radius, shape: brush.shape })
       scene?.setTerrainBrushMode(true)
     } else {
@@ -1710,14 +1709,13 @@
     // two click-routing modes don't fight over the canvas (placement wins in
     // the scene's click handler, which would otherwise swallow terrain clicks).
     if (!terrainPickModeOn && armedDoodadType) armDoodad(null)
-    if (!terrainPickModeOn && terrainBrush) onTerrainBrushChange(null)
     terrainPickModeOn = !terrainPickModeOn
     scene?.setTerrainPickMode(terrainPickModeOn)
     if (!terrainPickModeOn) {
       terrainCell = null
-      // Drop the yellow wireframe overlay when leaving terrain mode — the
-      // user has switched to doodad mode and the persistent highlight would
-      // otherwise sit at a cell they're no longer working with.
+      // Leaving Terrain Mode: disarm any armed terrain brush (the palette
+      // unmounts) so the scene exits brush mode, and drop the cell highlight.
+      if (terrainBrush) onTerrainBrushChange(null)
       scene?.setHighlightedCell(null)
     }
   }
@@ -2431,19 +2429,19 @@
         {/if}
         <CameraOrbitGizmo camera={scene.getCamera()} />
       {/if}
-      <!-- Doodad palette: floating "+" launcher (bottom-left) + panel. Owns
-           its own open state; reports the armed type via onArm so App drives
-           the scene's placement mode and the click-to-place flow. Only mounts
-           with a map loaded — there's nothing to place doodads onto otherwise,
-           and unmounting also disarms/closes it on map close. -->
-      {#if status.loaded}
+      <!-- Doodad palette: floating "+" launcher (bottom-left) + panel. Shown in
+           Doodad Mode only (the terrain palette takes the same slot in Terrain
+           Mode). Reports the armed type via onArm so App drives the scene's
+           placement mode and the click-to-place flow. -->
+      {#if status.loaded && !terrainPickModeOn}
         <DoodadPalette armedTypeId={armedDoodadType} {reforged} onArm={armDoodad} />
       {/if}
-      <!-- Terrain palette: floating "mountain" launcher (bottom-left, beside the
-           doodad "+"). Reports the armed brush via onChange; App drives the
-           scene's brush mode + the Go brush calls. Always mounted so its FAB is
-           available; it shows an "open a map" hint when no map is loaded. -->
-      <TerrainPalette loaded={status.loaded} onChange={onTerrainBrushChange} />
+      <!-- Terrain palette: floating "mountain" launcher (bottom-left). Shown in
+           Terrain Mode only. Reports the armed brush via onChange; App drives
+           the scene's brush mode + the Go brush calls. -->
+      {#if status.loaded && terrainPickModeOn}
+        <TerrainPalette loaded={status.loaded} onChange={onTerrainBrushChange} />
+      {/if}
     </section>
 
     <Splitter direction="vertical"

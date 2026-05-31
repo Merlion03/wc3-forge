@@ -1,6 +1,7 @@
 <script lang="ts">
-  // Floating terrain palette. A "mountain" launcher pinned bottom-left (next to
-  // the doodad palette's "+") toggles a panel with three tool groups — Texture
+  // Floating terrain palette. A "mountain" launcher pinned bottom-left (shown
+  // in Terrain Mode, where it takes the doodad palette's slot) toggles a panel
+  // with three tool groups — Texture
   // (paint a ground tile), Height (raise / lower / flatten / smooth), and Cliffs
   // (raise / lower a cliff level, toggle ramp) — plus shared brush controls
   // (size, circle/square shape, strength).
@@ -293,7 +294,7 @@
 <style>
   .palette-fab {
     position: absolute;
-    left: 60px;
+    left: 12px;
     bottom: 12px;
     z-index: 40;
     width: 40px;
@@ -317,7 +318,7 @@
 
   .palette {
     position: absolute;
-    left: 60px;
+    left: 12px;
     bottom: 60px;
     z-index: 40;
     width: 300px;
