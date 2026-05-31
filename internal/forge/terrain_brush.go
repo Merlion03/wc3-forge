@@ -3,6 +3,8 @@ package forge
 import (
 	"fmt"
 	"math"
+
+	"github.com/StephenSHorton/wc3-forge/internal/formats/w3e"
 )
 
 // Terrain BRUSH mutators — region edits over a circular/square footprint of
@@ -53,6 +55,7 @@ const (
 	fieldLayer                         // LayerHeight (0..15)
 	fieldCliffTex                      // CliffTexture (0..15)
 	fieldFlags                         // Flags (ramp/blight/water/boundary nibble)
+	fieldWaterRaw                      // WaterLevel (raw uint16, 14-bit water surface height)
 )
 
 // terrainCornerEdit is one field write on one corner, with the prior value so
@@ -114,6 +117,8 @@ func applyTerrainEditsLocked(s *Session, edits []terrainCornerEdit, revert bool)
 			tp.CliffTexture = uint8(v)
 		case fieldFlags:
 			tp.Flags = uint8(v)
+		case fieldWaterRaw:
+			tp.WaterLevel = uint16(v)
 		}
 	}
 	s.dirtyTerrain = true
@@ -490,6 +495,146 @@ func (s *Session) RampBrush(centerCol, centerRow int, radius float64, shape stri
 	s.mu.Unlock()
 	s.finishTerrainBrush(wasDirty, len(edits) > 0, historyChanged, "ramp")
 	return nil
+}
+
+// Water-surface constants, mirroring HiveWE's CellOperator (terrain_operators.cpp).
+// When "add" places water over a corner that has none, the new surface sits a
+// fixed amount above the corner's *final* rendered ground Z. HiveWE expresses
+// this in cell units (1 cell = 128 studs): WATER_GROUND_ZERO (0.70) +
+// WATER_HEIGHT (0.25) = 0.95 cells above ground → ~121.6 studs. Kept as a single
+// stud constant so the brush and any future water-tool share one source of truth.
+const waterSurfaceAboveGroundStuds = (0.70 + 0.25) * 128.0
+
+// w3eWaterMaxRaw is the inclusive ceiling for the packed 14-bit water-height
+// field (bits 0..13 of the .w3e water_and_flags word). The top two bits hold the
+// boundary marker + are reserved, so the raw water value must stay in [0,0x3FFF].
+const w3eWaterMaxRaw = 0x3FFF
+
+// gameZToRawWater converts a game-space water-surface Z (WC3 world units) into
+// the packed 14-bit WaterLevel the .w3e stores. Same baseline/scale as the
+// ground-height field (raw = game_z*4 + 0x2000), inverse of w3e.Tilepoint.WaterZ(),
+// but clamped to the unsigned 14-bit range instead of int16 — the high bits are
+// owned by the boundary marker and must never be touched here.
+func gameZToRawWater(z float32) uint16 {
+	raw := int32(z*4.0) + w3eHeightBaseline
+	if raw < 0 {
+		raw = 0
+	}
+	if raw > w3eWaterMaxRaw {
+		raw = w3eWaterMaxRaw
+	}
+	return uint16(raw)
+}
+
+// WaterBrush adds or removes water over the footprint. mode:
+//
+//	"add"    — flag every footprint corner as having water (Flags bit 0x4) and set
+//	           the water surface to a single flat height. That height is `height`
+//	           when `hasHeight` is true (the caller supplies the surface Z in game
+//	           units), otherwise it is auto-derived from THIS dab's center corner
+//	           ground + waterSurfaceAboveGroundStuds. Either way ALL footprint
+//	           corners get the SAME surface, so the sheet is flat — and the GUI
+//	           captures one height at stroke start (see WaterAddHeightAt) and passes
+//	           it for every dab, so a click-drag paints one flat lake the way HiveWE
+//	           does, instead of draping over the terrain.
+//
+//	           `overwrite` controls existing visible water: when false (Auto mode),
+//	           a corner that already holds water ABOVE its ground keeps its height,
+//	           so auto-fill never lowers a deep lake you brush over (HiveWE's
+//	           behavior). When true (Fixed-height mode), every painted corner is set
+//	           to the new surface, raising OR lowering existing water — the user
+//	           asked for that exact level. Corners with no water or with water at/
+//	           below ground always take the new surface regardless.
+//	"remove" — clear the water flag and zero the stored level.
+//
+// Mirrors HiveWE's CellOperator add_water/remove_water. Each corner records up to
+// two edits (the flag word + the water level) so Undo restores both exactly. One
+// undo step, one re-render. WC3 renders a water quad for any cell with at least
+// one watered corner, so a corner footprint fills ponds the same way the World
+// Editor's cell brush does.
+func (s *Session) WaterBrush(centerCol, centerRow int, radius float64, shape, mode string, height float32, hasHeight, overwrite bool) error {
+	s.mu.Lock()
+	corners := s.terrainBrushCornersLocked(centerCol, centerRow, radius, shape)
+	if corners == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("brush center (%d,%d) out of range or no terrain loaded", centerCol, centerRow)
+	}
+	remove := mode == "remove"
+	// Resolve a SINGLE surface height for the whole footprint so every corner that
+	// gains water lands on one flat plane. Explicit when the caller passes one;
+	// otherwise auto-derived from this dab's center corner ground.
+	var rawSurface uint16
+	if !remove {
+		surfaceZ := height
+		if !hasHeight {
+			center := centerRow*int(s.terrain.Width) + centerCol
+			surfaceZ = s.terrain.Tiles[center].FinalZ() + waterSurfaceAboveGroundStuds
+		}
+		rawSurface = gameZToRawWater(surfaceZ)
+	}
+	wasDirty := s.anyDirtyLocked()
+	edits := make([]terrainCornerEdit, 0, len(corners)*2)
+	for _, idx := range corners {
+		tp := &s.terrain.Tiles[idx]
+		oldFlags := tp.Flags
+		oldWater := tp.WaterLevel
+
+		var newFlags uint8
+		var newWater uint16
+		if remove {
+			newFlags = oldFlags &^ 0x4
+			newWater = 0
+		} else {
+			newFlags = oldFlags | 0x4
+			// In Auto mode (overwrite=false) keep an existing, already-visible
+			// surface so we don't lower a deep lake brushed over; only set the flat
+			// stroke height when the corner was dry or its water sat at/below the
+			// ground (a void). In Fixed-height mode (overwrite=true) the user dialed
+			// an exact level, so always apply it. waterAboveGroundLocked matches
+			// HiveWE's water_above_ground test.
+			if !overwrite && tp.HasWater() && waterAboveGroundLocked(tp) {
+				newWater = oldWater
+			} else {
+				newWater = rawSurface
+			}
+		}
+
+		if newFlags != oldFlags {
+			tp.Flags = newFlags
+			edits = append(edits, terrainCornerEdit{idx: idx, field: fieldFlags, oldVal: int32(oldFlags), newVal: int32(newFlags)})
+		}
+		if newWater != oldWater {
+			tp.WaterLevel = newWater
+			edits = append(edits, terrainCornerEdit{idx: idx, field: fieldWaterRaw, oldVal: int32(oldWater), newVal: int32(newWater)})
+		}
+	}
+	historyChanged := s.commitTerrainBrushLocked("Edit water", edits)
+	s.mu.Unlock()
+	s.finishTerrainBrush(wasDirty, len(edits) > 0, historyChanged, "water")
+	return nil
+}
+
+// waterAboveGroundLocked reports whether a corner's stored water surface sits
+// above its final rendered ground Z (i.e. the water is actually visible). Used
+// by WaterBrush to decide whether to preserve an existing water height or raise
+// it. Mirrors HiveWE CellOperator::water_above_ground. Caller MUST hold s.mu.
+func waterAboveGroundLocked(tp *w3e.Tilepoint) bool {
+	return tp.WaterZ() > tp.FinalZ()
+}
+
+// WaterAddHeightAt returns the water-surface Z (game units) the "add" brush
+// would place at corner (col,row) in auto mode — the corner's final ground Z plus
+// the fixed shore offset. The Terrain Palette calls this once at stroke start so
+// every dab in a click-drag paints to one flat level, mirroring HiveWE's
+// capture-the-height-at-stroke-begin behavior. Pure read: no mutation/history.
+func (s *Session) WaterAddHeightAt(col, row int) (float32, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, err := s.terrainCornerIndexLocked(col, row)
+	if err != nil {
+		return 0, err
+	}
+	return s.terrain.Tiles[idx].FinalZ() + waterSurfaceAboveGroundStuds, nil
 }
 
 // resolveCliffPaletteIndexLocked maps a 4-char cliff FourCC to its slot index in

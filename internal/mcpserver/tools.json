@@ -1468,6 +1468,54 @@
     "method": "terrain.brush_ramp"
   },
   {
+    "name": "terrain_brush_water",
+    "description": "Add or remove water over a brush footprint. mode: 'add' floods the footprint; 'remove' clears water. For 'add', pass height for an absolute water-surface Z (game-Z studs) applied FLAT across the footprint; omit height to auto-place the surface ~122 studs above the ground under the center. Corners that already have visible water keep their height on 'add', so re-painting a pond won't flatten a tuned surface. A water quad renders for any cell with at least one watered corner. Returns { ok: true }. Undo-aware.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "col": {
+          "type": "integer",
+          "description": "footprint center column (0-based corner)"
+        },
+        "row": {
+          "type": "integer",
+          "description": "footprint center row (0-based corner)"
+        },
+        "radius": {
+          "type": "number",
+          "description": "brush radius in corner units, fractional allowed (0 = single corner)"
+        },
+        "shape": {
+          "type": "string",
+          "enum": [
+            "circle",
+            "square"
+          ],
+          "description": "brush shape (default circle)"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "add",
+            "remove"
+          ],
+          "description": "water brush mode"
+        },
+        "height": {
+          "type": "number",
+          "description": "absolute water-surface height (game-Z studs), applied flat; omit to auto-place just above the ground"
+        }
+      },
+      "required": [
+        "col",
+        "row",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "method": "terrain.brush_water"
+  },
+  {
     "name": "terrain_get_tile",
     "description": "Read back the ground tile + height at a terrain corner (so edits are verifiable). col/row are 0-based corner grid indices. Returns { col, row, ground_tile_id, height }.",
     "inputSchema": {

@@ -9,7 +9,7 @@
     GetUnitTypeIndex, GetDoodadTypeIndex,
     NewMapDialog as NewMapSaveDialog, CreateNewMap, WriteNewMap, ReportDiagnostics,
     MoveUnit, MoveDoodad, CreateDoodad, DeleteSelection, IsDirty, SaveMap,
-    PaintTerrainTile, BrushTerrainHeight, BrushTerrainCliff, BrushTerrainRamp, GetTerrainTile,
+    PaintTerrainTile, BrushTerrainHeight, BrushTerrainCliff, BrushTerrainRamp, BrushTerrainWater, WaterAddHeightAt, GetTerrainTile,
     BeginUndoGroup, EndUndoGroup,
     LaunchInWC3,
     Undo, Redo, CanUndo, CanRedo, HistoryList,
@@ -130,6 +130,10 @@
   let terrainBrushChain: Promise<unknown> = Promise.resolve()
   // Flatten target Z, captured on stroke start (the height under the first dab).
   let terrainFlattenTarget = 0
+  // Water surface Z for the Add Water tool, captured once on stroke start (auto
+  // mode) or taken from the palette's fixed-height value, then replayed for every
+  // dab so a drag paints one flat lake instead of draping over the terrain.
+  let terrainWaterTarget = 0
   // True between BeginUndoGroup and EndUndoGroup so 'end' always closes the
   // group even if the brush was disarmed mid-stroke (which would otherwise leak
   // an open group and wedge undo).
@@ -1523,7 +1527,10 @@
   function onTerrainBrushChange(brush: TerrainBrush | null) {
     terrainBrush = brush
     if (brush) {
-      scene?.setTerrainBrushShape({ radius: brush.radius, shape: brush.shape })
+      // Preview the water surface only for Add Water with a fixed height — in Auto
+      // mode there's no single plane (it follows the ground per stroke).
+      const waterPlaneZ = brush.tool === 'water' && brush.waterFixedHeight ? brush.waterHeight : null
+      scene?.setTerrainBrushShape({ radius: brush.radius, shape: brush.shape, waterPlaneZ })
       scene?.setTerrainBrushMode(true)
     } else {
       scene?.setTerrainBrushMode(false)
@@ -1557,6 +1564,16 @@
           if (b.tool === 'flatten') {
             try { terrainFlattenTarget = (await GetTerrainTile(cell.col, cell.row)).height } catch { terrainFlattenTarget = 0 }
           }
+          // Add Water locks the whole stroke to one surface height: the palette's
+          // fixed value, or the auto height under the first dab (so a drag paints
+          // a flat lake at the elevation where the stroke began).
+          if (b.tool === 'water') {
+            if (b.waterFixedHeight) {
+              terrainWaterTarget = b.waterHeight
+            } else {
+              try { terrainWaterTarget = await WaterAddHeightAt(cell.col, cell.row) } catch { terrainWaterTarget = 128 }
+            }
+          }
         })
         .then(() => applyBrushDab(b, cell))
         .catch(() => {})
@@ -1571,6 +1588,7 @@
     if (tool === 'paint') return 'Paint terrain'
     if (tool === 'ramp' || tool === 'rampOff') return 'Edit ramp'
     if (tool === 'cliffSet') return 'Edit cliff'
+    if (tool === 'water' || tool === 'waterOff') return 'Edit water'
     return 'Edit terrain height'
   }
 
@@ -1599,6 +1617,13 @@
         return BrushTerrainRamp(col, row, b.radius, b.shape, true)
       case 'rampOff':
         return BrushTerrainRamp(col, row, b.radius, b.shape, false)
+      case 'water':
+        // terrainWaterTarget was captured at stroke start; useHeight=true so the
+        // whole stroke paints one flat surface. overwrite = Fixed-height mode, so a
+        // dialed level re-levels existing water; Auto preserves it.
+        return BrushTerrainWater(col, row, b.radius, b.shape, 'add', terrainWaterTarget, true, b.waterFixedHeight)
+      case 'waterOff':
+        return BrushTerrainWater(col, row, b.radius, b.shape, 'remove', 0, false, false)
       default:
         return Promise.resolve()
     }

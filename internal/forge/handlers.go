@@ -118,6 +118,7 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("terrain.brush_height", handleTerrainBrushHeight)
 	reg("terrain.brush_cliff", handleTerrainBrushCliff)
 	reg("terrain.brush_ramp", handleTerrainBrushRamp)
+	reg("terrain.brush_water", handleTerrainBrushWater)
 	// Undo/redo + transactional grouping. AI clients can drive these the same
 	// way the UI does (Ctrl+Z is just a hotkey wrapper around history.undo);
 	// agents that batch multi-step edits should bracket them with

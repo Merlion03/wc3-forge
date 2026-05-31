@@ -275,3 +275,150 @@ func TestBrushFootprint_CircleVsSquare(t *testing.T) {
 		t.Errorf("circle r=1.5 footprint = %d corners, want 13", len(ciHalf))
 	}
 }
+
+// TestWaterBrush_AddRemoveAndUndo floods a single corner, checks the water flag
+// flipped on with a surface above the ground, then that Undo restores the prior
+// flag + level exactly, and finally that "remove" clears both.
+func TestWaterBrush_AddRemoveAndUndo(t *testing.T) {
+	tmp := copyFixtureToTemp(t, fixtureExtracted)
+	s := &Session{}
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	col, row := centerCorner(t, s)
+	w := int(s.Terrain().Width)
+	center := row*w + col
+
+	// Start from a known dry corner so the "add" path computes a fresh surface
+	// (rather than preserving an existing pond). Snapshot the dry baseline.
+	if s.Terrain().Tiles[center].HasWater() {
+		if err := s.WaterBrush(col, row, 0, "circle", "remove", 0, false, false); err != nil {
+			t.Fatalf("WaterBrush remove (baseline): %v", err)
+		}
+	}
+	origFlags := s.Terrain().Tiles[center].Flags
+	origWater := s.Terrain().Tiles[center].WaterLevel
+
+	// --- add (auto height) ---
+	if err := s.WaterBrush(col, row, 0, "circle", "add", 0, false, false); err != nil {
+		t.Fatalf("WaterBrush add: %v", err)
+	}
+	tp := s.Terrain().Tiles[center]
+	if !tp.HasWater() {
+		t.Errorf("water flag not set after add")
+	}
+	if tp.WaterZ() <= tp.FinalZ() {
+		t.Errorf("water surface %.1f not above ground %.1f after add", tp.WaterZ(), tp.FinalZ())
+	}
+	if !s.CanUndo() {
+		t.Fatalf("expected an undo step after add")
+	}
+
+	// --- undo restores the dry baseline exactly ---
+	if err := s.Undo(); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	if got := s.Terrain().Tiles[center].Flags; got != origFlags {
+		t.Errorf("flags after undo = 0x%x, want 0x%x", got, origFlags)
+	}
+	if got := s.Terrain().Tiles[center].WaterLevel; got != origWater {
+		t.Errorf("water level after undo = %d, want %d", got, origWater)
+	}
+
+	// --- remove (re-add first, then clear) leaves the flag off + level zeroed ---
+	if err := s.WaterBrush(col, row, 0, "circle", "add", 0, false, false); err != nil {
+		t.Fatalf("WaterBrush re-add: %v", err)
+	}
+	if err := s.WaterBrush(col, row, 0, "circle", "remove", 0, false, false); err != nil {
+		t.Fatalf("WaterBrush remove: %v", err)
+	}
+	tp = s.Terrain().Tiles[center]
+	if tp.HasWater() {
+		t.Errorf("water flag still set after remove")
+	}
+	if tp.WaterLevel != 0 {
+		t.Errorf("water level after remove = %d, want 0", tp.WaterLevel)
+	}
+}
+
+// TestWaterBrush_FlatExplicitHeight paints a radius-2 footprint with an explicit
+// surface height and asserts EVERY watered corner lands on that one flat level
+// (the flat-per-stroke / fixed-height behavior), regardless of per-corner ground.
+func TestWaterBrush_FlatExplicitHeight(t *testing.T) {
+	tmp := copyFixtureToTemp(t, fixtureExtracted)
+	s := &Session{}
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	col, row := centerCorner(t, s)
+	w := int(s.Terrain().Width)
+
+	// Clear any pre-existing water across the footprint so every corner is dry and
+	// will take the explicit height (the preserve-visible branch is exercised
+	// separately by the add/undo test).
+	if err := s.WaterBrush(col, row, 2, "circle", "remove", 0, false, false); err != nil {
+		t.Fatalf("WaterBrush remove (baseline): %v", err)
+	}
+
+	const surfaceZ float32 = 256.0
+	if err := s.WaterBrush(col, row, 2, "circle", "add", surfaceZ, true, true); err != nil {
+		t.Fatalf("WaterBrush add (explicit): %v", err)
+	}
+	wantRaw := gameZToRawWater(surfaceZ)
+
+	// The radius-2 circle footprint center + neighbors must all carry the SAME
+	// stored water level — a flat sheet, not a per-corner drape.
+	center := row*w + col
+	footprint := []int{center, center - 1, center + 1, center - w, center + w, center - 2, center + 2}
+	for _, idx := range footprint {
+		tp := s.Terrain().Tiles[idx]
+		if !tp.HasWater() {
+			t.Errorf("corner %d not watered after explicit add", idx)
+		}
+		if tp.WaterLevel != wantRaw {
+			t.Errorf("corner %d water level = %d, want flat %d", idx, tp.WaterLevel, wantRaw)
+		}
+	}
+}
+
+// TestWaterBrush_FixedHeightOverwrite reproduces the reported bug: adding water
+// at a higher fixed height over existing lower water must raise it (overwrite=
+// true), while Auto mode (overwrite=false) must preserve the existing higher
+// surface instead of lowering it.
+func TestWaterBrush_FixedHeightOverwrite(t *testing.T) {
+	tmp := copyFixtureToTemp(t, fixtureExtracted)
+	s := &Session{}
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	col, row := centerCorner(t, s)
+	center := row*int(s.Terrain().Width) + col
+
+	low := gameZToRawWater(256)
+	high := gameZToRawWater(700)
+
+	// Lay down low fixed-height water.
+	if err := s.WaterBrush(col, row, 0, "circle", "add", 256, true, true); err != nil {
+		t.Fatalf("WaterBrush add low: %v", err)
+	}
+	if got := s.Terrain().Tiles[center].WaterLevel; got != low {
+		t.Fatalf("after low add, water=%d want %d", got, low)
+	}
+
+	// Fixed-height add at a HIGHER level must overwrite the existing lower water.
+	if err := s.WaterBrush(col, row, 0, "circle", "add", 700, true, true); err != nil {
+		t.Fatalf("WaterBrush add high (overwrite): %v", err)
+	}
+	if got := s.Terrain().Tiles[center].WaterLevel; got != high {
+		t.Errorf("fixed-height higher add did not overwrite: water=%d want %d", got, high)
+	}
+
+	// Auto mode (overwrite=false) over the now-high water must NOT lower it. The
+	// auto surface here (ground+~122, ground≈0) is well below 700, so preserve.
+	if err := s.WaterBrush(col, row, 0, "circle", "add", 0, false, false); err != nil {
+		t.Fatalf("WaterBrush auto add: %v", err)
+	}
+	if got := s.Terrain().Tiles[center].WaterLevel; got != high {
+		t.Errorf("auto add lowered existing higher water: water=%d want preserved %d", got, high)
+	}
+}

@@ -25,6 +25,7 @@
     | 'raise' | 'lower' | 'flatten' | 'smooth'
     | 'cliffSet'
     | 'ramp' | 'rampOff'
+    | 'water' | 'waterOff'
   export interface TerrainBrush {
     tool: TerrainTool
     radius: number
@@ -35,6 +36,12 @@
     // Cliff level relative to the map's default height (0 = default; + raises,
     // - lowers). App maps this to the absolute w3e layer.
     cliffLevel: number
+    // Water: when waterFixedHeight is true, the Add Water tool sets the surface
+    // to waterHeight (absolute game-Z) flat across every dab; when false, the
+    // surface is auto-captured at stroke start so a drag paints one flat lake at
+    // the height of wherever the stroke began.
+    waterFixedHeight: boolean
+    waterHeight: number
   }
 
   let {
@@ -65,6 +72,10 @@
   // Target cliff level relative to the map's default height: 0 = default,
   // positive raises, negative lowers. The Cliff tool sets the footprint to this.
   let cliffLevel = $state(1)
+  // Water height controls. Off = auto (flat per stroke at the click point);
+  // on = pin the surface to waterHeight (absolute game-Z studs).
+  let waterFixedHeight = $state(false)
+  let waterHeight = $state(128)
 
   function rgb(c: number[] | undefined): string {
     if (!c || c.length < 3) return 'rgb(110,110,110)'
@@ -160,6 +171,8 @@
       groundTileId: selectedGround,
       cliffTileId: selectedCliff,
       cliffLevel,
+      waterFixedHeight,
+      waterHeight,
     }
   })
   $effect(() => {
@@ -284,6 +297,28 @@
                 </button>
               {/each}
             </div>
+          {/if}
+        </div>
+
+        <!-- Water group -->
+        <div class="section">
+          <div class="section-title">Water</div>
+          <div class="tool-row">
+            <button class="tool-btn" class:armed={activeTool === 'water'} onclick={() => pickTool('water')}>Add Water</button>
+            <button class="tool-btn" class:armed={activeTool === 'waterOff'} onclick={() => pickTool('waterOff')}>Remove Water</button>
+          </div>
+          <label class="ctl ctl-check">
+            <input type="checkbox" bind:checked={waterFixedHeight} />
+            <span>Fixed height</span>
+          </label>
+          {#if waterFixedHeight}
+            <label class="ctl">
+              <span>Height</span>
+              <input type="range" min="-2048" max="2048" step="16" bind:value={waterHeight} />
+              <span class="ctl-val">{waterHeight}</span>
+            </label>
+          {:else}
+            <div class="muted water-hint">Auto: flat lake at the height where each stroke begins.</div>
           {/if}
         </div>
 
@@ -453,7 +488,11 @@
   .ctl { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; margin-bottom: 6px; }
   .ctl > span:first-child { width: 54px; color: var(--muted-foreground); }
   .ctl input[type='range'] { flex: 1; accent-color: var(--primary); }
-  .ctl-val { width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+  .ctl-val { min-width: 38px; text-align: right; font-variant-numeric: tabular-nums; }
+  .ctl-check { gap: 6px; cursor: pointer; }
+  .ctl-check input { accent-color: var(--primary); }
+  .ctl-check > span { color: var(--foreground); }
+  .water-hint { font-size: 0.6875rem; line-height: 1.3; padding-top: 2px; }
   .seg { display: flex; gap: 2px; }
   .seg button {
     padding: 3px 8px; font-size: 0.6875rem; border: 1px solid var(--border);

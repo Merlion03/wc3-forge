@@ -179,3 +179,34 @@ func handleTerrainBrushRamp(params json.RawMessage) (any, error) {
 	}
 	return map[string]any{"ok": true}, nil
 }
+
+// terrainBrushWaterParams — terrain.brush_water. mode ∈ {add,remove}: "add"
+// floods the footprint with water; "remove" clears it. height (optional) is the
+// absolute water-surface Z in game units, applied flat across the footprint; when
+// omitted, "add" auto-places the surface just above the ground under the center.
+type terrainBrushWaterParams struct {
+	Col    int      `json:"col"`
+	Row    int      `json:"row"`
+	Radius float64  `json:"radius"`
+	Shape  string   `json:"shape"`
+	Mode   string   `json:"mode"`
+	Height *float32 `json:"height"`
+}
+
+func handleTerrainBrushWater(params json.RawMessage) (any, error) {
+	var p terrainBrushWaterParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	var h float32
+	hasHeight := p.Height != nil
+	if hasHeight {
+		h = *p.Height
+	}
+	// An explicit height means the caller wants that exact level, so overwrite
+	// existing visible water; auto (no height) preserves it.
+	if err := Current.WaterBrush(p.Col, p.Row, p.Radius, p.Shape, p.Mode, h, hasHeight, hasHeight); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}

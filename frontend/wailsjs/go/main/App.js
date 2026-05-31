@@ -50,6 +50,10 @@ export function BrushTerrainRamp(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['BrushTerrainRamp'](arg1, arg2, arg3, arg4, arg5);
 }
 
+export function BrushTerrainWater(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
+  return window['go']['main']['App']['BrushTerrainWater'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
+}
+
 export function CanRedo() {
   return window['go']['main']['App']['CanRedo']();
 }
@@ -532,6 +536,10 @@ export function UndoTo(arg1) {
 
 export function WC3InstallStatus() {
   return window['go']['main']['App']['WC3InstallStatus']();
+}
+
+export function WaterAddHeightAt(arg1, arg2) {
+  return window['go']['main']['App']['WaterAddHeightAt'](arg1, arg2);
 }
 
 export function WriteNewMap(arg1) {

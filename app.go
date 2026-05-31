@@ -1528,6 +1528,23 @@ func (a *App) BrushTerrainRamp(col, row int, radius float64, shape string, on bo
 	return forge.Current.RampBrush(col, row, radius, shape, on)
 }
 
+// BrushTerrainWater floods ("add") or clears ("remove") water over the
+// footprint. For "add", useHeight=true applies the given absolute surface height
+// (game-Z) flat across the footprint; useHeight=false auto-places it just above
+// the ground under the center. The palette captures one height at stroke start
+// (WaterAddHeightAt) and replays it so a drag paints a flat lake. overwrite=true
+// (Fixed-height mode) re-levels existing visible water to the new surface;
+// overwrite=false (Auto) preserves it. Mirrors terrain.brush_water (MCP).
+func (a *App) BrushTerrainWater(col, row int, radius float64, shape, mode string, height float64, useHeight, overwrite bool) error {
+	return forge.Current.WaterBrush(col, row, radius, shape, mode, float32(height), useHeight, overwrite)
+}
+
+// WaterAddHeightAt returns the auto water-surface height (game-Z) at a corner, so
+// the Terrain Palette can lock a whole water stroke to one flat level.
+func (a *App) WaterAddHeightAt(col, row int) (float32, error) {
+	return forge.Current.WaterAddHeightAt(col, row)
+}
+
 // GetTerrainTile reads back the ground tile + height at one corner. The Terrain
 // Palette's Flatten tool calls this on stroke start to capture the height to
 // flatten toward. Mirrors terrain.get_tile (MCP).

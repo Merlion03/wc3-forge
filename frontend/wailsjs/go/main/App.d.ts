@@ -31,6 +31,8 @@ export function BrushTerrainHeight(arg1:number,arg2:number,arg3:number,arg4:stri
 
 export function BrushTerrainRamp(arg1:number,arg2:number,arg3:number,arg4:string,arg5:boolean):Promise<void>;
 
+export function BrushTerrainWater(arg1:number,arg2:number,arg3:number,arg4:string,arg5:string,arg6:number,arg7:boolean,arg8:boolean):Promise<void>;
+
 export function CanRedo():Promise<boolean>;
 
 export function CanUndo():Promise<boolean>;
@@ -272,5 +274,7 @@ export function Undo():Promise<void>;
 export function UndoTo(arg1:number):Promise<void>;
 
 export function WC3InstallStatus():Promise<main.WC3InstallStatusDTO>;
+
+export function WaterAddHeightAt(arg1:number,arg2:number):Promise<number>;
 
 export function WriteNewMap(arg1:main.NewMapParams):Promise<void>;

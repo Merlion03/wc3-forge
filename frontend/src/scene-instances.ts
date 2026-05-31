@@ -482,7 +482,13 @@ export type TerrainPickCallback = (cell: TerrainCellInfo | null) => void
 export type TerrainBrushPhase = 'start' | 'paint' | 'end'
 export type TerrainBrushCallback = (cell: TerrainCellInfo | null, phase: TerrainBrushPhase) => void
 /** Brush footprint descriptor the palette pushes to the scene for the cursor. */
-export interface TerrainBrushShape { radius: number; shape: 'circle' | 'square' }
+export interface TerrainBrushShape {
+  radius: number
+  shape: 'circle' | 'square'
+  // Fixed water-surface Z to preview under the cursor (Add Water + Fixed height).
+  // null/undefined = no preview plane.
+  waterPlaneZ?: number | null
+}
 /**
  * A click-to-place hit while placement mode is armed. `worldX`/`worldY` are
  * the game-coordinate intersection of the click ray with the ground, and `z`
@@ -992,6 +998,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   let brushStroking = false
   let brushLastCellKey = -1
   let brushShape: TerrainBrushShape = { radius: 1, shape: 'circle' }
+  // Last cursor client position while in brush mode, so a brush-shape change
+  // (e.g. the fixed water-height slider) can refresh the preview without a move.
+  let lastBrushClient: { x: number; y: number } | null = null
   // Doodad-placement mode state. When true, plain LMB clicks fire the
   // placement callback (with the ground intersection + sampled terrain Z)
   // instead of entity-pick / terrain-inspect. Checked BEFORE terrainPickMode
@@ -2861,11 +2870,21 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // the ring hugs the surface.
   function updateBrushCursorAt(clientX: number, clientY: number) {
     if (!brushCursor) return
+    lastBrushClient = { x: clientX, y: clientY }
     const r = canvas.getBoundingClientRect()
     const xy = groundPlaneXY(clientX - r.left, clientY - r.top)
     if (!xy) {
       brushCursor.setBrush(null)
       return
+    }
+    // Preview plane Z must match the water RENDERER, which draws the surface at
+    // water_z + the per-tileset Water.slk offset*128 (see water.ts). The dialed
+    // fixed height is the pre-offset water_z, so add the same offset here — without
+    // it the preview floats above (or below) where the water actually lands.
+    let planeZ: number | undefined = undefined
+    if (brushShape.waterPlaneZ != null) {
+      const waterOffsetStuds = ((cachedTerrainDTO as any)?.water?.offset ?? 0) * 128
+      planeZ = brushShape.waterPlaneZ + waterOffsetStuds
     }
     brushCursor.setBrush({
       cx: xy[0],
@@ -2875,6 +2894,8 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       radius: (brushShape.radius + 0.5) * 128,
       shape: brushShape.shape,
       sampleZ: (x, y) => sampleTerrainHeight(x, y),
+      // Fixed-height water preview plane (Add Water + Fixed height); null = none.
+      planeZ,
     })
   }
 
@@ -3115,16 +3136,17 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   //     reuses the baked atlas. Runs THROTTLED (~every 90ms) so the user sees
   //     paint/height land live. On an empty 65² map this held ~78fps, no stall.
   //
-  //   WATER + CLIFFS — expensive: buildWater / renderCliffs rebuild whole meshes
-  //     and tanked the RAF to ~15fps with 200ms stalls (age_ms) when run per
-  //     dab — THIS was the "flicker + lag, worse on full maps." They don't need
-  //     to track every dab, so they run on a TRAILING DEBOUNCE: the timer resets
-  //     on each edit and only fires ~350ms after editing STOPS. During a
-  //     continuous drag they never rebuild; a moment after you pause/release
-  //     they update once. (Water/cliff geometry only depends on the final
-  //     heights/layers, so a single settle-time rebuild is correct.)
+  //   WATER — expensive: buildWater re-fetches the terrain DTO and rebuilds the
+  //     whole water mesh. Run PER DAB this tanked the RAF to ~15fps with 200ms
+  //     stalls (age_ms) — the original "flicker + lag, worse on full maps." So it
+  //     runs on its OWN THROTTLE (~every 120ms, a touch slower than terrain): the
+  //     user sees water fill in live as they paint, but rebuilds are capped well
+  //     below the dab rate so a fast stroke can't pile them up, and the throttle
+  //     coalesces — one rebuild reflects every dab since the last. A trailing
+  //     rebuild after the final dab lands the settled surface. (Cliffs are
+  //     similar but ride the throttled TERRAIN tier above — see runTerrain.)
   const TERRAIN_THROTTLE_MS = 90
-  const HEAVY_DEBOUNCE_MS = 350
+  const WATER_THROTTLE_MS = 120
   let terrainDirty = false
   let cliffsDirty = false
   let waterDirty = false
@@ -3133,6 +3155,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   let lastTerrainTs = -1e9
   let heavyRunning = false
   let heavyTimer: ReturnType<typeof setTimeout> | null = null
+  let lastHeavyTs = -1e9
   // Identity of the ground palette a terrain mesh was baked against. When this
   // is unchanged between rebuilds, terrain.update() can reuse the atlas; when it
   // changes (tileset swap), we rebuild the mesh so the atlas matches.
@@ -3153,6 +3176,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       case 'height': terrainDirty = true; waterDirty = true; break
       case 'cliff': terrainDirty = true; cliffsDirty = true; break
       case 'ramp': terrainDirty = true; cliffsDirty = true; break
+      case 'water': waterDirty = true; break
       default: terrainDirty = true; cliffsDirty = true; waterDirty = true; break // unknown → all
     }
     if (terrainDirty || cliffsDirty) scheduleTerrain()
@@ -3202,19 +3226,26 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       if (terrainDirty || cliffsDirty) scheduleTerrain()
     }
   }
-  // --- Tier 2: water (trailing debounce — fires after editing stops) ---
+  // --- Tier 2: water (throttled — rebuilds live during a stroke, ~every 120ms) ---
   function scheduleHeavy() {
-    if (heavyTimer !== null) clearTimeout(heavyTimer)
-    heavyTimer = setTimeout(() => { heavyTimer = null; void runHeavy() }, HEAVY_DEBOUNCE_MS)
+    if (heavyTimer !== null || heavyRunning) return
+    const wait = Math.max(0, WATER_THROTTLE_MS - (performance.now() - lastHeavyTs))
+    heavyTimer = setTimeout(() => { heavyTimer = null; void runHeavy() }, wait)
   }
   async function runHeavy() {
     if (heavyRunning) { scheduleHeavy(); return }
     if (!waterDirty) return
     heavyRunning = true
+    lastHeavyTs = performance.now()
     waterDirty = false
     try {
-      // The fast terrain tier fetched fresh moments ago; reuse it for water.
-      const t = cachedTerrainDTO ?? (await GetTerrain())
+      // Always fetch fresh. A water-only edit (terrain.brush_water) doesn't dirty
+      // the terrain tier, so cachedTerrainDTO would be stale here and the new
+      // water flags/levels wouldn't render. The throttle caps how often this
+      // GetTerrain + mesh rebuild runs; we also write the DTO back so terrain-cell
+      // picking keeps a current snapshot.
+      const t = await GetTerrain()
+      cachedTerrainDTO = t
       const gl = (viewer as any).gl as WebGLRenderingContext
       const newWater = await buildWater(gl, viewer as any, pathSolver, t as unknown as any)
       water?.dispose(); water = newWater
@@ -3905,7 +3936,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     setTerrainBrushShape(shape: TerrainBrushShape) {
       // Keep the radius fractional — the footprint reach + cursor ring both use
       // it as a float (radius+0.5), so e.g. 1.25 grows the brush smoothly.
-      brushShape = { radius: Math.max(0, shape.radius), shape: shape.shape }
+      brushShape = { radius: Math.max(0, shape.radius), shape: shape.shape, waterPlaneZ: shape.waterPlaneZ }
+      // If the cursor is already on the map, refresh it so a slider change to the
+      // fixed water height updates the preview plane without needing a mouse move.
+      if (terrainBrushMode && lastBrushClient) updateBrushCursorAt(lastBrushClient.x, lastBrushClient.y)
     },
     setPlacementMode(active: boolean) {
       if (active === placementMode) return

@@ -69,6 +69,12 @@ export interface BrushCursorState {
   shape: 'circle' | 'square'
   sampleZ: (x: number, y: number) => number // terrain height sampler
   color?: [number, number, number] // ring color (default cyan)
+  // Optional water-height preview: a flat, filled, translucent plane at this
+  // world Z spanning the footprint. Drawn depth-tested so terrain rising above
+  // the level occludes it — you see exactly where the fixed-height water surface
+  // will sit and which land it submerges. Omit/undefined to hide.
+  planeZ?: number
+  planeColor?: [number, number, number] // plane tint (default water blue)
 }
 
 export interface BrushCursor {
@@ -99,6 +105,11 @@ export function buildBrushCursor(gl: WebGLRenderingContext): BrushCursor | null 
   let vertCount = 0
   let color: [number, number, number] = [0.2, 0.85, 1.0]
   let visible = false
+
+  // Filled water-height preview plane (separate VBO; TRIANGLES at constant Z).
+  const planeVbo = gl.createBuffer()!
+  let planeVertCount = 0
+  let planeColor: [number, number, number] = [0.25, 0.55, 0.95]
 
   // Build the ring positions for the current state and upload them. We sample
   // terrain Z per ring vertex so the outline hugs hills and cliffs.
@@ -138,6 +149,39 @@ export function buildBrushCursor(gl: WebGLRenderingContext): BrushCursor | null 
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pts), gl.STREAM_DRAW)
   }
 
+  // Build the filled preview plane at state.planeZ (flat — NOT terrain-sampled),
+  // as explicit TRIANGLES so the draw needs no fan/strip state. Empty when no
+  // planeZ is set.
+  function rebuildPlane(state: BrushCursorState) {
+    if (state.planeZ == null) {
+      planeVertCount = 0
+      return
+    }
+    const z = state.planeZ
+    const r = state.radius
+    const pts: number[] = []
+    if (state.shape === 'square') {
+      const c: [number, number][] = [
+        [state.cx - r, state.cy - r],
+        [state.cx + r, state.cy - r],
+        [state.cx + r, state.cy + r],
+        [state.cx - r, state.cy + r],
+      ]
+      for (const i of [0, 1, 2, 0, 2, 3]) pts.push(c[i][0], c[i][1], z)
+    } else {
+      for (let i = 0; i < CIRCLE_SEGMENTS; i++) {
+        const a0 = (i / CIRCLE_SEGMENTS) * Math.PI * 2
+        const a1 = ((i + 1) / CIRCLE_SEGMENTS) * Math.PI * 2
+        pts.push(state.cx, state.cy, z)
+        pts.push(state.cx + Math.cos(a0) * r, state.cy + Math.sin(a0) * r, z)
+        pts.push(state.cx + Math.cos(a1) * r, state.cy + Math.sin(a1) * r, z)
+      }
+    }
+    planeVertCount = pts.length / 3
+    gl.bindBuffer(gl.ARRAY_BUFFER, planeVbo)
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pts), gl.STREAM_DRAW)
+  }
+
   return {
     setBrush(state: BrushCursorState | null) {
       if (!state) {
@@ -146,13 +190,40 @@ export function buildBrushCursor(gl: WebGLRenderingContext): BrushCursor | null 
       }
       visible = true
       color = state.color ?? [0.2, 0.85, 1.0]
+      planeColor = state.planeColor ?? [0.25, 0.55, 0.95]
       rebuild(state)
+      rebuildPlane(state)
     },
     draw(viewProj: Float32Array) {
-      if (!visible || vertCount === 0) return
+      if (!visible) return
+      const maxAttribs = gl.getParameter(gl.MAX_VERTEX_ATTRIBS) | 0
+
+      // Water-height preview plane FIRST: depth-tested (terrain above the level
+      // occludes it → you see the waterline), translucent, no depth writes.
+      if (planeVertCount > 0) {
+        gl.useProgram(prog.program)
+        gl.bindBuffer(gl.ARRAY_BUFFER, planeVbo)
+        for (let i = 0; i < maxAttribs; i++) gl.disableVertexAttribArray(i)
+        gl.enableVertexAttribArray(prog.aPosition)
+        gl.vertexAttribPointer(prog.aPosition, 3, gl.FLOAT, false, 12, 0)
+        gl.uniformMatrix4fv(prog.uViewProj, false, viewProj)
+        gl.uniform3f(prog.uColor, planeColor[0], planeColor[1], planeColor[2])
+        gl.uniform1f(prog.uAlpha, 0.4)
+        gl.enable(gl.DEPTH_TEST)
+        gl.depthFunc(gl.LEQUAL)
+        gl.depthMask(false)
+        gl.enable(gl.BLEND)
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+        gl.disable(gl.CULL_FACE)
+        gl.drawArrays(gl.TRIANGLES, 0, planeVertCount)
+        gl.depthMask(true)
+        gl.disable(gl.BLEND)
+        gl.disableVertexAttribArray(prog.aPosition)
+      }
+
+      if (vertCount === 0) return
       gl.useProgram(prog.program)
       gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
-      const maxAttribs = gl.getParameter(gl.MAX_VERTEX_ATTRIBS) | 0
       for (let i = 0; i < maxAttribs; i++) gl.disableVertexAttribArray(i)
       gl.enableVertexAttribArray(prog.aPosition)
       gl.vertexAttribPointer(prog.aPosition, 3, gl.FLOAT, false, 12, 0)
@@ -173,6 +244,7 @@ export function buildBrushCursor(gl: WebGLRenderingContext): BrushCursor | null 
     },
     dispose() {
       gl.deleteBuffer(vbo)
+      gl.deleteBuffer(planeVbo)
       gl.deleteProgram(prog.program)
       visible = false
     },

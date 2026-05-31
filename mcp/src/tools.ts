@@ -1057,4 +1057,17 @@ function registerContractTools(server: McpServer): void {
     },
     wrap("terrain.brush_ramp")
   );
+  server.tool(
+    "terrain_brush_water",
+    "Add or remove water over a brush footprint. mode: 'add' floods the footprint; 'remove' clears water. For 'add', pass height for an absolute water-surface Z (game-Z studs) applied FLAT across the footprint; omit height to auto-place the surface ~122 studs above the ground under the center. Corners that already have visible water keep their height on 'add', so re-painting a pond won't flatten a tuned surface. A water quad renders for any cell with at least one watered corner. Returns { ok: true }. Undo-aware.",
+    {
+      col: z.number().int().describe("footprint center column (0-based corner)"),
+      row: z.number().int().describe("footprint center row (0-based corner)"),
+      radius: z.number().optional().describe("brush radius in corner units, fractional allowed (0 = single corner)"),
+      shape: z.enum(["circle", "square"]).optional().describe("brush shape (default circle)"),
+      mode: z.enum(["add", "remove"]).describe("water brush mode"),
+      height: z.number().optional().describe("absolute water-surface height (game-Z studs), applied flat; omit to auto-place just above the ground"),
+    },
+    wrap("terrain.brush_water")
+  );
 }
