@@ -1,8 +1,10 @@
 package forge
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -427,15 +429,36 @@ func (s *Session) TestMap() error {
 		existing, existingOK, _ = src.read(scriptFile)
 	}
 	if scriptNeedsRegen(handRolled, triggersEdited, isLua, existing, existingOK) {
-		if _, err := s.SaveTriggerScript(); err != nil {
+		// Use the non-destructive guarded path: it refuses to clobber a hand-
+		// authored war3map.lua (one not carrying the codegen marker) with
+		// ErrScriptNotCodegen. For Test Map that refusal is NOT fatal — the
+		// on-disk script (written externally / by the World Editor) is exactly
+		// what we want to package and launch, so we keep it as-is and continue.
+		if _, err := s.SaveTriggerScriptGuarded(false); err != nil && !errors.Is(err, ErrScriptNotCodegen) {
 			return fmt.Errorf("regen script: %w", err)
 		}
 	}
 
-	// 3. Launch WC3 with the map. Folder-backed sessions error out here
-	//    (LaunchWithMap rejects paths that aren't files); MPQ-backed
-	//    sessions launch the .w3x path stored at Open time.
-	return wc3launch.LaunchWithMap(s.Path())
+	// 3. Decide the launchable .w3x path.
+	//    - Folder-backed sessions: WC3 can't open a loose folder, so package
+	//      the folder into a sibling out/<map>.w3x and launch THAT.
+	//    - MPQ-backed sessions: launch the .w3x path stored at Open time.
+	launchPath := s.Path()
+	if _, isFolder := src.(folderSource); isFolder {
+		root := s.Path()
+		mapName := root
+		if info := s.Info(); info != nil && info.Name != "" {
+			mapName = info.Name
+		} else {
+			mapName = filepath.Base(root)
+		}
+		outPath := filepath.Join(filepath.Dir(root), "out", sanitizeMapFileName(mapName)+".w3x")
+		if err := s.PackageFolderToW3X(outPath); err != nil {
+			return fmt.Errorf("package folder for test: %w", err)
+		}
+		launchPath = outPath
+	}
+	return wc3launch.LaunchWithMap(launchPath)
 }
 
 // scriptNeedsRegen is the Test Map / save policy for whether to regenerate the
