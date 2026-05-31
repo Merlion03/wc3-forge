@@ -109,6 +109,8 @@ export function GetSelection():Promise<main.SelectionDTO>;
 
 export function GetTerrain():Promise<main.TerrainDTO>;
 
+export function GetTerrainPaletteThumbs():Promise<main.TerrainPaletteThumbs>;
+
 export function GetTerrainTile(arg1:number,arg2:number):Promise<forge.TerrainTileInfo>;
 
 export function GetTranspilePreview():Promise<main.TranspilePreviewDTO>;

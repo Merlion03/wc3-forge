@@ -795,6 +795,20 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class TerrainPaletteThumbs {
+	    ground: Record<string, string>;
+	    cliff: Record<string, string>;
+	
+	    static createFrom(source: any = {}) {
+	        return new TerrainPaletteThumbs(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ground = source["ground"];
+	        this.cliff = source["cliff"];
+	    }
+	}
 	export class TileInfoDTO {
 	    fourcc: string;
 	    name: string;

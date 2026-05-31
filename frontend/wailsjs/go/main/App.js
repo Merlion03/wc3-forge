@@ -206,6 +206,10 @@ export function GetTerrain() {
   return window['go']['main']['App']['GetTerrain']();
 }
 
+export function GetTerrainPaletteThumbs() {
+  return window['go']['main']['App']['GetTerrainPaletteThumbs']();
+}
+
 export function GetTerrainTile(arg1, arg2) {
   return window['go']['main']['App']['GetTerrainTile'](arg1, arg2);
 }

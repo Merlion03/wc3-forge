@@ -12,7 +12,7 @@
   // mutation logic stays in one place. The ground + cliff tile catalog comes
   // straight from GetTerrain (the TerrainDTO already carries palette FourCCs,
   // average RGB swatch colors, and texture path stems).
-  import { GetTerrain } from '../wailsjs/go/main/App.js'
+  import { GetTerrain, GetTerrainPaletteThumbs } from '../wailsjs/go/main/App.js'
   import { EventsOn } from '../wailsjs/runtime/runtime.js'
   import MountainIcon from '@lucide/svelte/icons/mountain'
   import XIcon from '@lucide/svelte/icons/x'
@@ -48,7 +48,7 @@
     onChange: (brush: TerrainBrush | null) => void
   } = $props()
 
-  interface TileEntry { fourcc: string; color: string; texture: string }
+  interface TileEntry { fourcc: string; color: string; texture: string; thumb: string }
 
   let open = $state(false)
   let loading = $state(false)
@@ -74,7 +74,15 @@
   async function refresh() {
     loading = true
     try {
-      const t = (await GetTerrain()) as any
+      // Real tile thumbnails (data-URL PNGs, Go-baked + cached) alongside the
+      // terrain DTO; fetched in parallel since the thumbnail decode is the slow
+      // part. Falls back to the color swatch per FourCC on a decode miss.
+      const [t, thumbs] = await Promise.all([
+        GetTerrain() as any,
+        GetTerrainPaletteThumbs().catch(() => ({ ground: {}, cliff: {} })) as any,
+      ])
+      const gThumb: Record<string, string> = thumbs?.ground ?? {}
+      const cThumb: Record<string, string> = thumbs?.cliff ?? {}
       const pal: string[] = t?.palette ?? []
       const palColors: number[][] = t?.palette_colors ?? []
       const palTex: string[] = t?.palette_textures ?? []
@@ -82,6 +90,7 @@
         fourcc,
         color: rgb(palColors[i]),
         texture: palTex[i] ?? '',
+        thumb: gThumb[fourcc] ?? '',
       }))
       const cpal: string[] = t?.cliff_palette ?? []
       const cpalTex: string[] = t?.cliff_palette_textures ?? []
@@ -91,6 +100,7 @@
         // swatch so the grid still reads as pickable tiles.
         color: 'rgb(120,116,110)',
         texture: cpalTex[i] ?? '',
+        thumb: cThumb[fourcc] ?? '',
       }))
       // Default the selected tiles so the first paint/cliff click just works.
       if (!selectedGround && ground.length) selectedGround = ground[0].fourcc
@@ -217,7 +227,11 @@
                   title={`${g.fourcc}${g.texture ? ' — ' + g.texture : ''}`}
                   onclick={() => pickGround(g.fourcc)}
                 >
-                  <span class="swatch" style={`background:${g.color}`}></span>
+                  {#if g.thumb}
+                    <img class="swatch" src={g.thumb} alt={g.fourcc} draggable="false" />
+                  {:else}
+                    <span class="swatch" style={`background:${g.color}`}></span>
+                  {/if}
                   <span class="tile-label">{g.fourcc}</span>
                 </button>
               {/each}
@@ -261,7 +275,11 @@
                   title={`${c.fourcc}${c.texture ? ' — ' + c.texture : ''}`}
                   onclick={() => pickCliff(c.fourcc)}
                 >
-                  <span class="swatch" style={`background:${c.color}`}></span>
+                  {#if c.thumb}
+                    <img class="swatch" src={c.thumb} alt={c.fourcc} draggable="false" />
+                  {:else}
+                    <span class="swatch" style={`background:${c.color}`}></span>
+                  {/if}
                   <span class="tile-label">{c.fourcc}</span>
                 </button>
               {/each}
@@ -410,8 +428,11 @@
   .tile:hover { background: var(--accent); border-color: var(--border); }
   .tile.armed { border-color: var(--primary); background: color-mix(in oklch, var(--primary) 18%, transparent); }
   .swatch {
+    display: block;
     width: 100%; height: 28px; border-radius: 4px;
     border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+    object-fit: cover;
+    image-rendering: auto;
   }
   .tile-label {
     width: 100%; font-size: 0.625rem; line-height: 1.1; text-align: center;

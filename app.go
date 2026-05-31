@@ -1446,6 +1446,37 @@ func (a *App) GetTerrainTile(col, row int) (forge.TerrainTileInfo, error) {
 	return forge.Current.GetTerrainTile(col, row)
 }
 
+// TerrainPaletteThumbs carries data-URL PNG thumbnails for the loaded map's
+// ground + cliff palette FourCCs (keyed by FourCC), so the Terrain Palette can
+// render the real tile texture instead of a flat color swatch. Empty string per
+// FourCC on a decode miss — the frontend falls back to the swatch.
+type TerrainPaletteThumbs struct {
+	Ground map[string]string `json:"ground"`
+	Cliff  map[string]string `json:"cliff"`
+}
+
+// GetTerrainPaletteThumbs builds (cached) thumbnails for the currently-loaded
+// map's ground + cliff palettes — the same tile/cliff thumbnail cache the Swap
+// Tileset dialog warms via ListTilesets.
+func (a *App) GetTerrainPaletteThumbs() TerrainPaletteThumbs {
+	out := TerrainPaletteThumbs{Ground: map[string]string{}, Cliff: map[string]string{}}
+	t := forge.Current.Terrain()
+	if t == nil {
+		return out
+	}
+	for _, fc := range t.GroundTilesets {
+		if _, done := out.Ground[fc]; !done {
+			out.Ground[fc] = tileThumbnail(fc)
+		}
+	}
+	for _, fc := range t.CliffTilesets {
+		if _, done := out.Cliff[fc]; !done {
+			out.Cliff[fc] = cliffThumbnail(fc)
+		}
+	}
+	return out
+}
+
 // Undo reverts the most-recent mutation on the session's history stack.
 // No-op when the stack is empty. The reverted command is pushed onto the
 // redo stack so the user can re-apply it. Bound to Ctrl+Z in the UI.
