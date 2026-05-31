@@ -65,6 +65,13 @@ const (
 	// DownloadAndRunInstaller. Payload: {received, total int64, pct float64}.
 	// App.svelte subscribes to drive the update banner's progress bar.
 	eventUpdateProgress   = "wc3-forge:update-progress"
+
+	// eventStartupOpenError fires when a --open / file-association / new-window
+	// startup map-load failed (forge.Current.Open returned an error or recovered
+	// a parser panic in main()). App.svelte subscribes and shows the message as
+	// an error toast so a corrupt/absent map double-clicked into the editor is
+	// no longer a blank silent window. Payload: { message string }.
+	eventStartupOpenError = "wc3-forge:startup-open-error"
 )
 
 // App is the Wails-bindable surface exposed to the frontend. Every method
@@ -173,6 +180,21 @@ func (a *App) startup(ctx context.Context) {
 		go func() {
 			time.Sleep(4 * time.Second)
 			runtime.EventsEmit(a.ctx, "wc3-forge:pick-self-test", map[string]any{})
+		}()
+	}
+	// A --open / file-association / new-window startup map-load that failed in
+	// main() lands here as a non-empty startupOpenError. Surface it to the
+	// window as an error toast so the failure reaches the user instead of
+	// vanishing into the log behind a blank editor. Deferred one tick (same
+	// rationale as the camera spec above) so App.svelte's EventsOn listener is
+	// registered by the time we emit — EventsEmit doesn't queue for late
+	// subscribers.
+	if startupOpenError != "" {
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			runtime.EventsEmit(a.ctx, eventStartupOpenError, map[string]any{
+				"message": startupOpenError,
+			})
 		}()
 	}
 	// Forward Go-side selection changes to the frontend.

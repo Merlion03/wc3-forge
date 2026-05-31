@@ -40,6 +40,14 @@ var startupPickSelfTest bool
 // The in-app updater compares this against the latest GitHub release.
 var AppVersion string
 
+// startupOpenError carries the failure from a --open / file-association /
+// new-window startup map-load so App.startup can surface it to the window as a
+// toast (rather than only logging it and launching a blank editor — a user who
+// double-clicked a .w3x then couldn't tell "no map" from "corrupt map"). Set by
+// main() before wails.Run; read + emitted once by App.startup after the JS side
+// has subscribed. Empty means the --open either succeeded or wasn't requested.
+var startupOpenError string
+
 func main() {
 	var headless bool
 	var noBridge bool
@@ -133,6 +141,12 @@ func main() {
 	if openPath != "" {
 		if err := forge.Current.Open(openPath); err != nil {
 			log.Printf("--open %q failed: %v", openPath, err)
+			// Stash the failure so App.startup can toast it to the window. The
+			// Open error message already distinguishes the cases (stat → absent,
+			// "has no war3map.w3i" → not a map, "parse …"/"map appears corrupt"
+			// → corrupt/unsupported), so we forward it verbatim. Without this a
+			// failed --open silently launched a blank editor + a 2 MB log line.
+			startupOpenError = fmt.Sprintf("Couldn't open %s: %v", openPath, err)
 		} else {
 			log.Printf("--open %q OK", openPath)
 		}

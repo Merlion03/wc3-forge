@@ -972,6 +972,14 @@
       const run = (scene as any)?.__runPickSelfTest
       if (typeof run === 'function') run()
     })
+    // Startup map-load failure (--open / file-association / new-window). Go's
+    // main() couldn't open the requested map (absent / corrupt / unsupported)
+    // and stashed the message; App.startup emits it once the JS listener is up.
+    // Surface it via the same error toast the interactive Open dialog uses so a
+    // double-clicked corrupt/missing map shows a reason instead of a blank window.
+    EventsOn('wc3-forge:startup-open-error', (payload: { message?: string }) => {
+      showToast(payload?.message || 'Failed to open the map', 'error')
+    })
     let startupSpec: { x: number; y: number; z: number; distance: number } | null = null
     EventsOn('wc3-forge:startup-camera', (payload: { spec: string }) => {
       const m = (payload?.spec || '').match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:,(-?\d+(?:\.\d+)?))?(?:,(\d+(?:\.\d+)?))?$/)

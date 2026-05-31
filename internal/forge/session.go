@@ -492,21 +492,15 @@ var Current = &Session{}
 //   - an .w3x / .w3m / .mpq archive (HM3W shunt auto-detected).
 //
 // war3map.w3i is required; everything else is best-effort.
+//
+// A malformed / truncated / protected map can drive one of the format parsers
+// to panic (e.g. an index-out-of-range on a bogus count). On the GUI / --open /
+// new-window load path there is no bridge-style recover() wrapping this call,
+// so an unrecovered panic vanishes the window. We recover any panic here and
+// convert it to a normal error ("map appears corrupt or unsupported: …"),
+// mirroring the mesh3d import parsers (parseOBJBuf et al.). Ordinary returned
+// errors are left untouched — only panics are converted.
 func (s *Session) Open(path string) error {
-	// mapIO diagnostics: time the whole Open + collect a per-open manifest of
-	// the war3map.* files present and their sizes. recordOpenManifest captures
-	// the snapshot after a successful state swap; an error return before that
-	// bumps openFails so a failed open isn't silent. See mapio_diag.go.
-	openStart := time.Now()
-	manifest := &mapOpenManifest{}
-	opened := false // flipped true after the successful state swap below
-	defer func() {
-		// Any return before the swap (opened==false) is a failed open — count
-		// it so a map that won't load isn't silent in diagnostics.get.
-		if !opened {
-			mapIODiag.openFails.Add(1)
-		}
-	}()
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
@@ -515,15 +509,14 @@ func (s *Session) Open(path string) error {
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", abs, err)
 	}
-	manifest.Path = abs
 
 	var src fileSource
 	var rawMapBytes []byte
+	sourceKind := "folder"
 	if fi.IsDir() {
-		manifest.SourceKind = "folder"
 		src = folderSource{root: abs}
 	} else {
-		manifest.SourceKind = "mpq"
+		sourceKind = "mpq"
 		// Read the whole .w3x into memory once. mdx-m3-viewer's
 		// War3MapViewer.loadMap wants the raw bytes, and we also want
 		// the archive open for per-file asset reads via pathSolver.
@@ -537,6 +530,43 @@ func (s *Session) Open(path string) error {
 		}
 		src = newMPQSource(archive, abs)
 	}
+	return s.openWithSource(abs, src, rawMapBytes, sourceKind)
+}
+
+// openWithSource is the parse-and-swap body of Open, split out so the panic
+// guard wraps every untrusted-byte parser AND so tests can drive it with a
+// synthetic fileSource (see TestOpen_RecoversParserPanic). abs is the resolved
+// path used for diagnostics + messages; src is the already-constructed source
+// (folder or MPQ); rawMapBytes is the raw .w3x bytes for MPQ opens (nil for
+// folders); sourceKind is "folder" | "mpq" for the manifest.
+func (s *Session) openWithSource(abs string, src fileSource, rawMapBytes []byte, sourceKind string) (err error) {
+	// mapIO diagnostics: time the whole Open + collect a per-open manifest of
+	// the war3map.* files present and their sizes. recordOpenManifest captures
+	// the snapshot after a successful state swap; an error return before that
+	// bumps openFails so a failed open isn't silent. See mapio_diag.go.
+	openStart := time.Now()
+	manifest := &mapOpenManifest{Path: abs, SourceKind: sourceKind}
+	opened := false // flipped true after the successful state swap below
+	defer func() {
+		// Any return before the swap (opened==false) is a failed open — count
+		// it so a map that won't load isn't silent in diagnostics.get.
+		if !opened {
+			mapIODiag.openFails.Add(1)
+		}
+	}()
+	// Panic guard. A parser blowing up on a corrupt/unsupported map must not
+	// crash the process — turn it into a returned error the caller (GUI dialog,
+	// --open startup, OpenMapInNewWindow child) can surface to the user. Runs
+	// before the openFails defer (LIFO) and sets the named return, leaving
+	// opened==false so the failed-open counter still ticks. Only overrides err
+	// when recover() actually caught a panic. Every untrusted-byte parser below
+	// runs before the state swap takes s.mu, so a recovered panic can't leave
+	// the session lock held. Mirrors the mesh3d import parsers (parseOBJBuf).
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("map appears corrupt or unsupported: %v", r)
+		}
+	}()
 
 	// war3map.w3i — REQUIRED.
 	w3iBytes, ok, err := src.read("war3map.w3i")
