@@ -215,11 +215,13 @@ uniform vec3 u_origin;
 uniform vec3 u_scale;
 varying vec3 v_normal;
 varying float v_topMask;
+varying vec3 v_local;
 void main() {
   vec3 worldPos = u_origin + a_position * u_scale;
   gl_Position = u_viewProj * vec4(worldPos, 1.0);
   v_normal = a_normal;
   v_topMask = a_normal.z > 0.5 ? 1.0 : 0.0;
+  v_local = a_position;
 }
 `.trim()
 
@@ -229,11 +231,33 @@ uniform vec3 u_color;
 uniform float u_selected;
 varying vec3 v_normal;
 varying float v_topMask;
+varying vec3 v_local;
 void main() {
   vec3 light = normalize(vec3(0.4, 0.4, 1.0));
   float diffuse = max(0.55, dot(normalize(v_normal), light));
   vec3 col = u_color * diffuse;
   col += vec3(0.12) * v_topMask;
+
+  // Procedural "circle of power" rune pattern, drawn only on the flat pad top
+  // (top-facing AND low in Z — excludes the floating diamond at z~120). The
+  // pad is a disc of radius 92 centred on the marker, so v_local.xy gives a
+  // clean radial coordinate with no UVs needed. The pad base is darkened and
+  // the rim / inner ring / 8 radial runes / core are brightened in the player
+  // color, reading as a glowing rune pad. All tinted by u_color, so it can
+  // never render white and needs no texture asset.
+  if (v_topMask > 0.5 && v_local.z < 30.0) {
+    float r = length(v_local.xy) / 92.0;
+    float theta = atan(v_local.y, v_local.x);
+    float rim    = smoothstep(0.80, 0.94, r);
+    float ring   = 1.0 - smoothstep(0.0, 0.05, abs(r - 0.55));
+    float band   = smoothstep(0.30, 0.42, r) - smoothstep(0.66, 0.80, r);
+    float spokes = pow(0.5 + 0.5 * cos(theta * 8.0), 8.0) * max(band, 0.0);
+    float core   = 1.0 - smoothstep(0.0, 0.28, r);
+    float glow = clamp(rim * 1.1 + ring * 0.7 + spokes * 0.7 + core * 0.8, 0.0, 1.4);
+    vec3 base = u_color * diffuse * 0.45;
+    col = base + u_color * glow + vec3(0.12) * glow;
+  }
+
   if (u_selected > 0.5) {
     col = mix(col, vec3(1.0, 0.95, 0.4), 0.55);
   }
