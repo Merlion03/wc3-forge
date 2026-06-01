@@ -48,6 +48,11 @@ type CheckResult struct {
 	Current string   `json:"current"` // running binary's version ("dev" if unstamped)
 	Latest  string   `json:"latest"`  // latest published version
 	IsNewer bool     `json:"isNewer"` // true iff Latest > Current and an installer exists
+	// IsDev is true when the running version can't be parsed as semver (an
+	// unstamped/local "dev" build). In that case IsNewer is always false — we
+	// can't tell if it's behind — so the UI must NOT claim "you're up to date";
+	// it should surface the dev build and still offer the latest release.
+	IsDev   bool     `json:"isDev"`
 	Release *Release `json:"release"` // details of the latest release (nil on error)
 }
 
@@ -123,6 +128,11 @@ func resultFromRelease(current string, gh *ghRelease) *CheckResult {
 	// Only flag an update when we can actually act on it: the remote must be
 	// strictly newer AND ship a Windows installer to download.
 	res.IsNewer = rel.Installer != nil && isNewer(rel.Version, current)
+	// A current version we can't parse (an unstamped "dev" build) means the
+	// comparison above is meaningless — flag it so the UI offers the release
+	// instead of falsely reporting "up to date".
+	_, _, _, curOK := parseSemver(current)
+	res.IsDev = !curOK
 	return res
 }
 

@@ -79,6 +79,34 @@ func TestResultFromRelease_PicksInstallerAndFlagsNewer(t *testing.T) {
 	}
 }
 
+func TestResultFromRelease_DevBuild_FlagsDevAndOffersInstaller(t *testing.T) {
+	gh := &ghRelease{TagName: "v0.6.5"}
+	gh.Assets = []struct {
+		Name        string `json:"name"`
+		DownloadURL string `json:"browser_download_url"`
+		Size        int64  `json:"size"`
+	}{
+		{Name: "wc3-forge-amd64-installer.exe", DownloadURL: "https://example/installer", Size: 10},
+	}
+	// An unstamped local build reports "dev" (and "" / garbage behave the same).
+	for _, cur := range []string{"dev", "", "not-a-version"} {
+		res := resultFromRelease(cur, gh)
+		if !res.IsDev {
+			t.Errorf("current %q: IsDev = false, want true (unparseable version)", cur)
+		}
+		if res.IsNewer {
+			t.Errorf("current %q: IsNewer = true, want false (can't compare a dev build)", cur)
+		}
+		if res.Release.Installer == nil {
+			t.Errorf("current %q: installer not offered — dev build should still be able to install the release", cur)
+		}
+	}
+	// A real version that IS current must NOT be flagged as dev.
+	if res := resultFromRelease("0.6.5", gh); res.IsDev {
+		t.Errorf("current 0.6.5: IsDev = true, want false (parseable version)")
+	}
+}
+
 func TestResultFromRelease_NoInstaller_NotNewer(t *testing.T) {
 	gh := &ghRelease{TagName: "v0.4.1"}
 	gh.Assets = []struct {
