@@ -24,10 +24,12 @@
 
 import { flog } from './debuglog'
 
-// WC3 player slot → team color, in RGB 0..1. Slots 0..11 are the named
-// player colors; 12 = Neutral Aggressive (often dark red on minimap);
-// 15 = Neutral Passive. The mdx-m3-viewer ships TeamColorNN.dds with the
-// same indices; we mirror those approximations as solid RGB.
+// WC3 player slot → team color, in RGB 0..1. Warcraft III Reforged supports
+// 24 player slots (0..23), all of which are real player colors. The neutral
+// slots come after them: 24 = Neutral Hostile, 25 = Neutral Victim,
+// 26 = Neutral Extra, 27 = Neutral Passive. The mdx-m3-viewer ships
+// TeamColorNN.dds with the same indices; we mirror those approximations as
+// solid RGB.
 export const TEAM_COLORS_RGB: Array<[number, number, number]> = [
   [1.00, 0.02, 0.02], //  0 Red
   [0.00, 0.26, 1.00], //  1 Blue
@@ -41,12 +43,47 @@ export const TEAM_COLORS_RGB: Array<[number, number, number]> = [
   [0.49, 0.74, 1.00], //  9 LightBlue
   [0.06, 0.39, 0.27], // 10 DarkGreen
   [0.30, 0.16, 0.00], // 11 Brown
+  [0.61, 0.00, 0.00], // 12 Maroon
+  [0.00, 0.00, 0.76], // 13 Navy
+  [0.00, 0.92, 1.00], // 14 Turquoise
+  [0.75, 0.00, 1.00], // 15 Violet
+  [0.92, 0.80, 0.53], // 16 Wheat
+  [0.97, 0.64, 0.55], // 17 Peach
+  [0.75, 1.00, 0.50], // 18 Mint
+  [0.86, 0.73, 0.92], // 19 Lavender
+  [0.16, 0.16, 0.16], // 20 Coal
+  [0.92, 0.94, 1.00], // 21 Snow
+  [0.00, 0.47, 0.12], // 22 Emerald
+  [0.64, 0.44, 0.20], // 23 Peanut
 ]
+
+// Player slot → color name, parallel to TEAM_COLORS_RGB (indices 0..23 are
+// real Reforged player colors). Kept next to the RGB array so the names and
+// colors can't drift out of sync.
+export const PLAYER_COLOR_NAMES: string[] = [
+  'Red', 'Blue', 'Teal', 'Purple', 'Yellow', 'Orange', 'Green', 'Pink',
+  'Gray', 'LightBlue', 'DarkGreen', 'Brown', 'Maroon', 'Navy', 'Turquoise',
+  'Violet', 'Wheat', 'Peach', 'Mint', 'Lavender', 'Coal', 'Snow', 'Emerald',
+  'Peanut',
+]
+
+// The true neutral slots, which sit after the 24 player colors.
+const NEUTRAL_NAMES: Record<number, string> = {
+  24: 'Neutral Hostile',
+  25: 'Neutral Victim',
+  26: 'Neutral Extra',
+  27: 'Neutral Passive',
+}
+
+/** Color name for a neutral slot (24..27), or undefined for any other index. */
+export function neutralName(player: number): string | undefined {
+  return NEUTRAL_NAMES[player]
+}
 
 function teamColorFor(player: number): [number, number, number] {
   if (player < TEAM_COLORS_RGB.length) return TEAM_COLORS_RGB[player]
-  // Neutral Aggressive (12), Hostile (24), Passive (15), unknown players →
-  // dim red — distinct from any real player slot.
+  // Neutral slots (24 Hostile / 25 Victim / 26 Extra / 27 Passive) and any
+  // unknown players ≥24 → dim red — distinct from any real player slot.
   return [0.55, 0.15, 0.15]
 }
 

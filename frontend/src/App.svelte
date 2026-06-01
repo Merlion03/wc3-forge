@@ -48,7 +48,7 @@
   import { flog, flogError, flogDebug, setLogLevel } from './debuglog'
   import { registerDiag } from './diag-registry'
   import { loadIconURL } from './icon-loader'
-  import { TEAM_COLORS_RGB } from './sloc-markers'
+  import { TEAM_COLORS_RGB, PLAYER_COLOR_NAMES, neutralName } from './sloc-markers'
   import { Button } from '$lib/components/ui/button'
   import * as Dialog from '$lib/components/ui/dialog'
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu'
@@ -2021,20 +2021,14 @@
     return `(${fmt(v[0], 2)}, ${fmt(v[1], 2)}, ${fmt(v[2], 2)})`
   }
   function playerLabel(p: number): string {
-    const colors = ['Red', 'Blue', 'Teal', 'Purple', 'Yellow', 'Orange', 'Green',
-                    'Pink', 'Gray', 'LightBlue', 'DarkGreen', 'Brown']
-    if (p === 15) return 'Neutral Passive (15)'
-    if (p === 12) return 'Neutral Aggressive (12)'
-    if (p < colors.length) return `${colors[p]} (${p})`
+    if (p < PLAYER_COLOR_NAMES.length) return `${PLAYER_COLOR_NAMES[p]} (${p})`
+    const neutral = neutralName(p)
+    if (neutral) return `${neutral} (${p})`
     return `Player ${p}`
   }
   function playerColorName(p: number): string {
-    const colors = ['Red', 'Blue', 'Teal', 'Purple', 'Yellow', 'Orange', 'Green',
-                    'Pink', 'Gray', 'LightBlue', 'DarkGreen', 'Brown']
-    if (p < colors.length) return colors[p]
-    if (p === 15) return 'Neutral Passive'
-    if (p === 12) return 'Neutral Aggressive'
-    return `P${p}`
+    if (p < PLAYER_COLOR_NAMES.length) return PLAYER_COLOR_NAMES[p]
+    return neutralName(p) ?? `P${p}`
   }
   function teamColorCSS(p: number): string {
     const rgb = p < TEAM_COLORS_RGB.length ? TEAM_COLORS_RGB[p] : [0.55, 0.15, 0.15]
