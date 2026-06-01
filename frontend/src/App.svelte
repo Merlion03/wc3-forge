@@ -8,7 +8,8 @@
     GetReforgedMode, SetReforgedMode,
     GetUnitTypeIndex, GetDoodadTypeIndex,
     NewMapDialog as NewMapSaveDialog, CreateNewMap, WriteNewMap, ReportDiagnostics,
-    MoveUnit, MoveDoodad, CreateDoodad, DeleteSelection, IsDirty, SaveMap,
+    MoveUnit, MoveDoodad, CreateDoodad, CreateUnit, DeleteSelection, IsDirty, SaveMap,
+    ListStartLocations, CreateStartLocation, MoveStartLocation, DeleteStartLocation,
     ListRegions, CreateRegion,
     PaintTerrainTile, BrushTerrainHeight, BrushTerrainCliff, BrushTerrainRamp, BrushTerrainWater, WaterAddHeightAt, GetTerrainTile,
     BeginUndoGroup, EndUndoGroup,
@@ -42,6 +43,7 @@
   import BridgeConsole from './BridgeConsole.svelte'
   import Minimap from './Minimap.svelte'
   import DoodadPalette from './DoodadPalette.svelte'
+  import UnitPalette, { type StartLocEntry } from './UnitPalette.svelte'
   import TerrainPalette, { type TerrainBrush } from './TerrainPalette.svelte'
   import RegionPanel from './RegionPanel.svelte'
   import UpdateDialog from './UpdateDialog.svelte'
@@ -121,6 +123,22 @@
   // null = nothing armed. Owned here; mirrored to the scene via
   // scene.setPlacementMode and read by the palette to highlight the armed icon.
   let armedDoodadType: string | null = $state(null)
+
+  // Unit-placement state. Mirrors the doodad-placement flow: when a unit
+  // type_id is armed (from the Unit Palette), the scene is in placement mode
+  // and the next map click drops that unit, owned by armedUnitPlayer. null =
+  // nothing armed. startLocArmed instead arms start-location placement — the
+  // next click drops a sloc at the next free start-location index. Unit,
+  // start-location, doodad, region-rect, and terrain modes are all mutually
+  // exclusive (they all ride the scene's single placement/brush mode), so
+  // arming one disarms the others. unitPlacing is the palettePlacing analog —
+  // a plain flag (never read in the template) the `created` handler checks to
+  // skip the redundant full reload for live unit placements.
+  let armedUnitType: string | null = $state(null)
+  let armedUnitPlayer: number = $state(0)
+  let startLocArmed: boolean = $state(false)
+  let startLocations: StartLocEntry[] = $state([])
+  let unitPlacing = false
 
   // Region (rect) Editor state. The RegionPanel owns its own list UI + the
   // numeric editors (it calls the Wails region bindings directly); App owns the
@@ -877,9 +895,13 @@
         primaryDoodad = null
         terrainCell = null
         doodadCategoriesPresent = []
-        // Map closed — disarm any doodad-placement brush so the scene doesn't
-        // sit in placement mode with the palette (now unmounted) gone.
+        // Map closed — disarm any doodad/unit/start-location placement so the
+        // scene doesn't sit in placement mode with the palette (now unmounted)
+        // gone.
         armedDoodadType = null
+        armedUnitType = null
+        startLocArmed = false
+        startLocations = []
         scene?.setPlacementMode(false)
         // Map closed — clear the region overlay + disarm rect-draw.
         regionRectDrawArmed = false
@@ -971,20 +993,28 @@
         if (payload.kind === 'unit') {
           units = units.filter(u => u.creation_number !== payload.id)
           if (primaryEntity?.CreationNumber === payload.id) primaryEntity = null
+          // A deleted unit may have been a start location (slocs ARE units).
+          // Re-sync the palette's list so the affordance + next-free index
+          // track MCP/undo-driven start-location deletes too.
+          void syncStartLocations()
         } else if (payload.kind === 'doodad') {
           doodads = doodads.filter(d => d.creation_number !== payload.id)
           if (primaryDoodad?.creation_number === payload.id) primaryDoodad = null
         }
         return
       }
-      // Entity (re-)created from a source other than the live Doodad Palette —
-      // undo of a delete, redo of a create, or an MCP units.create/doodads.create.
-      // The scene has no rendered instance for it yet, so rebuild from Go's
-      // authoritative state (keepCamera so an undo doesn't yank the viewpoint).
-      // The palette places its own instance live + handles the race via the
-      // palettePlacing guard, so skip the reload for those to keep placement fast.
+      // Entity (re-)created from a source other than the live palettes — undo of
+      // a delete, redo of a create, or an MCP units.create/doodads.create/
+      // start_locations.create. The scene has no rendered instance for it yet,
+      // so rebuild from Go's authoritative state (keepCamera so an undo doesn't
+      // yank the viewpoint). The palettes place their own instance live +
+      // handle the race via the palettePlacing/unitPlacing guards, so skip the
+      // reload for those to keep placement fast.
       if (payload.field === 'created') {
-        if (palettePlacing) return
+        // A created unit may be a start location (sloc) — re-sync the palette
+        // list regardless of which placement path produced it.
+        if (payload.kind === 'unit') void syncStartLocations()
+        if (palettePlacing || unitPlacing) return
         if (scene?.hasInstance(payload.kind, payload.id)) return
         if (createdReloadPending) return
         createdReloadPending = true
@@ -997,6 +1027,11 @@
         return
       }
       if (payload.kind === 'unit') {
+        // A position change on a unit may be a start location being moved
+        // (drag/gizmo/Properties via MoveUnit, MCP start_locations.move, or
+        // undo/redo). Re-sync the palette's cached list so its position +
+        // next-free-index stay accurate. Cheap; no-op for non-sloc units.
+        if (payload.field === 'position') void syncStartLocations()
         if (!primaryEntity || primaryEntity.CreationNumber !== payload.id) {
           // entity-changed drop: a unit other than the focused primary changed,
           // so no Properties-panel refresh is needed. Noisy → debug-level.
@@ -1544,13 +1579,107 @@
       showToast('Open a map before placing doodads', 'error')
       return
     }
-    if (typeId) onTerrainBrushChange(null) // doodad + terrain brush are exclusive
+    if (typeId) {
+      onTerrainBrushChange(null) // doodad + terrain brush are exclusive
+      // Doodad placement is exclusive with unit + start-location placement —
+      // all three ride the scene's single placement mode. Disarm those without
+      // routing back through setPlacementMode (armUnit/armStartLoc would flip it
+      // off, fighting the on we're about to set).
+      armedUnitType = null
+      startLocArmed = false
+    }
     armedDoodadType = typeId
     scene?.setPlacementMode(!!typeId)
     // Drive the cursor preview ghost: arming builds/swaps it, disarming drops
     // it (setPlacementMode(false) also drops it, so the null case is belt-and-
     // suspenders). doodadTypes is the same index the scene placed the map from.
     scene?.setPlacementGhost(typeId, doodadTypes as unknown as Record<string, any>)
+  }
+
+  // ── Unit + start-location placement wiring ───────────────────────────────
+  // Mirrors armDoodad but with no preview ghost (the scene's placement ghost is
+  // doodad-only; a unit/sloc just lands on click). Arming a unit disarms the
+  // doodad/region/terrain/start-location modes (all share placement mode).
+
+  // Arm (or disarm) a unit type for click-to-place. typeId null disarms.
+  function armUnit(typeId: string | null) {
+    if (typeId && !status.loaded) {
+      showToast('Open a map before placing units', 'error')
+      return
+    }
+    if (typeId) {
+      armedDoodadType = null
+      startLocArmed = false
+      regionRectDrawArmed = false
+      onTerrainBrushChange(null)
+      scene?.setPlacementGhost(null, {}) // no doodad ghost for unit placement
+    }
+    armedUnitType = typeId
+    scene?.setPlacementMode(!!typeId)
+  }
+
+  // Change the owning player slot future units are placed for.
+  function setUnitPlayer(player: number) {
+    armedUnitPlayer = player
+  }
+
+  // Arm (or disarm) start-location placement. The next map click drops a sloc
+  // at the next free start-location index. Mutually exclusive with the other
+  // placement modes.
+  function armStartLoc(armed: boolean) {
+    if (armed && !status.loaded) {
+      showToast('Open a map before placing start locations', 'error')
+      return
+    }
+    if (armed) {
+      armedUnitType = null
+      armedDoodadType = null
+      regionRectDrawArmed = false
+      onTerrainBrushChange(null)
+      scene?.setPlacementGhost(null, {})
+    }
+    startLocArmed = armed
+    scene?.setPlacementMode(armed)
+  }
+
+  // Lowest start-location index not already taken — the index a fresh sloc
+  // placement claims. Start locations are conventionally dense from 0, so this
+  // fills the first gap.
+  function nextFreeStartLocIndex(): number {
+    const used = new Set(startLocations.map((s) => s.index))
+    let i = 0
+    while (used.has(i)) i++
+    return i
+  }
+
+  // Re-fetch the start-location list from Go (authoritative). Called on map
+  // load, after a place/delete, and on undo/redo or MCP-driven changes. Feeds
+  // the Unit Palette's list + the next-free-index allocator. Never writes the
+  // same $state it reads.
+  async function syncStartLocations() {
+    try {
+      const list = await ListStartLocations()
+      startLocations = (list ?? []).map((s) => ({
+        index: s.index,
+        creationNumber: s.creation_number,
+        position: [s.position[0], s.position[1], s.position[2]] as [number, number, number],
+      }))
+    } catch (e) {
+      flogError('[startloc] list failed:', e)
+    }
+  }
+
+  // Delete an existing start location by index (from the palette's list). Go
+  // emits entity-changed("deleted") → the scene detaches the sloc instance;
+  // we re-sync the list here.
+  async function deleteStartLoc(index: number) {
+    try {
+      await DeleteStartLocation(index)
+      await syncStartLocations()
+      dirty = true
+    } catch (e) {
+      showToast('Delete start location failed: ' + String(e), 'error')
+    }
   }
 
   // ── Region (rect) Editor wiring ──────────────────────────────────────────
@@ -1593,6 +1722,8 @@
     regionRectA = null
     if (armed) {
       armDoodad(null)            // doodad + region rect-draw are exclusive
+      armedUnitType = null       // and exclusive with unit + start-location
+      startLocArmed = false
       onTerrainBrushChange(null) // and exclusive with the terrain brush
       scene?.setPlacementGhost(null, {})
       scene?.setPlacementMode(true)
@@ -1750,6 +1881,65 @@
       // Draw toggle disarms).
       return
     }
+    // Start-location placement: the next click drops a sloc at the next free
+    // start-location index, owned by that index (gg_start_location_<index>).
+    // Stay armed for rapid placement (Escape / toggle disarms).
+    if (startLocArmed) {
+      if (!hit) { armStartLoc(false); return } // Escape / off-map cancel
+      const index = nextFreeStartLocIndex()
+      try {
+        await CreateStartLocation(index, hit.worldX, hit.worldY, hit.z, 0)
+        // Sloc rendering is owned by the scene's sloc renderer, which rebuilds
+        // from Go's authoritative state on the entity-changed("created") full
+        // reload — there's no per-cn live-add for slocs. Re-sync the palette
+        // list so the new start location + the next-free index update.
+        await syncStartLocations()
+        dirty = true
+      } catch (e) {
+        showToast('Place start location failed: ' + String(e), 'error')
+      }
+      return
+    }
+
+    // Unit placement: mirror the doodad flow (create on Go, live-add the
+    // instance, reflect in the Explorer array). Stay armed for rapid placement.
+    if (armedUnitType) {
+      if (!hit) { armUnit(null); return } // Escape / off-map cancel
+      const utype = armedUnitType
+      const player = armedUnitPlayer
+      unitPlacing = true
+      try {
+        const cn = await CreateUnit(utype, player, hit.worldX, hit.worldY, hit.z, 0, 1)
+        // Mirror what the Go session built (CreateUnit defaults: rotation 0,
+        // uniform scale 1, hp/mana -1 = unit default, hero level 1).
+        const dto = {
+          creation_number: cn,
+          type_id: utype,
+          skin_id: '',
+          player,
+          position: [hit.worldX, hit.worldY, hit.z],
+          rotation: 0,
+          scale: [1, 1, 1],
+          hit_points_pct: -1,
+          mana_pct: -1,
+          hero_level: 1,
+          gold_amount: 0,
+        } as unknown as main.UnitDTO
+        const live = await scene?.addUnitLive(dto, unitTypes as unknown as Record<string, any>)
+        units = [...units, dto]
+        // If the type had no renderable MDX, addUnitLive returns false — fall
+        // back to a full reload so the unit still appears (and the scene picks
+        // up whatever it can). Rare for real placeable units.
+        if (!live) { mapLoadGen += 1; await reloadMap({ keepCamera: true }) }
+        dirty = true
+      } catch (e) {
+        showToast('Place unit failed: ' + String(e), 'error')
+      } finally {
+        unitPlacing = false
+      }
+      return
+    }
+
     if (!hit) { armDoodad(null); return }
     const typeId = armedDoodadType
     if (!typeId) return
@@ -1879,9 +2069,12 @@
     // A fresh/reloaded map invalidates any armed placement brush — the armed
     // type may not even exist in the new map's catalog. Disarm defensively.
     armedDoodadType = null
+    armedUnitType = null
+    startLocArmed = false
     scene?.setPlacementMode(false)
     units = await ListUnits()
     doodads = await ListDoodads()
+    void syncStartLocations() // refresh the Unit Palette's start-location list
     try { unitTypes = (await GetUnitTypeIndex()) as unknown as Record<string, UnitTypeInfo> } catch { unitTypes = {} }
     try { doodadTypes = (await GetDoodadTypeIndex()) as unknown as Record<string, DoodadTypeInfo> } catch { doodadTypes = {} }
     await scene?.loadMap(opts)
@@ -1933,10 +2126,15 @@
   }
 
   function toggleTerrainPickMode() {
-    // Entering terrain mode disarms any in-progress doodad placement so the
-    // two click-routing modes don't fight over the canvas (placement wins in
-    // the scene's click handler, which would otherwise swallow terrain clicks).
-    if (!terrainPickModeOn && armedDoodadType) armDoodad(null)
+    // Entering terrain mode disarms any in-progress placement (doodad, unit, or
+    // start location) so the two click-routing modes don't fight over the
+    // canvas (placement wins in the scene's click handler, which would
+    // otherwise swallow terrain clicks).
+    if (!terrainPickModeOn) {
+      if (armedDoodadType) armDoodad(null)
+      if (armedUnitType) armUnit(null)
+      if (startLocArmed) armStartLoc(false)
+    }
     terrainPickModeOn = !terrainPickModeOn
     scene?.setTerrainPickMode(terrainPickModeOn)
     if (!terrainPickModeOn) {
@@ -2664,6 +2862,24 @@
            placement mode and the click-to-place flow. -->
       {#if status.loaded && !terrainPickModeOn}
         <DoodadPalette armedTypeId={armedDoodadType} {reforged} onArm={armDoodad} />
+      {/if}
+      <!-- Unit palette: floating "users" launcher (bottom-left, above the
+           Doodad FAB). Shown in Doodad Mode only (alongside the doodad palette).
+           Lets the user place units (owned by a chosen player slot) and start
+           locations, and lists/deletes existing start locations. App drives the
+           scene's placement mode + the click-to-place flow. -->
+      {#if status.loaded && !terrainPickModeOn}
+        <UnitPalette
+          armedTypeId={armedUnitType}
+          armedPlayer={armedUnitPlayer}
+          {startLocArmed}
+          {startLocations}
+          {reforged}
+          onArmUnit={armUnit}
+          onSetPlayer={setUnitPlayer}
+          onArmStartLoc={armStartLoc}
+          onDeleteStartLoc={deleteStartLoc}
+        />
       {/if}
       <!-- Terrain palette: floating "mountain" launcher (bottom-left). Shown in
            Terrain Mode only. Reports the armed brush via onChange; App drives

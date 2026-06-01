@@ -696,6 +696,14 @@ export interface SceneAPI {
    */
   addDoodadLive(d: any, types: Record<string, DoodadTypeInfo>): Promise<boolean>
   /**
+   * Add a single unit to the live scene from its DTO, without a full map
+   * reload. Mirror of addDoodadLive for the Unit Palette after CreateUnit
+   * allocates a creation_number. Resolves to true when the MDX was placed
+   * (false when the type has no model / failed to load — the caller then
+   * falls back to a full reload so the unit still appears in the Explorer).
+   */
+  addUnitLive(u: any, types: Record<string, UnitTypeInfo>): Promise<boolean>
+  /**
    * Whether a unit/doodad creation_number currently has a rendered instance in
    * the scene. Used by the entity-changed `created` handler to skip a redundant
    * reload when the instance was already added live (e.g. the Doodad Palette's
@@ -4000,6 +4008,17 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       // up (toggleable) in the View menu. Reuses the same curated-first ordering
       // loadMap builds.
       recomputeDoodadCategories()
+      return true
+    },
+    async addUnitLive(u: any, types: Record<string, UnitTypeInfo>) {
+      // Mirror of addDoodadLive: render one unit from its DTO and register it in
+      // the master cn→instance map so the gizmo / drag-move / entity-changed
+      // flows find it. placeUnit returns null for types with no MDX (or a load
+      // failure) — the caller then falls back to a full reload so the new unit
+      // still lands in the Explorer list.
+      const inst = await placeUnit(u, types)
+      if (!inst) return false
+      unitInstances.set(u.creation_number, inst)
       return true
     },
     hasInstance(kind: string, cn: number) {

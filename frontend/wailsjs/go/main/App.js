@@ -122,6 +122,14 @@ export function CreateRegion(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
   return window['go']['main']['App']['CreateRegion'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
 }
 
+export function CreateStartLocation(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['CreateStartLocation'](arg1, arg2, arg3, arg4, arg5);
+}
+
+export function CreateUnit(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
+  return window['go']['main']['App']['CreateUnit'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+}
+
 export function DeleteCustomObject(arg1, arg2) {
   return window['go']['main']['App']['DeleteCustomObject'](arg1, arg2);
 }
@@ -140,6 +148,10 @@ export function DeleteRegion(arg1) {
 
 export function DeleteSelection() {
   return window['go']['main']['App']['DeleteSelection']();
+}
+
+export function DeleteStartLocation(arg1) {
+  return window['go']['main']['App']['DeleteStartLocation'](arg1);
 }
 
 export function DeleteTriggerECA(arg1, arg2) {
@@ -318,6 +330,10 @@ export function ListSoundEnvironments() {
   return window['go']['main']['App']['ListSoundEnvironments']();
 }
 
+export function ListStartLocations() {
+  return window['go']['main']['App']['ListStartLocations']();
+}
+
 export function ListTilesetOptions() {
   return window['go']['main']['App']['ListTilesetOptions']();
 }
@@ -376,6 +392,10 @@ export function MoveDoodad(arg1, arg2, arg3, arg4) {
 
 export function MoveRegion(arg1, arg2, arg3) {
   return window['go']['main']['App']['MoveRegion'](arg1, arg2, arg3);
+}
+
+export function MoveStartLocation(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['MoveStartLocation'](arg1, arg2, arg3, arg4);
 }
 
 export function MoveTriggerECA(arg1, arg2, arg3) {

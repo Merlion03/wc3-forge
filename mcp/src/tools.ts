@@ -971,6 +971,48 @@ function registerContractTools(server: McpServer): void {
     { creation_number: z.number().int().describe("creation_number from doodads_list") },
     wrap("doodads.delete")
   );
+  // --- Start locations (sloc entities in war3mapUnits.doo) ---------------
+  // A start location is a special unit (TypeID "sloc") that says "player N
+  // starts here". It is addressed by start-location INDEX — the trigger-
+  // addressable identity that becomes gg_start_location_<index> in generated
+  // script (config()'s DefineStartLocation) — NOT by creation_number. x/y are
+  // WC3 world units (origin = map center), the same convention as units_move.
+  // All mutators are undo-aware and emit the standard change events.
+  server.tool(
+    "start_locations_list",
+    "List the map's start locations (sloc entities) sorted by start-location index. Returns { start_locations: [{ index, creation_number, position:[x,y,z], rotation }] }.",
+    {},
+    wrap("start_locations.list")
+  );
+  server.tool(
+    "start_locations_create",
+    "Create a new start location (sloc) at the given world coords, assigned to start-location index `index` (becomes gg_start_location_<index> in generated script). Rejects a duplicate index. Returns { creation_number }. Undo-aware.",
+    {
+      index: z.number().int().describe("start-location index (0-based; becomes gg_start_location_<index>)"),
+      x: z.number().describe("world X (origin = map center)"),
+      y: z.number().describe("world Y (origin = map center)"),
+      z: z.number().optional().describe("world Z (default 0 / terrain height)"),
+      rotation: z.number().optional().describe("facing angle in radians; default 3π/2 (the Reforged sloc facing)"),
+    },
+    wrap("start_locations.create")
+  );
+  server.tool(
+    "start_locations_move",
+    "Relocate the start location with the given index to the supplied world coords. Looks up by start-location index, not creation_number. Returns { ok: true }. Undo-aware.",
+    {
+      index: z.number().int().describe("start-location index from start_locations_list"),
+      x: z.number().describe("world X (origin = map center)"),
+      y: z.number().describe("world Y (origin = map center)"),
+      z: z.number().optional().describe("world Z (default 0 / terrain height)"),
+    },
+    wrap("start_locations.move")
+  );
+  server.tool(
+    "start_locations_delete",
+    "Delete the start location with the given index. Returns { ok: true }. Undo-aware.",
+    { index: z.number().int().describe("start-location index from start_locations_list") },
+    wrap("start_locations.delete")
+  );
   // --- Region (rect) Editor (war3map.w3r) --------------------------------
   // Regions are the foundational authoring primitive for playable maps (spawn
   // zones, "unit enters region" events, waygate destinations, cinematic

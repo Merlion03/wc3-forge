@@ -1509,6 +1509,102 @@
     "method": null
   },
   {
+    "name": "start_locations_create",
+    "description": "Create a new start location (sloc) at the given world coords, assigned to start-location index `index` (becomes gg_start_location_<index> in generated script). Rejects a duplicate index. Returns { creation_number }. Undo-aware.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "description": "start-location index (0-based; becomes gg_start_location_<index>)"
+        },
+        "x": {
+          "type": "number",
+          "description": "world X (origin = map center)"
+        },
+        "y": {
+          "type": "number",
+          "description": "world Y (origin = map center)"
+        },
+        "z": {
+          "type": "number",
+          "description": "world Z (default 0 / terrain height)"
+        },
+        "rotation": {
+          "type": "number",
+          "description": "facing angle in radians; default 3π/2 (the Reforged sloc facing)"
+        }
+      },
+      "required": [
+        "index",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false
+    },
+    "method": "start_locations.create"
+  },
+  {
+    "name": "start_locations_delete",
+    "description": "Delete the start location with the given index. Returns { ok: true }. Undo-aware.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "description": "start-location index from start_locations_list"
+        }
+      },
+      "required": [
+        "index"
+      ],
+      "additionalProperties": false
+    },
+    "method": "start_locations.delete"
+  },
+  {
+    "name": "start_locations_list",
+    "description": "List the map's start locations (sloc entities) sorted by start-location index. Returns { start_locations: [{ index, creation_number, position:[x,y,z], rotation }] }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "method": "start_locations.list"
+  },
+  {
+    "name": "start_locations_move",
+    "description": "Relocate the start location with the given index to the supplied world coords. Looks up by start-location index, not creation_number. Returns { ok: true }. Undo-aware.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "description": "start-location index from start_locations_list"
+        },
+        "x": {
+          "type": "number",
+          "description": "world X (origin = map center)"
+        },
+        "y": {
+          "type": "number",
+          "description": "world Y (origin = map center)"
+        },
+        "z": {
+          "type": "number",
+          "description": "world Z (default 0 / terrain height)"
+        }
+      },
+      "required": [
+        "index",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false
+    },
+    "method": "start_locations.move"
+  },
+  {
     "name": "terrain_brush_cliff",
     "description": "Raise/lower/set the integer cliff layer (0..15) over a brush footprint. mode: 'raise' (layer+1) | 'lower' (layer-1) | 'set' (layer=level). cliff_tile_id selects the cliff tileset FourCC (empty → slot 0); the brush sets each corner's cliff texture so a wall actually renders. Cliff walls are derived from layer differences, so painting a higher layer next to lower terrain creates a cliff. Returns { ok: true }. Undo-aware.",
     "inputSchema": {

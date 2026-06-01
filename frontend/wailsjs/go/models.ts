@@ -163,6 +163,24 @@ export namespace forge {
 	        this.gg_ref = source["gg_ref"];
 	    }
 	}
+	export class StartLocationInfo {
+	    index: number;
+	    creation_number: number;
+	    position: number[];
+	    rotation: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new StartLocationInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.creation_number = source["creation_number"];
+	        this.position = source["position"];
+	        this.rotation = source["rotation"];
+	    }
+	}
 	export class TerrainTileInfo {
 	    col: number;
 	    row: number;

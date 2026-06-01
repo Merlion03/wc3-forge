@@ -235,3 +235,19 @@ export function doodadModelPaths(file: string, numVar: number): string[] {
   const otherExtPath = stem + otherExt
   return [...new Set([variantPath, fallbackPath, otherExtPath])]
 }
+
+/**
+ * Build the ordered candidate model paths for a unit type from its SLK `file`
+ * stem. Mirrors scene-instances.ts mdxPath() (the path placeUnit loads) so the
+ * Unit Palette thumbnail renders the same model the viewport will place. Units
+ * have no per-variation suffix (unlike doodads), so this is just the stem with
+ * its declared extension plus the other-extension fallback.
+ */
+export function unitModelPaths(file: string): string[] {
+  if (!file) return []
+  const extMatch = file.match(/\.(mdl|mdx)$/i)
+  const declaredExt = extMatch ? extMatch[0] : '.mdx'
+  const stem = extMatch ? file.slice(0, -extMatch[0].length) : file
+  const otherExt = declaredExt.toLowerCase() === '.mdx' ? '.mdl' : '.mdx'
+  return [...new Set([stem + declaredExt, stem + otherExt])]
+}

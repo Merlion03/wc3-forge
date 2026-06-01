@@ -1461,6 +1461,56 @@ func (a *App) CreateDoodad(typeID string, x, y, z, rotation, scale float32, vari
 	return forge.Current.CreateDoodad(typeID, [3]float32{x, y, z}, rotation, scale, variation)
 }
 
+// CreateUnit places a new unit of the given type at the supplied game
+// coordinates, owned by `player` (0-based slot), and returns its freshly-
+// allocated creation_number. Mirrors the MCP units.create wire contract
+// (handlers_entities.go): rotation is radians about Z, scale is a uniform
+// multiplier (0 → 1.0 in the session mutator). The Unit Palette panel calls
+// this on a click-to-place in the viewport.
+//
+// The session mutator records the command for undo/redo and emits an
+// entity-changed event with Field "created"; the viewport adds the rendered
+// instance directly from the returned creation_number (no map reload needed).
+func (a *App) CreateUnit(typeID string, player uint32, x, y, z, rotation, scale float32) (uint32, error) {
+	return forge.Current.CreateUnit(typeID, player, [3]float32{x, y, z}, rotation, scale)
+}
+
+// ---------------------------------------------------------------------------
+// Start-location (sloc) bindings. The Start-Location affordance in the Unit
+// Palette + the viewport place/move flow call these; they 1:1 wrap the session
+// mutators (undo-aware, emit entity-changed Kind="unit" + dirty events the
+// existing startup subscriptions already forward). Addressed by start-location
+// INDEX (the gg_start_location_<index> trigger handle), not creation_number.
+// See internal/forge/startloc_mutate.go + handlers_entities.go.
+// ---------------------------------------------------------------------------
+
+// ListStartLocations returns every start location (sloc entity) sorted by
+// start-location index, for the Start-Location panel. Empty slice when no map
+// / no slocs.
+func (a *App) ListStartLocations() []forge.StartLocationInfo {
+	return forge.Current.ListStartLocations()
+}
+
+// CreateStartLocation places a new start location at the given game coords,
+// assigned to start-location index `index` (becomes gg_start_location_<index>).
+// rotation defaults to 3π/2 (the Reforged sloc facing) when 0. Rejects a
+// duplicate index. Returns the allocated creation_number.
+func (a *App) CreateStartLocation(index uint32, x, y, z, rotation float32) (uint32, error) {
+	return forge.Current.CreateStartLocation(index, [3]float32{x, y, z}, rotation)
+}
+
+// MoveStartLocation relocates the start location with the given index to the
+// supplied game coordinates. Looks up by start-location index, not
+// creation_number.
+func (a *App) MoveStartLocation(index uint32, x, y, z float32) error {
+	return forge.Current.MoveStartLocation(index, [3]float32{x, y, z})
+}
+
+// DeleteStartLocation removes the start location with the given index.
+func (a *App) DeleteStartLocation(index uint32) error {
+	return forge.Current.DeleteStartLocation(index)
+}
+
 // RotateUnit sets the facing angle (radians, Z-axis only) of the unit with the
 // given creation_number. The gizmo's rotate-handle commits via this method.
 // Mirrors MoveUnit's error-handling shape: no-op on same value, dirty-flip on

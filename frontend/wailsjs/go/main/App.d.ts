@@ -67,6 +67,10 @@ export function CreateNewMap(arg1:main.NewMapParams):Promise<main.MapStatus>;
 
 export function CreateRegion(arg1:string,arg2:number,arg3:number,arg4:number,arg5:number,arg6:string,arg7:string,arg8:Array<number>):Promise<number>;
 
+export function CreateStartLocation(arg1:number,arg2:number,arg3:number,arg4:number,arg5:number):Promise<number>;
+
+export function CreateUnit(arg1:string,arg2:number,arg3:number,arg4:number,arg5:number,arg6:number,arg7:number):Promise<number>;
+
 export function DeleteCustomObject(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteCustomUnit(arg1:string):Promise<void>;
@@ -76,6 +80,8 @@ export function DeleteDoodad(arg1:number):Promise<void>;
 export function DeleteRegion(arg1:number):Promise<void>;
 
 export function DeleteSelection():Promise<number>;
+
+export function DeleteStartLocation(arg1:number):Promise<void>;
 
 export function DeleteTriggerECA(arg1:number,arg2:Array<number>):Promise<main.TriggerMutationResultDTO>;
 
@@ -165,6 +171,8 @@ export function ListSkyModels():Promise<Array<main.SkyModelOption>>;
 
 export function ListSoundEnvironments():Promise<Array<main.LabeledOption>>;
 
+export function ListStartLocations():Promise<Array<forge.StartLocationInfo>>;
+
 export function ListTilesetOptions():Promise<Array<main.LabeledOption>>;
 
 export function ListTilesets():Promise<Array<main.TilesetInfoDTO>>;
@@ -194,6 +202,8 @@ export function MapInfoGet():Promise<w3i.Info>;
 export function MoveDoodad(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
 export function MoveRegion(arg1:number,arg2:number,arg3:number):Promise<void>;
+
+export function MoveStartLocation(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
 export function MoveTriggerECA(arg1:number,arg2:Array<number>,arg3:number):Promise<main.TriggerMutationResultDTO>;
 

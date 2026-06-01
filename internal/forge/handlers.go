@@ -81,6 +81,15 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("units.delete", handleUnitsDelete)
 	reg("doodads.create", handleDoodadsCreate)
 	reg("doodads.delete", handleDoodadsDelete)
+	// Start locations (sloc entities). Addressed by start-location INDEX (the
+	// gg_start_location_<index> trigger handle), not creation_number. list is
+	// the read-only accessor; create/move/delete are undo-aware and emit
+	// entity-changed Kind="unit" (slocs ARE units on disk). See
+	// handlers_entities.go + startloc_mutate.go.
+	reg("start_locations.list", handleStartLocationsList)
+	reg("start_locations.create", handleStartLocationsCreate)
+	reg("start_locations.move", handleStartLocationsMove)
+	reg("start_locations.delete", handleStartLocationsDelete)
 	// Region (rect) Editor — create/move/resize/rename/delete the war3map.w3r
 	// regions table (spawn zones, "unit enters region", waygate dests, cinematic
 	// bounds). Undo-aware; emit entity-changed with Kind="region". list/get are

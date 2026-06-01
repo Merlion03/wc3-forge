@@ -106,3 +106,77 @@ func handleDoodadsDelete(params json.RawMessage) (any, error) {
 	}
 	return map[string]any{"ok": true}, nil
 }
+
+// ---------------------------------------------------------------------------
+// Start locations (sloc entities). Addressed by start-location INDEX (the
+// trigger-addressable identity → gg_start_location_<index>), NOT by
+// creation_number. See startloc_mutate.go for the on-disk conventions.
+//
+// WIRE-METHOD CONTRACT:
+//   start_locations.list   {} -> {start_locations: [{index, creation_number, position[3], rotation}]}
+//   start_locations.create {index, x, y, z?, rotation?} -> {creation_number}
+//   start_locations.move   {index, x, y, z?}            -> {ok:true}
+//   start_locations.delete {index}                      -> {ok:true}
+// ---------------------------------------------------------------------------
+
+// startLocationCreateParams matches start_locations.create. Z/Rotation are
+// optional — JSON-absent decodes to the Go zero value, and CreateStartLocation
+// treats rotation==0 as "default 3π/2" (the Reforged sloc facing).
+type startLocationCreateParams struct {
+	Index    uint32  `json:"index"`
+	X        float32 `json:"x"`
+	Y        float32 `json:"y"`
+	Z        float32 `json:"z"`
+	Rotation float32 `json:"rotation"`
+}
+
+// startLocationMoveParams matches start_locations.move (Z optional).
+type startLocationMoveParams struct {
+	Index uint32  `json:"index"`
+	X     float32 `json:"x"`
+	Y     float32 `json:"y"`
+	Z     float32 `json:"z"`
+}
+
+// startLocationIndexParams matches start_locations.delete (just an index).
+type startLocationIndexParams struct {
+	Index uint32 `json:"index"`
+}
+
+func handleStartLocationsList(params json.RawMessage) (any, error) {
+	return map[string]any{"start_locations": Current.ListStartLocations()}, nil
+}
+
+func handleStartLocationsCreate(params json.RawMessage) (any, error) {
+	var p startLocationCreateParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	cn, err := Current.CreateStartLocation(p.Index, [3]float32{p.X, p.Y, p.Z}, p.Rotation)
+	if err != nil {
+		return nil, err
+	}
+	return entityCreateResponse{CreationNumber: cn}, nil
+}
+
+func handleStartLocationsMove(params json.RawMessage) (any, error) {
+	var p startLocationMoveParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.MoveStartLocation(p.Index, [3]float32{p.X, p.Y, p.Z}); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+func handleStartLocationsDelete(params json.RawMessage) (any, error) {
+	var p startLocationIndexParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.DeleteStartLocation(p.Index); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
