@@ -28,6 +28,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -104,6 +105,46 @@ func Parse(data []byte) (Strings, error) {
 		return nil, fmt.Errorf("scan wts: %w", err)
 	}
 	return out, nil
+}
+
+// Encode serializes a Strings table back to war3map.wts text in a canonical
+// shape — one `STRING <id>\n{\n<value>\n}\n\n` block per entry, IDs ascending.
+// It does NOT reproduce the source file byte-for-byte: a UTF-8 BOM, outside-block
+// comments, and trailing-`}` whitespace are dropped (Parse already discards them
+// too, so Parse(Encode(s)) round-trips the MAP even though Encode(Parse(file))
+// won't match the original bytes). WC3 reads BOM-less UTF-8 fine.
+//
+// Multi-line values are written verbatim. A value containing a line whose first
+// non-space char is `}` can't be represented (it would terminate the block on
+// re-parse) — that's the same limitation Parse has and doesn't occur in real
+// map metadata.
+func Encode(s Strings) ([]byte, error) {
+	ids := make([]uint32, 0, len(s))
+	for id := range s {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var b strings.Builder
+	for _, id := range ids {
+		fmt.Fprintf(&b, "STRING %d\n{\n%s\n}\n\n", id, s[id])
+	}
+	return []byte(b.String()), nil
+}
+
+// RefID reports whether ref is a "TRIGSTR_<n>" reference and, if so, the n.
+// Mirrors the matching Resolve uses, exported so callers (the session's Map Info
+// edit path) can detect a tokenized field and update the referenced wts entry
+// instead of inlining a literal.
+func RefID(ref string) (uint32, bool) {
+	m := trigstrRe.FindStringSubmatch(ref)
+	if m == nil {
+		return 0, false
+	}
+	id, err := strconv.ParseUint(m[1], 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(id), true
 }
 
 // StripColorCodes removes inline WC3 color formatting (|cAARRGGBB ... |r)

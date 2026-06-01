@@ -6,6 +6,7 @@ import (
 
 	"github.com/StephenSHorton/wc3-forge/internal/bridge"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
+	"github.com/StephenSHorton/wc3-forge/internal/formats/wts"
 )
 
 // This file collects small correctness/polish additions kept OUT of
@@ -46,6 +47,12 @@ import (
 type setMapInfoCmd struct {
 	old w3i.Info
 	new w3i.Info
+	// wtsOld/wtsNew carry the war3map.wts entries this edit changed (a localized
+	// map stores Description fields as TRIGSTR tokens whose display text lives in
+	// the string table). Both empty for a non-localized map. Apply/Revert restore
+	// them so undo/redo keeps the on-disk w3i token + its wts value coherent.
+	wtsOld map[uint32]string
+	wtsNew map[uint32]string
 }
 
 func (c *setMapInfoCmd) Label() string { return "Edit map info" }
@@ -56,6 +63,7 @@ func (c *setMapInfoCmd) Apply(s *Session) error {
 	}
 	*s.info = c.new
 	s.dirtyInfo = true
+	applyWtsEntriesLocked(s, c.wtsNew)
 	return nil
 }
 
@@ -65,7 +73,24 @@ func (c *setMapInfoCmd) Revert(s *Session) error {
 	}
 	*s.info = c.old
 	s.dirtyInfo = true
+	applyWtsEntriesLocked(s, c.wtsOld)
 	return nil
+}
+
+// applyWtsEntriesLocked writes a set of {id: value} into the session string
+// table and marks it dirty. No-op for an empty map. Caller holds s.mu (Apply /
+// Revert run under the history lock).
+func applyWtsEntriesLocked(s *Session, m map[uint32]string) {
+	if len(m) == 0 {
+		return
+	}
+	if s.strings == nil {
+		s.strings = wts.Strings{}
+	}
+	for id, v := range m {
+		s.strings[id] = v
+	}
+	s.dirtyStrings = true
 }
 
 func (c *setMapInfoCmd) Affected(s *Session) []EntityChange {
@@ -113,9 +138,14 @@ func (s *Session) SetMapInfo(updates map[string]any) (int, error) {
 		return 0, nil
 	}
 	after := *s.info
+	// On a localized map, syncing tokenized Description fields to their wts
+	// entries (instead of orphaning them). Computed read-only before flipping
+	// dirty so wasDirty still detects the 0→1 transition.
+	wtsBefore, wtsAfter := s.computeInfoStringDeltaLocked(updates)
 	wasDirty := s.anyDirtyLocked()
 	s.dirtyInfo = true
-	s.recordCommand(&setMapInfoCmd{old: before, new: after})
+	applyWtsEntriesLocked(s, wtsAfter) // no-op when nothing tokenized changed
+	s.recordCommand(&setMapInfoCmd{old: before, new: after, wtsOld: wtsBefore, wtsNew: wtsAfter})
 	historyChanged := s.groupDepth == 0
 	s.mu.Unlock()
 	if !wasDirty {

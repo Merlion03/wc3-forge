@@ -253,6 +253,13 @@ type Session struct {
 	shadowMap        *shd.File      // war3map.shd
 	pathingMap       *wpm.File      // war3map.wpm
 	strings          wts.Strings    // war3map.wts, for TRIGSTR_<n> resolution
+	// infoTokens maps a Map Info Description field key ("name"/"author"/
+	// "description"/"suggestedPlayers") to its ORIGINAL "TRIGSTR_<n>" token,
+	// captured at Open before ResolveStrings resolved the field to its display
+	// value. Lets a Map Info edit update the referenced wts entry (rather than
+	// orphaning it) and lets Save re-inject the token into w3i. nil/empty for a
+	// non-localized map. See info_trigstr.go.
+	infoTokens       map[string]string
 	gameplay         *miscdata.File // war3mapMisc.txt — per-map gameplay-constants overrides
 
 	// regions / cameras — OPTIONAL. Phase 2b2 added Parse-only support so the
@@ -317,6 +324,12 @@ type Session struct {
 	dirtyInfo     bool
 	dirtyTerrain  bool
 	dirtyGameplay bool
+	// dirtyStrings tracks pending edits to war3map.wts (the trigger-strings
+	// table). Set when a Map Info edit touches a TRIGSTR-backed field on a
+	// localized map (the edit updates the referenced wts entry instead of
+	// inlining a literal into w3i — see info_trigstr.go). Save writes
+	// war3map.wts when set.
+	dirtyStrings bool
 	// dirtyXMods tracks pending edits to a per-map war3map.w3* shadow (the
 	// Object Editor's add-custom / delete-custom / set-field surface). Kept
 	// separate from dirtyUnits/dirtyDoodads (which track placed-instance .doo
@@ -543,6 +556,10 @@ func (s *Session) Open(path string) error {
 	if err != nil {
 		return err
 	}
+	// Capture which Description fields are TRIGSTR-backed BEFORE resolving them
+	// to display values, so a later Map Info edit can update the referenced wts
+	// entry (and Save can re-inject the token) instead of orphaning it.
+	infoTokens := captureInfoTokens(info)
 	if wtsStrings != nil {
 		info.ResolveStrings(wtsStrings.Display)
 	}
@@ -719,6 +736,7 @@ func (s *Session) Open(path string) error {
 	// from a previously-loaded map so the next import re-reads this map's.
 	s.imp = nil
 	s.strings = wtsStrings
+	s.infoTokens = infoTokens
 	s.gameplay = gameplay
 	s.triggers = triggers
 	s.triggersWct = triggersWct
@@ -731,6 +749,7 @@ func (s *Session) Open(path string) error {
 	s.dirtyUnits = false
 	s.dirtyDoodads = false
 	s.dirtyInfo = false
+	s.dirtyStrings = false
 	s.dirtyGameplay = false
 	s.dirtyTerrain = false
 	s.dirtyUnitMods = false
@@ -868,6 +887,8 @@ func (s *Session) Close() {
 	s.cameras = nil
 	s.imp = nil
 	s.strings = nil
+	s.infoTokens = nil
+	s.dirtyStrings = false
 	s.gameplay = nil
 	s.triggers = nil
 	s.triggersWct = nil
@@ -2209,7 +2230,7 @@ func (s *Session) ConvertObject(srcKind, srcID, dstKind string) (string, error) 
 // block; otherwise the Save pill leaks state across map opens.
 func (s *Session) anyDirtyLocked() bool {
 	return s.dirtyUnits || s.dirtyDoodads || s.dirtyInfo || s.dirtyTerrain ||
-		s.dirtyGameplay || s.dirtyUnitMods || s.dirtyItemMods ||
+		s.dirtyGameplay || s.dirtyStrings || s.dirtyUnitMods || s.dirtyItemMods ||
 		s.dirtyAbilityMods || s.dirtyBuffMods || s.dirtyDestructibleMods ||
 		s.dirtyDoodadMods || s.dirtyUpgradeMods ||
 		s.dirtyTriggers || s.mapHeaderScriptDirty || s.dirtyImports ||
@@ -2419,8 +2440,18 @@ func (s *Session) Save() (err error) {
 		addWrite("war3map.doo", data, err, func(s *Session) { s.dirtyDoodads = false })
 	}
 	if s.dirtyInfo {
-		data, err := w3i.Encode(s.info)
+		// Re-inject any captured TRIGSTR tokens so a localized map's Description
+		// fields encode as their original tokens (keeping the war3map.wts
+		// reference) rather than the resolved literal. reinjectInfoTokens returns
+		// s.info unchanged for a non-localized map (no copy).
+		data, err := w3i.Encode(reinjectInfoTokens(s.info, s.infoTokens))
 		addWrite("war3map.w3i", data, err, func(s *Session) { s.dirtyInfo = false })
+	}
+	if s.dirtyStrings && len(s.strings) > 0 {
+		// war3map.wts re-encode — a Map Info edit on a localized map updated a
+		// TRIGSTR entry. Independent of every other file; canonical-format encode.
+		data, err := wts.Encode(s.strings)
+		addWrite("war3map.wts", data, err, func(s *Session) { s.dirtyStrings = false })
 	}
 	if s.dirtyTerrain {
 		data, err := w3e.Encode(s.terrain)

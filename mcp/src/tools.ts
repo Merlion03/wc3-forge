@@ -205,7 +205,7 @@ export function registerTools(server: McpServer): void {
   );
   server.tool(
     "map_info_set",
-    "Partial-update map_info. Currently supported keys: name, author, description, suggestedPlayers (strings), lua (bool). Wire shape: { updates: { …keys } }; returns { changed_fields: N }. Recorded on the undo history — reversible via history_undo.",
+    "Partial-update map_info. Currently supported keys: name, author, description, suggestedPlayers (strings), lua (bool). Wire shape: { updates: { …keys } }; returns { changed_fields: N }. Recorded on the undo history — reversible via history_undo. On a localized map (where these fields are stored as TRIGSTR_<n> tokens referencing war3map.wts), editing one updates the referenced wts entry and keeps the token in w3i — it no longer orphans the entry — and war3map.wts is re-written on save.",
     {
       updates: z
         .record(z.unknown())
