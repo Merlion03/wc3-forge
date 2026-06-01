@@ -1831,8 +1831,26 @@ func (a *App) ForceQuit() {
 // MPQ-backed maps save in place via the pure-Go writer; on the rare archive
 // that can't be repacked, Save returns ErrMPQRepackFailed (wrapped) and the UI
 // surfaces a friendly toast suggesting the folder-extraction workaround.
+//
+// External-change guard: if a target file changed on disk since the map was
+// opened (another wc3-forge instance, an agent, or a human saved underneath
+// us), Save refuses and returns ErrSourceChangedOnDisk rather than clobbering.
+// The unsaved edits are preserved. The error message contains the stable marker
+// substring "changed on disk since it was opened" — App.svelte matches on it to
+// show a "Saved elsewhere — overwrite?" prompt, then calls SaveMapForce on
+// confirm. Keep that marker stable if you reword ErrSourceChangedOnDisk.
 func (a *App) SaveMap() error {
 	return forge.Current.Save()
+}
+
+// SaveMapForce is SaveMap with external-change detection overridden: it writes
+// even if a target file changed on disk since Open (the prior on-disk bytes are
+// still backed up to <name>.bak first, so a forced overwrite stays
+// recoverable). The GUI calls this only after the user confirms the
+// "Saved elsewhere — overwrite?" prompt that SaveMap's ErrSourceChangedOnDisk
+// triggers; the MCP equivalent is map.save with {"force": true}.
+func (a *App) SaveMapForce() error {
+	return forge.Current.SaveWith(forge.SaveOptions{Force: true})
 }
 
 // LaunchInWC3 spawns Warcraft III with the currently-loaded map preloaded

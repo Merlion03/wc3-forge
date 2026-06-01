@@ -167,8 +167,15 @@ export function registerTools(server: McpServer): void {
   );
   server.tool(
     "map_save",
-    "Save the current map in place. Folder-backed maps write directly; MPQ-backed maps return an error (extract to a folder first).",
-    {},
+    "Save the current map in place. Folder-backed maps commit all-or-nothing (each file staged to a temp, then atomically renamed, with a .bak of the prior bytes); MPQ-backed maps repack the whole .w3x atomically. By default the save is REFUSED with a 'changed on disk' error if any target file was modified since the map was opened (another wc3-forge instance, agent, or human saved underneath you) — your unsaved edits are preserved. Pass force=true to overwrite anyway (prior bytes still backed up to .bak).",
+    {
+      force: z
+        .boolean()
+        .optional()
+        .describe(
+          "overwrite even if a target file changed on disk since the map was opened (default false → refuse + report the conflict)"
+        ),
+    },
     wrap("map.save")
   );
   server.tool(

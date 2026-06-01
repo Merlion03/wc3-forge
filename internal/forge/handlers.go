@@ -1080,13 +1080,38 @@ func handleDoodadsScale(params json.RawMessage) (any, error) {
 	}, nil
 }
 
+// mapSaveParams is the optional request shape for map.save. `force` overrides
+// external-change detection: by default Save refuses (ErrSourceChangedOnDisk)
+// if a target file changed on disk since Open — another wc3-forge instance, an
+// agent, or a human saved underneath us — so an agent doesn't silently clobber
+// a concurrent edit. An agent that has reconciled (or genuinely wants to win)
+// re-calls map.save with {"force": true}. Absent/null params keep the safe
+// default (force=false). Tolerant of a bare/empty params object.
+type mapSaveParams struct {
+	Force bool `json:"force"`
+}
+
 // handleMapSave flushes pending edits to disk via the session's source. The
 // common path WRITES the .w3x/MPQ archive in place. On the rare genuinely
 // unpreservable archive, Save returns a wrapped ErrMPQRepackFailed; the handler
-// surfaces an accurate message with a folder-extraction workaround. All other
-// errors propagate verbatim so real save failures stay visible.
-func handleMapSave(_ json.RawMessage) (any, error) {
-	if err := Current.Save(); err != nil {
+// surfaces an accurate message with a folder-extraction workaround. If a target
+// file changed on disk since Open, Save returns ErrSourceChangedOnDisk and the
+// handler surfaces a force-to-overwrite hint (the dirty edits are preserved for
+// a retry). All other errors propagate verbatim so real save failures stay
+// visible.
+func handleMapSave(params json.RawMessage) (any, error) {
+	var p mapSaveParams
+	if len(params) > 0 {
+		// Tolerate null / absent params (the historical no-arg call); only a
+		// malformed non-empty object is an error.
+		if err := json.Unmarshal(params, &p); err != nil && string(params) != "null" {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+	}
+	if err := Current.SaveWith(SaveOptions{Force: p.Force}); err != nil {
+		if errors.Is(err, ErrSourceChangedOnDisk) {
+			return nil, fmt.Errorf("%w — your unsaved edits are kept; re-call map.save with {\"force\": true} to overwrite the on-disk version", err)
+		}
 		if errors.Is(err, ErrMPQRepackFailed) {
 			return nil, errors.New("Saving this map failed during MPQ repack. As a workaround, extract the map to a folder and save that.")
 		}

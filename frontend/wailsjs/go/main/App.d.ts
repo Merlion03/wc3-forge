@@ -249,6 +249,8 @@ export function RotateUnit(arg1:number,arg2:number):Promise<void>;
 
 export function SaveMap():Promise<void>;
 
+export function SaveMapForce():Promise<void>;
+
 export function SaveTriggerScript():Promise<main.TriggerScriptResultDTO>;
 
 export function ScaleDoodad(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;

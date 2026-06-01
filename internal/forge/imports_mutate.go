@@ -147,6 +147,12 @@ func (s *Session) AddImportFile(importPath string, data []byte) (string, error) 
 	nowDirty := s.anyDirtyLocked()
 	s.mu.Unlock()
 
+	// This is a DIRECT write bypassing Save's batch commit. Imports normally land
+	// under war3mapImported\ (not baselined), but the surface accepts any relative
+	// path — if a caller writes one that collides with a baselined war3map.* name,
+	// refresh its stamp so the next Save doesn't read our own write back as an
+	// external change. Folder-only; a no-op for MPQ. See atomic_save.go.
+	s.refreshBaselineEntry(src, norm)
 	if !wasDirty && nowDirty {
 		s.notifyDirty(true)
 	}
@@ -189,6 +195,10 @@ func (s *Session) RemoveImport(importPath string) error {
 	s.dirtyImports = true
 	s.mu.Unlock()
 
+	// Direct delete bypassing Save's batch commit: drop any baseline stamp for
+	// the now-absent name so a later checkStaleness doesn't read a recorded-but-
+	// gone file as an external delete. Folder-only; no-op for MPQ.
+	s.refreshBaselineEntry(src, norm)
 	if !wasDirty {
 		s.notifyDirty(true)
 	}
@@ -257,6 +267,11 @@ func (s *Session) RenameImport(oldPath, newPath string) error {
 	s.dirtyImports = true
 	s.mu.Unlock()
 
+	// Direct write+delete bypassing Save's batch commit: stamp the new name (now
+	// present) and drop the old (now gone) so neither trips the next save's
+	// change detection. Folder-only; no-op for MPQ.
+	s.refreshBaselineEntry(src, newNorm)
+	s.refreshBaselineEntry(src, oldNorm)
 	if !wasDirty {
 		s.notifyDirty(true)
 	}

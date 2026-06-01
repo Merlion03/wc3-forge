@@ -486,6 +486,10 @@ export function SaveMap() {
   return window['go']['main']['App']['SaveMap']();
 }
 
+export function SaveMapForce() {
+  return window['go']['main']['App']['SaveMapForce']();
+}
+
 export function SaveTriggerScript() {
   return window['go']['main']['App']['SaveTriggerScript']();
 }

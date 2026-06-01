@@ -8,7 +8,7 @@
     GetReforgedMode, SetReforgedMode,
     GetUnitTypeIndex, GetDoodadTypeIndex,
     NewMapDialog as NewMapSaveDialog, CreateNewMap, WriteNewMap, ReportDiagnostics,
-    MoveUnit, MoveDoodad, CreateDoodad, CreateUnit, DeleteSelection, IsDirty, SaveMap,
+    MoveUnit, MoveDoodad, CreateDoodad, CreateUnit, DeleteSelection, IsDirty, SaveMap, SaveMapForce,
     SetUnitInstanceField, SetUnitInstanceItemDrops,
     ListStartLocations, CreateStartLocation, MoveStartLocation, DeleteStartLocation,
     ListRegions, CreateRegion,
@@ -582,12 +582,9 @@
           'OK = save and continue, Cancel = abort update.',
       )
       if (!choice) return
-      try {
-        await SaveMap()
-      } catch (e) {
-        showToast('Save failed — update aborted: ' + String(e), 'error')
-        return
-      }
+      // trySaveWithForcePrompt offers the overwrite prompt if the map changed on
+      // disk and toasts on failure; abort the update unless it actually saved.
+      if (!(await trySaveWithForcePrompt())) return
     }
     updateDownloading = true
     updateDownloadPct = 0
@@ -1507,14 +1504,14 @@
     if (quitGuardSaving) return
     quitGuardSaving = true
     try {
-      await SaveMap()
-      // Save succeeded → drop the modal and ForceQuit. If Save fails (e.g.
-      // ErrMPQRepackFailed on an unpreservable archive), show the toast and
-      // leave the modal open so the user can pick Discard or Cancel instead.
-      quitGuardOpen = false
-      await ForceQuit()
-    } catch (e) {
-      showToast(`Save failed: ${e instanceof Error ? e.message : String(e)}`, 'error')
+      // trySaveWithForcePrompt handles the external-change conflict (offers the
+      // overwrite prompt + force) and the MPQ-repack failure, toasting as needed.
+      // Only quit once the map is actually saved; otherwise leave the modal open
+      // so the user can pick Discard, Cancel, or retry.
+      if (await trySaveWithForcePrompt()) {
+        quitGuardOpen = false
+        await ForceQuit()
+      }
     } finally {
       quitGuardSaving = false
     }
@@ -1548,22 +1545,55 @@
     pushSnap()
   }
 
-  async function doSave() {
-    if (!status.loaded || saving) return
-    saving = true
+  // Save the map, recovering from an external-change refusal by prompting the
+  // user to overwrite (then force-saving). Returns true iff the map is now saved.
+  // Shared by every save entry point (Ctrl+S, Save & Quit, save-before-update)
+  // so the force-overwrite prompt is offered consistently; on a declined prompt
+  // or a hard failure it toasts (where appropriate) and returns false so the
+  // caller can abort its flow. The marker matches ErrSourceChangedOnDisk in
+  // atomic_save.go (kept stable on purpose).
+  async function trySaveWithForcePrompt(): Promise<boolean> {
     try {
       await SaveMap()
       try { dirty = await IsDirty() } catch {}
+      return true
     } catch (e) {
       const msg = String(e)
+      if (/changed on disk since it was opened/i.test(msg)) {
+        const overwrite = confirm(
+          'This map was changed on disk since you opened it — another wc3-forge ' +
+            'window, an agent, or you in another tool may have saved it.\n\n' +
+            'Your unsaved changes are still here. The previous on-disk version ' +
+            'will be backed up to a .bak file before being overwritten.\n\n' +
+            'OK = overwrite with your version, Cancel = keep both (save aborted).',
+        )
+        if (!overwrite) return false
+        try {
+          await SaveMapForce()
+          try { dirty = await IsDirty() } catch {}
+          return true
+        } catch (e2) {
+          showToast('save failed: ' + String(e2), 'error')
+          return false
+        }
+      }
       if (/MPQ repack|extract the map to a folder/i.test(msg)) {
         showToast(
           'Saving this map failed during MPQ repack. As a workaround, extract it to a folder and save that.',
           'error',
         )
-      } else {
-        showToast('save failed: ' + msg, 'error')
+        return false
       }
+      showToast('save failed: ' + msg, 'error')
+      return false
+    }
+  }
+
+  async function doSave() {
+    if (!status.loaded || saving) return
+    saving = true
+    try {
+      await trySaveWithForcePrompt()
     } finally {
       saving = false
     }

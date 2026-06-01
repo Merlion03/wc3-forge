@@ -1010,6 +1010,16 @@ func (c *convertToLuaCmd) Apply(s *Session) error {
 	if err := s.source.delete("war3map.j"); err != nil {
 		return fmt.Errorf("delete war3map.j: %w", err)
 	}
+	// These are DIRECT folder writes/deletes bypassing Save's batch commit, and
+	// both names are in the change-detection baseline. Re-stamp war3map.lua (now
+	// present with new bytes) and drop war3map.j (now gone) so a later Save
+	// doesn't read our own conversion back as an external change/delete. The lock
+	// is held by the command dispatcher; folder-only (no-op for MPQ). See
+	// atomic_save.go.
+	if fs, ok := s.source.(folderSource); ok {
+		s.refreshBaselineEntryLocked(fs.root, "war3map.lua")
+		s.refreshBaselineEntryLocked(fs.root, "war3map.j")
+	}
 	s.info.Lua = true
 	if s.info.FileVersion < w3i.FileVersionRefV28 {
 		s.info.FileVersion = w3i.FileVersionRefV28
@@ -1033,6 +1043,14 @@ func (c *convertToLuaCmd) Revert(s *Session) error {
 	}
 	if err := s.source.delete("war3map.lua"); err != nil {
 		return fmt.Errorf("delete war3map.lua: %w", err)
+	}
+	// Symmetric to Apply: re-stamp/drop the baseline for both script names after
+	// the direct folder writes/deletes so a later Save doesn't flag our undo as an
+	// external change. refreshBaselineEntryLocked stamps a present file and drops a
+	// now-absent one, so it's correct whether war3map.j was restored or cleared.
+	if fs, ok := s.source.(folderSource); ok {
+		s.refreshBaselineEntryLocked(fs.root, "war3map.j")
+		s.refreshBaselineEntryLocked(fs.root, "war3map.lua")
 	}
 	s.info.Lua = c.wasLua
 	s.info.FileVersion = c.oldFileVersion

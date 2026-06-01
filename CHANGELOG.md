@@ -4,6 +4,51 @@ All notable changes to wc3-forge are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-06-01
+
+Phase 0 — the data-integrity floor. 1.0 is the promise that your map survives a
+crash, a second editor, and malformed input: saves are now atomic and
+all-or-nothing, a concurrent save is detected instead of silently clobbered, the
+prior bytes are always kept, and a corrupt map can no longer take the window down.
+
+### Added
+
+- **Atomic, all-or-nothing saves.** Folder-backed maps encode every dirty file
+  first, stage each into an `fsync`'d temp, and only once *all* are written rename
+  them into place — a crash, disk-full, or encode error before that point leaves
+  every original file byte-for-byte intact (never a torn map with new units over
+  old terrain). MPQ-backed maps already repack the whole `.w3x` in one atomic
+  temp+rename. Single-file direct writes (model import, Convert-to-Lua, script
+  save, sky) now go through the same temp+`fsync`+rename primitive instead of a
+  truncating write.
+- **Backup-on-save.** Before a file's bytes are replaced its prior contents are
+  copied to a sibling `.bak`, so the previous version stays recoverable.
+- **External-change detection.** Each source file's identity (mtime+size) is
+  recorded at open; a save that would overwrite a file another wc3-forge window,
+  an agent, or a human changed on disk since then is **refused** with an
+  actionable error (your unsaved edits are kept). `map.save` takes an optional
+  `{"force": true}` to overwrite anyway (the on-disk bytes are still backed up
+  first); the GUI surfaces this as a "saved elsewhere — overwrite?" prompt.
+
+### Fixed
+
+- **Malformed maps can't crash the window.** The map-open path recovers from a
+  parser panic on corrupt/truncated/protected input and surfaces it as a normal
+  "map appears corrupt or unsupported" error instead of vanishing the window.
+- **Out-of-memory on hostile input.** The `war3map.w3i` and `war3map.wtg` parsers
+  now cap untrusted element counts read off the wire, so a bogus length field
+  can't drive a multi-gigabyte allocation.
+- **Lossy MPQ saves are refused.** When a repack would write fewer files than the
+  archive declared (the import-drop class — e.g. a 240-file map shrinking to 14),
+  the save is refused before the destructive rename and the original `.w3x` is
+  left untouched, rather than overwriting the user's only copy with a lossy one.
+
+### Internal
+
+- CI commits the round-trip fixtures so the losslessness tests actually **run**
+  (not skip) in CI, and exercises the suite under the race detector on the macOS
+  leg.
+
 ## [0.9.0] - 2026-06-01
 
 Phase 3 of the road to 1.0 — honesty polish: docs that match reality, update

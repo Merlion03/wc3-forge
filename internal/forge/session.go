@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -93,26 +92,25 @@ func (f folderSource) read(name string) ([]byte, bool, error) {
 // The Windows drive-letter form (`X:`) is rejected explicitly because it's
 // "absolute" on Windows but not according to POSIX filepath.IsAbs.
 func (f folderSource) write(name string, data []byte) error {
-	norm := strings.ReplaceAll(name, `\`, "/")
-	clean := path.Clean(norm)
-	switch {
-	case strings.HasPrefix(clean, "/"),
-		strings.HasPrefix(clean, ".."),
-		strings.Contains(clean, "/.."),
-		len(clean) >= 2 && clean[1] == ':':
-		return fmt.Errorf("write %q: unsafe path", name)
+	dst, err := f.resolve(name) // path-traversal defense (see atomic_save.go)
+	if err != nil {
+		return err
 	}
-	dst := filepath.Join(f.root, filepath.FromSlash(clean))
 	// Create any intermediate directories so writes into subdirectories work.
 	// Model imports write under war3mapImported\, which won't exist in a
-	// freshly-extracted folder map; without this MkdirAll the WriteFile fails
-	// with "cannot find the path". No-op when the parent already exists.
+	// freshly-extracted folder map; without this the write fails with "cannot
+	// find the path". No-op when the parent already exists.
 	if dir := filepath.Dir(dst); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("write %q: mkdir: %w", name, err)
 		}
 	}
-	return os.WriteFile(dst, data, 0o644)
+	// Atomic temp+fsync+rename — this is the user's PRIMARY copy, so a truncating
+	// os.WriteFile could leave war3map.w3e / Units.doo half-written + unparseable
+	// on a crash/power-loss/disk-full mid-write. Protects the DIRECT writers
+	// (ImportModel, Convert-to-Lua, SaveTriggerScript, sky); Save's batch commit
+	// adds all-or-nothing + backup on top for the dirty-file set.
+	return mpq.WriteFileAtomic(dst, data)
 }
 
 // delete removes the named file under f.root. Returns nil if the file is
@@ -449,6 +447,16 @@ type Session struct {
 	// authoritative for the renderer). A category absent from the map defaults
 	// to visible, so GetDoodadCategoryVisible returns true for unknown keys.
 	doodadVisibility map[string]bool
+
+	// srcBaseline is the external-change-detection baseline: the on-disk
+	// identity (mtime+size) of each source file as of Open (folder sources key
+	// by war3map.* name; MPQ sources stamp the single .w3x under mpqArchiveKey).
+	// Save re-stats the files it's about to write and refuses with
+	// ErrSourceChangedOnDisk if any drifted — another wc3-forge instance, an
+	// agent, or a human saved underneath us. Written by recordSourceBaseline at
+	// Open, refreshed after each commit, cleared on Close. Guarded by s.mu. See
+	// atomic_save.go.
+	srcBaseline map[string]fileStamp
 }
 
 // EntityChange is the payload for OnEntityChanged. Kind/ID identify which
@@ -812,6 +820,11 @@ func (s *Session) openWithSource(abs string, src fileSource, rawMapBytes []byte,
 	manifest.OpenMs = time.Since(openStart).Milliseconds()
 	recordOpenManifest(manifest, triggerLoadStatus)
 	opened = true
+	// Snapshot the on-disk identity (mtime+size) of every source file we might
+	// later write back, so Save's external-change detection has a baseline to
+	// compare against. Does its own short lock + a handful of stats; runs
+	// unlocked here so the I/O doesn't hold the session lock. See atomic_save.go.
+	s.recordSourceBaseline(src, abs)
 	s.notifySelection()
 	s.notifyMapChanged(true)
 	if wasDirty {
@@ -918,6 +931,7 @@ func (s *Session) Close() {
 	s.imp = nil
 	s.strings = nil
 	s.infoTokens = nil
+	s.srcBaseline = nil // drop the change-detection baseline; the next Open records a fresh one
 	s.dirtyStrings = false
 	s.doodadVisibility = nil // don't leak one map's category-visibility into the next
 	s.gameplay = nil
@@ -2059,6 +2073,10 @@ func (s *Session) ImportModel(req ImportModelReq) (ImportModelResult, error) {
 
 	// Write the MDX, then each texture. Register every written path in the
 	// import table (Add is idempotent + normalizes slashes + uses StandardFlag).
+	// No change-detection baseline refresh here: these bytes land under
+	// war3mapImported\ (not in baselineFileNames, so never "stale"), and the
+	// war3map.imp registry itself is re-encoded by the next Save (dirtyImports),
+	// whose batch commit refreshes its baseline. See atomic_save.go.
 	if err := src.write(req.ModelName, req.MdxData); err != nil {
 		s.mu.Unlock()
 		return ImportModelResult{}, fmt.Errorf("write %s: %w", req.ModelName, err)
@@ -2356,19 +2374,49 @@ func (s *Session) IsDirty() bool {
 	return s.anyDirtyLocked() || s.pendingSkyModel != nil
 }
 
+// pendingWrite is one fully-encoded file awaiting commit. setDirty flips this
+// file's dirty flag (false = mark saved, true = re-dirty on a write failure);
+// onSaved (optional) publishes a rebuilt object back to the session (the
+// gameplay [Misc] fallback, the wct table). Both run under s.mu. Declared at
+// package scope so the save-durability helpers in atomic_save.go
+// (commitFolderWrites, checkStaleness, refreshBaselineAfterCommit) can take a
+// []pendingWrite; SaveWith builds the slice and is the only producer.
+type pendingWrite struct {
+	name     string
+	data     []byte
+	setDirty func(s *Session, dirty bool)
+	onSaved  func(s *Session)
+}
+
 // Save flushes every dirty in-memory file back through the source's write
-// path. On success the dirty flag clears and a dirty=false event fires.
+// path. On success the dirty flag clears and a dirty=false event fires. It is
+// the default-options entry point; SaveWith carries the force override.
+func (s *Session) Save() error {
+	return s.SaveWith(SaveOptions{})
+}
+
+// SaveWith flushes every dirty in-memory file back through the source's write
+// path, honoring opts. On success the dirty flag clears and a dirty=false event
+// fires.
 //
-// Partial-write semantics: if one file writes and another fails, the dirty
-// flags for the written files clear (they're now in sync with disk) but the
-// failed file stays dirty so the user can retry. The first error is returned;
-// successive failures are surfaced via wrapped messages.
+// Save-durability (see atomic_save.go):
+//   - Folder-backed maps commit all-or-nothing: every dirty file is encoded,
+//     staged into an fsync'd sibling temp, and only once EVERY temp is written
+//     are they renamed into place (prior bytes copied to <name>.bak first). A
+//     crash/disk-full/encode error before the rename phase leaves every original
+//     byte-for-byte intact — never a torn map (new units + old terrain).
+//   - MPQ-backed maps already get all-or-nothing for free: writes buffer in
+//     memory and flush() repacks the whole .w3x in one atomic temp+rename.
+//   - External-change detection: unless opts.Force, the files about to be
+//     written are re-stat'd against the Open-time baseline; if any drifted on
+//     disk (another wc3-forge instance, an agent, or a human saved underneath
+//     us) the save is REFUSED with ErrSourceChangedOnDisk and every dirty flag
+//     is restored, rather than silently clobbering. Force overwrites anyway
+//     (prior bytes still backed up to <name>.bak).
 //
-// MPQ-backed sessions write a freshly-repacked .w3x at the source path via the
-// pure-Go MPQ writer (atomic temp-file + rename, so a failure never corrupts
-// the original). A clean (non-dirty) .w3x save takes the SAME repack path as a
-// dirty one — it does not falsely report success without writing.
-func (s *Session) Save() (err error) {
+// A clean (non-dirty) .w3x save still takes the MPQ repack path — it does not
+// falsely report success without writing.
+func (s *Session) SaveWith(opts SaveOptions) (err error) {
 	// mapIO diagnostics: trace every Save — its sequence id, which dirty files
 	// were written, total bytes, duration, and outcome. saveTrace.Written +
 	// .Bytes accumulate at each write site below; the deferred recorder snaps
@@ -2398,16 +2446,6 @@ func (s *Session) Save() (err error) {
 		}
 	}
 
-	// pendingWrite is one fully-encoded file awaiting commit. setDirty flips this
-	// file's dirty flag (false = mark saved, true = re-dirty on a write failure);
-	// onSaved (optional) publishes a rebuilt object back to the session (the
-	// gameplay [Misc] fallback, the wct table). Both run under s.mu.
-	type pendingWrite struct {
-		name     string
-		data     []byte
-		setDirty func(s *Session, dirty bool)
-		onSaved  func(s *Session)
-	}
 	var pending []pendingWrite
 	var encErr error
 	// addWrite queues an encoded file (no-op once an earlier encode errored, so
@@ -2459,6 +2497,12 @@ func (s *Session) Save() (err error) {
 			if err := mp.forceRepackAll(); err != nil {
 				return err
 			}
+			// Keep the change-detection baseline current with our own repack so a
+			// later dirty Save doesn't flag this clean repack as an external write.
+			// (No staleness check on the clean path: nothing is dirty, so there's
+			// nothing to lose — this is the explicit "give me a packed .w3x"
+			// affordance.)
+			s.restampArchiveBaseline(mp)
 		}
 		return nil
 	}
@@ -2629,23 +2673,73 @@ func (s *Session) Save() (err error) {
 		return fmt.Errorf("no source for writing")
 	}
 
-	// WRITE PHASE — unlocked I/O on the immutable encoded buffers. Dirty flags
-	// were already cleared under the encode lock above. On the first write
-	// error, re-dirty the failed file + every file after it (none of those were
-	// written) so the next Save retries them; earlier files stayed written +
-	// clean. (An ENCODE error short-circuited before any write — nothing was
-	// cleared or written.)
-	for i := range pending {
-		pw := pending[i]
-		if err := src.write(pw.name, pw.data); err != nil {
-			s.mu.Lock()
-			for _, rest := range pending[i:] {
-				rest.setDirty(s, true)
-			}
-			s.mu.Unlock()
-			return fmt.Errorf("write %s: %w", pw.name, err)
+	// reDirtyAll restores every queued file's dirty flag (cleared under the
+	// encode lock above) when the WHOLE commit is aborted — a staleness refusal,
+	// or the all-or-nothing folder commit failing. The next Save then re-encodes
+	// + retries them. Per-file partial failures use the narrower pending[i:]
+	// re-dirty in the MPQ loop below instead.
+	reDirtyAll := func() {
+		s.mu.Lock()
+		for _, pw := range pending {
+			pw.setDirty(s, true)
 		}
-		noteWrite(pw.name, len(pw.data))
+		s.mu.Unlock()
+	}
+
+	// EXTERNAL-CHANGE CHECK (unless Force). Refuse to clobber files another
+	// editor/agent/human changed on disk since Open; restore dirty flags so the
+	// edits aren't lost and the caller can retry (or force). Folder sources are
+	// checked per-file against the names we're about to write; MPQ sources are
+	// checked whole-archive (the repack replaces the single .w3x).
+	if !opts.Force {
+		var staleErr error
+		if mp, ok := src.(*mpqSource); ok {
+			staleErr = s.checkArchiveStaleness(mp)
+		} else {
+			staleErr = s.checkStaleness(src, pending)
+		}
+		if staleErr != nil {
+			reDirtyAll()
+			return staleErr
+		}
+	}
+
+	// COMMIT PHASE — unlocked I/O on the immutable encoded buffers. Dirty flags
+	// were already cleared under the encode lock above.
+	if fs, ok := src.(folderSource); ok {
+		// Folder: all-or-nothing batch (stage fsync'd temps, then back up + atomic
+		// rename each into place — see commitFolderWrites). A failure before the
+		// rename phase leaves every original untouched; re-dirty everything so the
+		// next Save retries. The flags are restored as a unit because the batch is
+		// atomic — there's no meaningful per-file partial state to preserve.
+		if cerr := commitFolderWrites(fs, pending); cerr != nil {
+			reDirtyAll()
+			return cerr
+		}
+		for _, pw := range pending {
+			noteWrite(pw.name, len(pw.data))
+		}
+		// Re-stamp the baseline for the files we just wrote so the NEXT Save in
+		// this session doesn't read our own write back as an external change.
+		s.refreshBaselineAfterCommit(fs.root, pending)
+	} else {
+		// MPQ (or other buffered source): per-file write into the in-memory
+		// buffer, then the single atomic repack at flush() below. On the first
+		// write error, re-dirty the failed file + every file after it (none of
+		// those were written) so the next Save retries them; earlier files stayed
+		// buffered + clean. (An ENCODE error short-circuited before any write.)
+		for i := range pending {
+			pw := pending[i]
+			if werr := src.write(pw.name, pw.data); werr != nil {
+				s.mu.Lock()
+				for _, rest := range pending[i:] {
+					rest.setDirty(s, true)
+				}
+				s.mu.Unlock()
+				return fmt.Errorf("write %s: %w", pw.name, werr)
+			}
+			noteWrite(pw.name, len(pw.data))
+		}
 	}
 	if pendingSky != nil {
 		scriptName := "war3map.j"
@@ -2673,6 +2767,12 @@ func (s *Session) Save() (err error) {
 			return fmt.Errorf("write %s: %w", scriptName, err)
 		}
 		noteWrite(scriptName, len(updated))
+		// The sky rewrite is a read-modify-write that bypasses the batch commit
+		// (it reads the CURRENT script and rewrites only the SetSkyModel line, so
+		// it inherently preserves any external edits — no staleness check needed),
+		// but it does leave the script's on-disk stamp stale. Refresh the folder
+		// baseline so the NEXT Save doesn't read our own sky write as external.
+		s.refreshBaselineEntry(src, scriptName)
 		s.mu.Lock()
 		s.pendingSkyModel = nil
 		s.mu.Unlock()
@@ -2686,6 +2786,13 @@ func (s *Session) Save() (err error) {
 	// the error so the UI doesn't falsely report success.
 	if err := src.flush(); err != nil {
 		return err
+	}
+	// MPQ: the repack just rewrote the .w3x at the source path, so its Open-time
+	// stamp is now stale against our own write. Re-stamp so the NEXT Save doesn't
+	// read our repack back as an external change. (Folder sources already
+	// refreshed per-file via refreshBaselineAfterCommit above.)
+	if mp, ok := src.(*mpqSource); ok {
+		s.restampArchiveBaseline(mp)
 	}
 
 	// Fire the public dirty=false event only when everything cleared. (If a

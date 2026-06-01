@@ -382,6 +382,12 @@ func (s *Session) SaveTriggerScript() (int, error) {
 	if err := src.write(scriptFile, []byte(text)); err != nil {
 		return 0, fmt.Errorf("write %s: %w", scriptFile, err)
 	}
+	// This is a DIRECT write bypassing Save's batch commit, and war3map.j/.lua is
+	// in the change-detection baseline. Refresh its stamp so a subsequent Save
+	// (e.g. a sky or trigger write) doesn't read this script write back as an
+	// external change and spuriously refuse. Folder-only; a no-op for MPQ (which
+	// buffers until flush). See atomic_save.go.
+	s.refreshBaselineEntry(src, scriptFile)
 	return len(text), nil
 }
 
