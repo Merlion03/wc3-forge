@@ -105,6 +105,8 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("regions.rename", handleRegionsRename)
 	reg("regions.delete", handleRegionsDelete)
 	reg("map.save", handleMapSave)
+	reg("map.save_as", handleMapSaveAs)
+	reg("map.extract_to_folder", handleMapExtractToFolder)
 	reg("selection.get", handleSelectionGet)
 	// selection.set honors an optional client `primary` (index or kind:id);
 	// handleSelectionSetWithPrimary replaces the legacy handleSelectionSet
@@ -1090,6 +1092,39 @@ func handleMapSave(_ json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"ok": true}, nil
+}
+
+// mapPathParams is the shared {path} request shape for map.save_as +
+// map.extract_to_folder.
+type mapPathParams struct {
+	Path string `json:"path"`
+}
+
+// handleMapSaveAs exports the current map to a fresh .w3x at params.path and
+// repoints the session to it. Returns {ok, path} (the new, absolute path).
+func handleMapSaveAs(params json.RawMessage) (any, error) {
+	var p mapPathParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.SaveAs(p.Path); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "path": Current.Path()}, nil
+}
+
+// handleMapExtractToFolder unpacks an MPQ-backed map into a new folder at
+// params.path. Returns {ok, path}. The agent then map.open(path) to switch to
+// the folder workflow.
+func handleMapExtractToFolder(params json.RawMessage) (any, error) {
+	var p mapPathParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if err := Current.ExtractToFolder(p.Path); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "path": p.Path}, nil
 }
 
 // unitsListParams supports an optional filter on the units.list response so

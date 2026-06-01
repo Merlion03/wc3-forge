@@ -431,6 +431,24 @@
     "method": "map.close"
   },
   {
+    "name": "map_extract_to_folder",
+    "description": "Unpack the current MPQ-backed (.w3x) map into a NEW folder at path (must not already exist), writing every listed archive file as loose files. Then map_open(path) to switch to the folder workflow (where map_save writes directly, no MPQ repack). Errors if the map is already folder-backed. Returns { ok, path }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "destination folder (must not already exist)"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "method": "map.extract_to_folder"
+  },
+  {
     "name": "map_info_get",
     "description": "Read war3map.w3i (name, author, description, suggested_players, dimensions, players, …).",
     "inputSchema": {
@@ -460,6 +478,44 @@
     "method": "map.info_set"
   },
   {
+    "name": "map_new",
+    "description": "Create a brand-new map at path (a .w3x) and open it. A flat single-tileset square with no units/doodads (classic-TFT format: w3i v25, w3e v11). width/height are playable tile counts (8–480); tileset is the single-letter code (e.g. 'L' = Lordaeron Summer). Errors if path already exists. Returns { ok, path, name, width, height }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "map display name (also the lobby/HM3W name)"
+        },
+        "width": {
+          "type": "integer",
+          "description": "playable width in tiles (8–480)"
+        },
+        "height": {
+          "type": "integer",
+          "description": "playable height in tiles (8–480)"
+        },
+        "tileset": {
+          "type": "string",
+          "description": "single-letter tileset code, e.g. 'L' (Lordaeron Summer)"
+        },
+        "path": {
+          "type": "string",
+          "description": "destination .w3x path (must not already exist)"
+        }
+      },
+      "required": [
+        "name",
+        "width",
+        "height",
+        "tileset",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "method": "map.new"
+  },
+  {
     "name": "map_open",
     "description": "Load a map into wc3-forge. Accepts an extracted folder OR a .w3x / .w3m / .mpq archive path.",
     "inputSchema": {
@@ -486,6 +542,24 @@
       "additionalProperties": false
     },
     "method": "map.save"
+  },
+  {
+    "name": "map_save_as",
+    "description": "Flush in-memory edits, then export the current map as a standalone .w3x at path and repoint the session there (subsequent saves go to the new path). path must end in .w3x or .w3m. Folder-backed maps are packaged; MPQ-backed maps are copied. Returns { ok, path }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "destination .w3x/.w3m path"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "method": "map.save_as"
   },
   {
     "name": "map_status",

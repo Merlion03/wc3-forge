@@ -171,6 +171,30 @@ export function registerTools(server: McpServer): void {
     {},
     wrap("map.save")
   );
+  server.tool(
+    "map_new",
+    "Create a brand-new map at path (a .w3x) and open it. A flat single-tileset square with no units/doodads (classic-TFT format: w3i v25, w3e v11). width/height are playable tile counts (8–480); tileset is the single-letter code (e.g. 'L' = Lordaeron Summer). Errors if path already exists. Returns { ok, path, name, width, height }.",
+    {
+      name: z.string().describe("map display name (also the lobby/HM3W name)"),
+      width: z.number().int().describe("playable width in tiles (8–480)"),
+      height: z.number().int().describe("playable height in tiles (8–480)"),
+      tileset: z.string().describe("single-letter tileset code, e.g. 'L' (Lordaeron Summer)"),
+      path: z.string().describe("destination .w3x path (must not already exist)"),
+    },
+    wrap("map.new")
+  );
+  server.tool(
+    "map_save_as",
+    "Flush in-memory edits, then export the current map as a standalone .w3x at path and repoint the session there (subsequent saves go to the new path). path must end in .w3x or .w3m. Folder-backed maps are packaged; MPQ-backed maps are copied. Returns { ok, path }.",
+    { path: z.string().describe("destination .w3x/.w3m path") },
+    wrap("map.save_as")
+  );
+  server.tool(
+    "map_extract_to_folder",
+    "Unpack the current MPQ-backed (.w3x) map into a NEW folder at path (must not already exist), writing every listed archive file as loose files. Then map_open(path) to switch to the folder workflow (where map_save writes directly, no MPQ repack). Errors if the map is already folder-backed. Returns { ok, path }.",
+    { path: z.string().describe("destination folder (must not already exist)") },
+    wrap("map.extract_to_folder")
+  );
 
   // --- map info -----------------------------------------------------------
   server.tool(
