@@ -1,12 +1,15 @@
 ---
 title: Installation
-description: Download a release or build wc3-forge from source on Windows or macOS.
+description: Download a release on Windows, or build wc3-forge from source (Windows or macOS).
 ---
 
 ## Download (Windows)
 
 The fastest way to get started is the installer from the latest release. It
 bundles everything wc3-forge needs (including the vendored CASC libraries).
+
+> **macOS:** there is no prebuilt macOS binary — build from source
+> ([below](#build-from-source)). The in-app updater is Windows-only too.
 
 <Cards>
   <Card
@@ -39,9 +42,13 @@ wails build
 
 The binary lands at `build/bin/wc3-forge.exe`.
 
-### macOS
+### macOS (build from source — no prebuilt binary)
 
-macOS needs one extra step to build CascLib:
+macOS has no published release, so building from source is the only way to run
+it there. Reforged Warcraft III on macOS typically runs through
+[Mead](https://github.com/StephenSHorton/mead) (a Wine-bottle manager); see
+"Pointing at your Warcraft III install" below. macOS needs one extra step to
+build CascLib:
 
 ```bash
 git clone https://github.com/StephenSHorton/wc3-forge

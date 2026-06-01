@@ -4,6 +4,142 @@ All notable changes to wc3-forge are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-01
+
+Phase 3 of the road to 1.0 — honesty polish: docs that match reality, update
+integrity, and the never-compiled macOS paths under CI.
+
+### Added
+
+- **First-run empty state.** With no map loaded the viewport now offers Open Map,
+  New Map, and a "Set up Claude Code" dialog with the copyable MCP command.
+- **macOS CI leg.** A `macos-latest` job compiles, vets, and tests the
+  darwin/unix Go paths that the Windows-only CI never built.
+- **`SECURITY.md`** documenting the reporting channel, the unsigned-binary
+  posture, and how to verify a download.
+
+### Changed
+
+- **Documentation reconciled to reality** — the tool reference now lists all 152
+  MCP tools (regions, start locations, imports, gameplay constants, view,
+  diagnostics, models, minimap, and the Phase 2 map/history additions); the
+  CHANGELOG backfills every release; `CREDITS.md` corrected (CascLib is bound via
+  purego, not cgo).
+- **macOS support is described as build-from-source** across the README and site
+  docs — there is no prebuilt macOS binary and the in-app updater is Windows-only.
+
+### Fixed
+
+- **Update integrity.** Releases now publish a `SHA256SUMS` asset and the in-app
+  updater verifies the downloaded installer's SHA-256 before it elevates and runs
+  it, refusing to launch on a mismatch.
+- **MDX model lighting** now matches the terrain's light direction
+  (`normalize(1, 1, -3)`) so units and doodads aren't shaded against the ground.
+- **Cliff walls re-drape during height edits** — the height brush now rebuilds
+  cliffs in lockstep with the terrain instead of leaving them over stale heights.
+
+## [0.8.0] - 2026-06-01
+
+Phase 2 — complete the agent loop, finish save-safety, lock contracts in CI.
+
+### Added
+
+- **Begin & persist a map from MCP**: `map.new`, `map.save_as`, and
+  `map.extract_to_folder` (unpack a `.w3x` into the editable folder workflow).
+- **`history.abort_group`** + an `open_group_depth` field on `history.list` to
+  recover a session whose undo/redo is wedged by an agent's dangling group.
+- **Byte-canonical `war3map.wts` encoder.**
+- **CI contract guards**: regenerate `tools.json` and fail on drift, plus a
+  handler↔catalog parity test.
+
+### Changed
+
+- `view.set_mode` and `view.set_doodad_category_visible` are now idempotent
+  **SET** operations (not toggles) and return the resulting state.
+
+### Fixed
+
+- **Localized Map Info no longer orphans `war3map.wts`.** Editing a TRIGSTR-backed
+  field (name/author/description/suggested players) updates the referenced string
+  entry and rewrites `war3map.wts`, instead of inlining a literal into `war3map.w3i`.
+- **Concurrent-save data race.** `Save()` encodes every dirty file and clears its
+  dirty flag under one lock, so a simultaneous edit from the other surface can't
+  tear a half-written `.w3x` or have its edit dropped from the next save.
+- A region/trigger selection no longer hangs the properties panel on "Loading…".
+
+## [0.7.0] - 2026-06-01
+
+Phase 1 — a real editor across both the GUI and the MCP surface.
+
+### Added
+
+- **Region (rect) editor** — create/move/resize/rename/delete regions on both
+  surfaces, with a WebGL viewport overlay; byte-faithful `war3map.w3r` encoder.
+- **Unit hand-placement & start-location authoring**, and **placed-unit instance
+  field editing** (player, HP/mana %, hero level, gold, …) with a live model
+  preview.
+- **Import Manager** over `war3map.imp` (add/remove/rename), wiring three
+  previously GUI-only edits to MCP.
+
+### Fixed
+
+- **24-player start-location colors.** High-slot players (12–23) render in their
+  correct colors via custom uniform rune-pad markers (the engine has no SD
+  team-color texture for those slots); added a hide-all toggle, and hidden
+  markers are no longer box-selectable.
+
+## [0.6.7] - 2026-06-01
+
+### Fixed
+
+- Start-location markers for 24-player maps render correct per-player colors;
+  added a Markers hide-all toggle; hidden markers are no longer box-selectable.
+
+## [0.6.6] - 2026-06-01
+
+### Fixed
+
+- The in-app updater no longer reports "you're up to date" on an unstamped/dev
+  build — it surfaces the dev build and still offers the latest release.
+
+## [0.6.5] - 2026-05-31
+
+### Added
+
+- **Water brush** — add/remove water with a fixed height and a live preview.
+
+## [0.6.4] - 2026-05-31
+
+### Fixed
+
+- **Item object field editing.** Items read the shared `UnitMetaData.slk`
+  (selected by the `useItem` column); the previously-referenced
+  `ItemMetaData.slk` doesn't exist, so every item-field edit had failed.
+
+## [0.6.3] - 2026-05-31
+
+### Added
+
+- **Test Map for folder-backed maps** — package the working folder into a
+  `.w3x` (synthesized HM3W header + lossless MPQ) and launch it in Warcraft III,
+  no external build script required.
+
+## [0.6.2] - 2026-05-31
+
+### Fixed
+
+- The updater always shows its dialog (even on a dev build), and the installer
+  renames a locked `wc3-forge.exe` aside instead of failing to overwrite it —
+  fixing the file-lock race when the `--mcp` server holds the binary open.
+
+## [0.6.1] - 2026-05-31
+
+### Fixed
+
+- Documentation site fixes for GitHub Pages: trailing-slash routing so `/docs/`
+  resolves, base-path-prefixed images, and the official Claude logomark in the
+  hero.
+
 ## [0.6.0] - 2026-05-31
 
 ### Added
@@ -38,6 +174,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in place, and an open undo group can no longer leak across a stroke. Together
   these remove the brush lag and flicker.
 
+## [0.5.1] - 2026-05-30
+
+### Fixed
+
+- Bounded the `unitsdoo` count fields so a malformed `war3mapUnits.doo` can no
+  longer trigger a 16 GiB allocation (OOM); rejects implausible counts up front.
+
+## [0.5.0] - 2026-05-30
+
+### Added
+
+- **In-app updater.** Checks GitHub Releases for a newer version and offers a
+  one-click download + elevated install of the NSIS installer. This is the
+  updater baseline — builds from here on can self-update.
+
+## [0.4.1] - 2026-05-30
+
+### Fixed
+
+- The installer now bundles the CASC DLLs, fixing clean installs that rendered
+  every map black (the binary couldn't mount CASC). The portable zip was fine.
+
+## [0.4.0] - 2026-05-30
+
+### Added
+
+- **Doodad palette** + **New Map** (name/size/tileset → a real `.w3x`).
+- **Diagnostics system** — an F9 overlay and `diagnostics.get` / `diagnostics.arm`
+  MCP tools, fed by a registry any subsystem extends in one line.
+- **Embedded MCP server** — `wc3-forge --mcp` makes the binary itself the MCP
+  stdio server, so registration needs no Node or repo checkout. (#17)
+
+### Fixed
+
+- Sky-gradient `GL_INVALID_OPERATION` that froze the viewport (leftover enabled
+  vertex-attrib arrays under ANGLE). (#19)
+- Object-mutation deadlock and a `unitsdoo` save-corruption bug. (#16)
+
 ## [0.3.0] - 2026-05-29
 
 ### Added
@@ -56,8 +230,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Cross-trigger vJASS module inlining** in Convert-to-Lua, unblocking maps
   whose modules span multiple triggers. (#7)
 - **3D model import** — bring in OBJ / glTF / STL and auto-convert to MDX. (#12)
-- **Native macOS support**, plus the [Mead](https://github.com/StephenSHorton/mead)
-  Wine-bottle workflow for installing Warcraft III. (#1)
+- **macOS support (build from source)** — the darwin code paths (launch, CASC,
+  asset resolution) plus the [Mead](https://github.com/StephenSHorton/mead)
+  Wine-bottle workflow for installing Warcraft III. No prebuilt macOS binary is
+  published; build with `wails build`. (#1)
 - **MPQ patch-chain stock-asset source** for Classic / non-CASC installs
   (layered `War3Patch.mpq` over `War3.mpq`). (#2)
 - **WC3 install detection** — prompts you to locate Warcraft III when it isn't
@@ -107,7 +283,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Relicensed to GPL-3.0-or-later with `CREDITS.md` enumerating the ported
   HiveWE subsystems.
 
+[0.9.0]: https://github.com/StephenSHorton/wc3-forge/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/StephenSHorton/wc3-forge/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/StephenSHorton/wc3-forge/compare/v0.6.7...v0.7.0
+[0.6.7]: https://github.com/StephenSHorton/wc3-forge/compare/v0.6.6...v0.6.7
+[0.6.6]: https://github.com/StephenSHorton/wc3-forge/compare/v0.6.5...v0.6.6
+[0.6.5]: https://github.com/StephenSHorton/wc3-forge/compare/v0.6.4...v0.6.5
+[0.6.4]: https://github.com/StephenSHorton/wc3-forge/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/StephenSHorton/wc3-forge/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/StephenSHorton/wc3-forge/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/StephenSHorton/wc3-forge/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/StephenSHorton/wc3-forge/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/StephenSHorton/wc3-forge/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/StephenSHorton/wc3-forge/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/StephenSHorton/wc3-forge/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/StephenSHorton/wc3-forge/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/StephenSHorton/wc3-forge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/StephenSHorton/wc3-forge/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/StephenSHorton/wc3-forge/releases/tag/v0.1.0

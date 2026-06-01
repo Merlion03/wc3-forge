@@ -23,8 +23,12 @@ claude mcp add wc3-forge --scope user -- "$PWD\build\bin\wc3-forge.exe" --mcp
   </Tab>
   <Tab value="macOS">
 
+There is no prebuilt macOS binary — point Claude Code at the app you
+[built from source](/docs/installation#build-from-source) (and in-app updates
+aren't available on macOS):
+
 ```bash
-claude mcp add wc3-forge --scope user -- "/Applications/wc3-forge.app/Contents/MacOS/wc3-forge" --mcp
+claude mcp add wc3-forge --scope user -- "$PWD/build/bin/wc3-forge.app/Contents/MacOS/wc3-forge" --mcp
 ```
 
   </Tab>

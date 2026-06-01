@@ -18,9 +18,9 @@ wc3-forge is a native Warcraft III map editor (Go + TypeScript, single [Wails](h
 
 ## Get started with Claude Code
 
-Three steps. Tested on Windows and macOS.
+Three steps. Windows is the primary, released platform; macOS is supported via build-from-source (no prebuilt macOS binary, and the in-app updater is Windows-only).
 
-**1. Install wc3-forge.** Grab a release, or build from source.
+**1. Install wc3-forge.** On Windows, grab a [release](https://github.com/StephenSHorton/wc3-forge/releases) (installer or portable zip) or build from source. On macOS, build from source.
 
 On **Windows** (PowerShell):
 
@@ -110,19 +110,27 @@ The **Agent Console** (Ctrl+\` in the editor) streams every bridge call live —
 
 ### What Claude can do today
 
+**152 MCP tools** across these surfaces (the [tool reference](https://stephenshorton.github.io/wc3-forge/docs/tool-reference) has the full list):
+
 | Surface | Tools |
 |---|---|
-| Map lifecycle | `map_open`, `map_close`, `map_status`, `map_save` |
-| Map info | `map_info_get`, `map_info_set` (name, author, description, suggested players, lua flag) |
-| Placed units | `units_list`, `units_get`, `units_move`, `units_rotate`, `units_scale`, `units_create`, `units_delete` |
+| Map lifecycle | `map_open`, `map_close`, `map_status`, `map_save`, `map_new`, `map_save_as`, `map_extract_to_folder` |
+| Map info | `map_info_get`, `map_info_set` (name, author, description, suggested players, lua flag; TRIGSTR-aware on localized maps) |
+| Placed units | `units_list`, `units_get`, `units_move`, `units_rotate`, `units_scale`, `units_set_field`, `units_create`, `units_delete` |
 | Placed doodads | `doodads_list`, `doodads_get`, `doodads_move`, `doodads_rotate`, `doodads_scale`, `doodads_create`, `doodads_delete` |
-| Terrain | `terrain_get_tile`, `terrain_set_tile`, `terrain_set_height` |
+| Regions | `regions_list`, `regions_get`, `regions_create`, `regions_move`, `regions_resize`, `regions_rename`, `regions_delete` |
+| Start locations | `start_locations_list`, `start_locations_create`, `start_locations_move`, `start_locations_delete` |
+| Terrain | `terrain_get_tile`, `terrain_set_tile`, `terrain_paint_tile`, `terrain_set_height`, `terrain_brush_height`, `terrain_brush_cliff`, `terrain_brush_ramp`, `terrain_brush_water`, `terrain_swap_tileset` |
 | Object definitions (read + write, all 7 kinds) | `objects_<kind>_list`, `objects_<kind>_get`, `objects_<kind>_set_field`, `objects_<kind>_create_custom`, `objects_<kind>_delete_custom`, `objects_<kind>_fields_meta` for `<kind>` in units / items / abilities / buffs / destructables / doodads / upgrades, plus `objects_convert` |
-| Triggers | `triggers_tree`, `triggers_get`, `triggers_add_gui`, `triggers_generate_script`, `triggers_convert_to_lua`, `triggers_test_map` (full GUI tree + Monaco editor + GUI→Lua codegen + Convert-Map-to-Lua + Test Map) |
+| Gameplay constants | `gameplay_constants_get`, `gameplay_constants_apply` |
+| Imports | `imports_list`, `imports_add`, `imports_remove`, `imports_rename` |
+| Models / minimap | `models_import` (OBJ/glTF/STL → MDX), `minimap_bake` |
+| Triggers | `triggers_tree`, `triggers_get`, `triggers_add_gui`, `triggers_generate_script`, `triggers_convert_to_lua`, `triggers_test_map`, … (full GUI tree + Monaco editor + GUI→Lua/JASS codegen + Convert-Map-to-Lua + Test Map) |
 | Selection | `selection_get`, `selection_set`, `selection_clear` |
-| View + camera | `view_set_mode`, `view_set_doodad_category_visible`, `camera_set_view` |
+| View + camera | `view_get_mode`, `view_set_mode`, `view_set_doodad_category_visible`, `camera_set_view` |
 | Window | `window_set_title` (label your instance so parallel agents are distinguishable) |
-| History | `history_undo`, `history_redo`, `history_list`, `history_begin_group`, `history_end_group` |
+| History | `history_undo`, `history_redo`, `history_list`, `history_begin_group`, `history_end_group`, `history_abort_group` |
+| Diagnostics | `diagnostics_get`, `diagnostics_arm` |
 | Multi-instance | `sessions_list`, `session_select` (point Claude at one of several running wc3-forges) |
 
 All entity tools speak **game coordinates** (origin at map center, units = WC3 world units). All mutations flow through the same history stack the GUI uses, so `Ctrl+Z` in the editor undoes Claude's edits and vice versa.

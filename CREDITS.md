@@ -34,7 +34,7 @@ Inline source comments name the specific HiveWE symbol or file being ported when
 
 ## CascLib
 
-[CascLib](https://github.com/ladislav-zezula/CascLib) by **Ladislav Zezula** (MIT) is vendored under `scripts/casclib/` and wrapped via CGo in `internal/casc`. It backs asset resolution from the user's Warcraft III install.
+[CascLib](https://github.com/ladislav-zezula/CascLib) by **Ladislav Zezula** (MIT) is vendored under `scripts/casclib/` and wrapped in `internal/casc` — bound at runtime via [`purego`](https://github.com/ebitengine/purego) (cgo-free `dlopen`) on macOS and `syscall.LazyDLL` on Windows, so no C toolchain is needed to build. It backs asset resolution from the user's Warcraft III install.
 
 ## StormLib
 
