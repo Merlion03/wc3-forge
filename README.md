@@ -110,7 +110,7 @@ The **Agent Console** (Ctrl+\` in the editor) streams every bridge call live —
 
 ### What Claude can do today
 
-**152 MCP tools** across these surfaces (the [tool reference](https://stephenshorton.github.io/wc3-forge/docs/tool-reference) has the full list):
+**152 MCP tools** across these surfaces (the [tool reference](https://stephenshorton.github.io/wc3-forge/docs/tool-reference) walks through them by surface):
 
 | Surface | Tools |
 |---|---|

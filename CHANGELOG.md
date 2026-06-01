@@ -67,7 +67,7 @@ Phase 2 — complete the agent loop, finish save-safety, lock contracts in CI.
   tear a half-written `.w3x` or have its edit dropped from the next save.
 - A region/trigger selection no longer hangs the properties panel on "Loading…".
 
-## [0.7.0] - 2026-06-01
+## [0.7.0] - 2026-05-31
 
 Phase 1 — a real editor across both the GUI and the MCP surface.
 
@@ -88,14 +88,14 @@ Phase 1 — a real editor across both the GUI and the MCP surface.
   team-color texture for those slots); added a hide-all toggle, and hidden
   markers are no longer box-selectable.
 
-## [0.6.7] - 2026-06-01
+## [0.6.7] - 2026-05-31
 
 ### Fixed
 
 - Start-location markers for 24-player maps render correct per-player colors;
   added a Markers hide-all toggle; hidden markers are no longer box-selectable.
 
-## [0.6.6] - 2026-06-01
+## [0.6.6] - 2026-05-31
 
 ### Fixed
 
