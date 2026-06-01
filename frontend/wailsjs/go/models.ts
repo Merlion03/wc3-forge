@@ -1597,6 +1597,7 @@ export namespace update {
 	    current: string;
 	    latest: string;
 	    isNewer: boolean;
+	    isDev: boolean;
 	    release?: Release;
 	
 	    static createFrom(source: any = {}) {
@@ -1608,6 +1609,7 @@ export namespace update {
 	        this.current = source["current"];
 	        this.latest = source["latest"];
 	        this.isNewer = source["isNewer"];
+	        this.isDev = source["isDev"];
 	        this.release = this.convertValues(source["release"], Release);
 	    }
 	

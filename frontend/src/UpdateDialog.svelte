@@ -32,7 +32,12 @@
     onUpdate?: () => void
   } = $props()
 
-  const hasUpdate = $derived(!!result?.isNewer && !!result?.release?.installer)
+  const installer = $derived(result?.release?.installer ?? null)
+  const hasUpdate = $derived(!!result?.isNewer && !!installer)
+  // Unstamped "dev" build: we can't version-compare, so don't claim the user is
+  // current — surface the dev build and still offer the latest release to install.
+  const devOffer = $derived(!!result?.isDev && !result?.isNewer && !!installer)
+  const canInstall = $derived(hasUpdate || devOffer)
   const latest = $derived(result?.latest ?? '')
   const notes = $derived(result?.release?.notes?.trim() ?? '')
   const sizeMB = $derived(
@@ -53,7 +58,7 @@
   <Dialog.Content class="w-[min(520px,calc(100%-2rem))] max-w-[min(520px,calc(100%-2rem))] gap-0 p-0 overflow-hidden">
     <Dialog.Header class="px-4 py-3 border-b">
       <Dialog.Title>
-        {#if hasUpdate}Update available{:else}Check for updates{/if}
+        {#if canInstall}Update available{:else}Check for updates{/if}
       </Dialog.Title>
       <Dialog.Description class="sr-only">
         Check for and install wc3-forge updates.
@@ -65,14 +70,24 @@
         <p class="text-sm text-red-400">
           Couldn't check for updates: {error}
         </p>
-      {:else if hasUpdate}
-        <p class="text-sm">
-          <span class="text-muted-foreground">You're on</span>
-          <code class="text-xs bg-muted px-1 py-0.5 rounded">v{current}</code>
-          <span class="text-muted-foreground">—</span>
-          <code class="text-xs bg-emerald-500/15 text-emerald-400 px-1 py-0.5 rounded">v{latest}</code>
-          <span class="text-muted-foreground">is available{sizeMB ? ` (${sizeMB} MB)` : ''}.</span>
-        </p>
+      {:else if canInstall}
+        {#if hasUpdate}
+          <p class="text-sm">
+            <span class="text-muted-foreground">You're on</span>
+            <code class="text-xs bg-muted px-1 py-0.5 rounded">v{current}</code>
+            <span class="text-muted-foreground">—</span>
+            <code class="text-xs bg-emerald-500/15 text-emerald-400 px-1 py-0.5 rounded">v{latest}</code>
+            <span class="text-muted-foreground">is available{sizeMB ? ` (${sizeMB} MB)` : ''}.</span>
+          </p>
+        {:else}
+          <p class="text-sm">
+            <span class="text-muted-foreground">You're on a</span>
+            <code class="text-xs bg-muted px-1 py-0.5 rounded">development build</code>
+            <span class="text-muted-foreground">(v{current}), so version comparison isn't available. The latest release</span>
+            <code class="text-xs bg-emerald-500/15 text-emerald-400 px-1 py-0.5 rounded">v{latest}</code>
+            <span class="text-muted-foreground">can be installed below{sizeMB ? ` (${sizeMB} MB)` : ''}.</span>
+          </p>
+        {/if}
 
         {#if notes}
           <div class="rounded-md border bg-muted/40 max-h-48 overflow-auto">
@@ -114,7 +129,7 @@
     </div>
 
     <Dialog.Footer class="px-4 py-3 border-t">
-      {#if hasUpdate}
+      {#if canInstall}
         <Button variant="ghost" onclick={() => (open = false)} disabled={downloading}>Later</Button>
         <Button onclick={() => onUpdate?.()} disabled={downloading}>
           {downloading ? 'Downloading…' : 'Update Now'}
