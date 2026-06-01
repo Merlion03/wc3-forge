@@ -1531,6 +1531,12 @@
     const d = new Set<number>()
     for (const it of items) {
       if (it.kind === 'doodad') d.add(it.id)
+      // region/trigger aren't unit-or-doodad entities and carry no
+      // creation_number the properties panel can resolve — routing them into the
+      // unit set made the panel hang on "Loading…" forever (it awaits a unit
+      // that doesn't exist). They're selected/edited via their own surfaces
+      // (RegionPanel/TriggerEditor), so just keep them out of the entity sets.
+      else if (it.kind === 'region' || it.kind === 'trigger') continue
       else u.add(it.id)
     }
     selectedIds = u
