@@ -49,6 +49,13 @@ type Region struct {
 	WeatherID      string // 4-byte FourCC, may be all-zero ("0000") when no weather
 	AmbientID      string // C-string; may be empty
 	Color          [3]uint8
+
+	// pad is the single byte that follows the color triple. HiveWE treats it as
+	// padding and discards it, but real files carry a non-zero value here (the
+	// wc3-survival fixture stores 0xFF), so Parse preserves it to keep Encode
+	// byte-faithful. Hand-constructed Regions leave it 0 (the conventional
+	// padding value), which is what a fresh WorldEdit save writes.
+	pad byte
 }
 
 // Parse decodes raw war3map.w3r bytes. Refuses absurd region counts (CHSV
@@ -106,9 +113,13 @@ func Parse(data []byte) (*File, error) {
 		}
 		rg.Color = [3]uint8{col[0], col[1], col[2]}
 		// 1-byte padding after the color triple, per HiveWE's reader.advance(1).
-		if _, err := r.readBytes(1); err != nil {
+		// Preserve it verbatim so Encode is byte-faithful — real files carry a
+		// non-zero value here (see Region.pad).
+		pad, err := r.readBytes(1)
+		if err != nil {
 			return nil, fmt.Errorf("region %d padding: %w", i, err)
 		}
+		rg.pad = pad[0]
 		out.Regions = append(out.Regions, rg)
 	}
 	return out, nil
