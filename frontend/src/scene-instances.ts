@@ -2136,6 +2136,11 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     }
 
     for (const [cn, inst] of unitInstances) {
+      // Slocs live in unitInstances as HIDDEN CircleOfPower MDX (kept for the
+      // gizmo/transform) but are picked solely via slocRenderer.pickInfos()
+      // below, which returns nothing while the markers are toggled hidden.
+      // Skip them here so a hidden marker can't be clicked or box-selected.
+      if ((inst as any).__wc3ForgeTypeId === 'sloc') continue
       const wb = instanceWorldBounds(inst)
       if (wb) considerSphere(wb.cx, wb.cy, wb.cz, wb.r, { kind: 'unit', id: cn }, inst)
     }
@@ -2267,6 +2272,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
           && p.y >= rect.y && p.y <= rect.y + rect.h
     }
     for (const [cn, inst] of unitInstances) {
+      // Hidden slocs (CircleOfPower MDX kept for the gizmo) are box-picked via
+      // slocRenderer.pickInfos() below, which respects the hide toggle — skip
+      // them here so box-select doesn't grab hidden markers.
+      if ((inst as any).__wc3ForgeTypeId === 'sloc') continue
       const wb = instanceWorldBounds(inst)
       if (!wb) continue
       if (inside(worldToCanvasPx(wb.cx, wb.cy, wb.cz))) {
