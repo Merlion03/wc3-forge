@@ -104,6 +104,7 @@ export namespace forge {
 	export class HistoryState {
 	    undo: HistoryEntry[];
 	    redo: HistoryEntry[];
+	    open_group_depth: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new HistoryState(source);
@@ -113,6 +114,7 @@ export namespace forge {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.undo = this.convertValues(source["undo"], HistoryEntry);
 	        this.redo = this.convertValues(source["redo"], HistoryEntry);
+	        this.open_group_depth = source["open_group_depth"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

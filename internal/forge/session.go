@@ -889,6 +889,7 @@ func (s *Session) Close() {
 	s.strings = nil
 	s.infoTokens = nil
 	s.dirtyStrings = false
+	s.doodadVisibility = nil // don't leak one map's category-visibility into the next
 	s.gameplay = nil
 	s.triggers = nil
 	s.triggersWct = nil
@@ -2367,19 +2368,21 @@ func (s *Session) Save() (err error) {
 		}
 	}
 
-	// pendingWrite is one fully-encoded file awaiting commit. clear runs AFTER
-	// the write succeeds (re-locking s.mu) to flip the file's dirty flag false
-	// and apply any post-write session state (e.g. s.triggersWct).
+	// pendingWrite is one fully-encoded file awaiting commit. setDirty flips this
+	// file's dirty flag (false = mark saved, true = re-dirty on a write failure);
+	// onSaved (optional) publishes a rebuilt object back to the session (the
+	// gameplay [Misc] fallback, the wct table). Both run under s.mu.
 	type pendingWrite struct {
-		name  string
-		data  []byte
-		clear func(*Session)
+		name     string
+		data     []byte
+		setDirty func(s *Session, dirty bool)
+		onSaved  func(s *Session)
 	}
 	var pending []pendingWrite
 	var encErr error
 	// addWrite queues an encoded file (no-op once an earlier encode errored, so
-	// first error wins). Called under the read lock during the ENCODE PHASE.
-	addWrite := func(name string, data []byte, err error, clear func(*Session)) {
+	// first error wins). Called under the write lock during the ENCODE PHASE.
+	addWrite := func(name string, data []byte, err error, setDirty func(*Session, bool), onSaved func(*Session)) {
 		if encErr != nil {
 			return
 		}
@@ -2387,7 +2390,7 @@ func (s *Session) Save() (err error) {
 			encErr = fmt.Errorf("encode %s: %w", name, err)
 			return
 		}
-		pending = append(pending, pendingWrite{name: name, data: data, clear: clear})
+		pending = append(pending, pendingWrite{name: name, data: data, setDirty: setDirty, onSaved: onSaved})
 	}
 
 	// noteWrite records one successfully-written file into the mapIO save trace.
@@ -2398,17 +2401,20 @@ func (s *Session) Save() (err error) {
 		saveTrace.Bytes += int64(n)
 	}
 
-	// ENCODE PHASE — under the READ lock. Every Encode reads shared session
-	// state (s.units, s.doodads, …) while concurrent MUTATORS (which take the
-	// WRITE lock) are BLOCKED, so a unit move / region resize / object-field
-	// edit on another goroutine can't tear a half-encoded file mid-Save. Other
-	// readers stay concurrent. NO slow I/O happens here — only in-memory
-	// serialization into `pending`; the writes + the MPQ repack run UNLOCKED
-	// below on the now-immutable byte buffers. (Previously these Encodes ran
-	// unlocked and raced the mutators — the bug this fixes.)
-	s.mu.RLock()
+	// ENCODE PHASE — under the WRITE lock. Every Encode reads shared session
+	// state (s.units, s.doodads, …) and we clear each file's dirty flag, all
+	// under one lock acquisition, so concurrent MUTATORS (which take the write
+	// lock) can't (a) tear a half-encoded file mid-Save, nor (b) sneak in
+	// between "we encoded it" and "we cleared its flag" and have their flag
+	// wrongly cleared (which would drop their edit from the NEXT save — a data-
+	// loss race the prior clear-after-write structure had). A mutation that
+	// lands AFTER this lock releases correctly re-dirties the flag and is NOT in
+	// our encoded bytes, so the next Save persists it. NO slow I/O happens here
+	// — only in-memory serialization into `pending`; the writes + the MPQ repack
+	// run UNLOCKED below on the now-immutable byte buffers.
+	s.mu.Lock()
 	if !s.loaded {
-		s.mu.RUnlock()
+		s.mu.Unlock()
 		return fmt.Errorf("no map loaded")
 	}
 	if !s.anyDirtyLocked() && s.pendingSkyModel == nil {
@@ -2418,7 +2424,7 @@ func (s *Session) Save() (err error) {
 		// real, packed .w3x rather than a no-op that misleadingly reports
 		// success — this is the SAME repack path a dirty save would take.
 		src := s.source
-		s.mu.RUnlock()
+		s.mu.Unlock()
 		if mp, ok := src.(*mpqSource); ok {
 			if err := mp.forceRepackAll(); err != nil {
 				return err
@@ -2433,11 +2439,11 @@ func (s *Session) Save() (err error) {
 
 	if s.dirtyUnits {
 		data, err := unitsdoo.Encode(s.units)
-		addWrite("war3mapUnits.doo", data, err, func(s *Session) { s.dirtyUnits = false })
+		addWrite("war3mapUnits.doo", data, err, func(s *Session, d bool) { s.dirtyUnits = d }, nil)
 	}
 	if s.dirtyDoodads {
 		data, err := doodadsdoo.Encode(s.doodads)
-		addWrite("war3map.doo", data, err, func(s *Session) { s.dirtyDoodads = false })
+		addWrite("war3map.doo", data, err, func(s *Session, d bool) { s.dirtyDoodads = d }, nil)
 	}
 	if s.dirtyInfo {
 		// Re-inject any captured TRIGSTR tokens so a localized map's Description
@@ -2445,17 +2451,17 @@ func (s *Session) Save() (err error) {
 		// reference) rather than the resolved literal. reinjectInfoTokens returns
 		// s.info unchanged for a non-localized map (no copy).
 		data, err := w3i.Encode(reinjectInfoTokens(s.info, s.infoTokens))
-		addWrite("war3map.w3i", data, err, func(s *Session) { s.dirtyInfo = false })
+		addWrite("war3map.w3i", data, err, func(s *Session, d bool) { s.dirtyInfo = d }, nil)
 	}
 	if s.dirtyStrings && len(s.strings) > 0 {
 		// war3map.wts re-encode — a Map Info edit on a localized map updated a
 		// TRIGSTR entry. Independent of every other file; canonical-format encode.
 		data, err := wts.Encode(s.strings)
-		addWrite("war3map.wts", data, err, func(s *Session) { s.dirtyStrings = false })
+		addWrite("war3map.wts", data, err, func(s *Session, d bool) { s.dirtyStrings = d }, nil)
 	}
 	if s.dirtyTerrain {
 		data, err := w3e.Encode(s.terrain)
-		addWrite("war3map.w3e", data, err, func(s *Session) { s.dirtyTerrain = false })
+		addWrite("war3map.w3e", data, err, func(s *Session, d bool) { s.dirtyTerrain = d }, nil)
 	}
 	if s.dirtyGameplay {
 		// Encode a normalized COPY: an empty gameplay file still writes a
@@ -2467,14 +2473,16 @@ func (s *Session) Save() (err error) {
 			gp = &miscdata.File{Sections: []*miscdata.Section{{Name: "Misc"}}}
 		}
 		data, err := miscdata.Encode(gp)
-		addWrite("war3mapMisc.txt", data, err, func(s *Session) {
-			s.dirtyGameplay = false
-			// Keep the synthesized [Misc] in memory (mirrors legacy behavior)
-			// so a later read sees a non-empty file.
-			if s.gameplay == nil || len(s.gameplay.Sections) == 0 {
-				s.gameplay = gp
-			}
-		})
+		addWrite("war3mapMisc.txt", data, err,
+			func(s *Session, d bool) { s.dirtyGameplay = d },
+			func(s *Session) {
+				// Keep the synthesized [Misc] in memory (mirrors legacy behavior)
+				// so a later read sees a non-empty file. Only when s.gameplay was
+				// nil/empty — never clobber a concurrently-populated gameplay.
+				if s.gameplay == nil || len(s.gameplay.Sections) == 0 {
+					s.gameplay = gp
+				}
+			})
 	}
 	// Per-kind object-shadow encodes (war3map.w3u/.w3t/.w3a/.w3b/.w3d/.w3h/.w3q).
 	// GetDirty/GetMods read session fields (the caller holds the lock — they
@@ -2493,7 +2501,7 @@ func (s *Session) Save() (err error) {
 		}
 		c := cfg
 		data, err := w3objmod.Encode(mods, c.ShadowOpt, objFieldMaps[c])
-		addWrite(c.ShadowFile, data, err, func(s *Session) { c.SetDirty(s, false) })
+		addWrite(c.ShadowFile, data, err, func(s *Session, d bool) { c.SetDirty(s, d) }, nil)
 	}
 	// Trigger Editor encodes. Hand-rolled-script maps write the Map Header text
 	// straight to war3map.lua/.j; wtg-backed maps encode both wtg + wct (wtg
@@ -2513,7 +2521,7 @@ func (s *Session) Save() (err error) {
 				encErr = fmt.Errorf("hand-rolled-script map has no Map Header trigger to save")
 			} else {
 				content := []byte(s.triggers.Triggers[0].CustomText)
-				addWrite(scriptName, content, nil, func(s *Session) { s.mapHeaderScriptDirty = false })
+				addWrite(scriptName, content, nil, func(s *Session, d bool) { s.mapHeaderScriptDirty = d }, nil)
 			}
 		}
 	} else if encErr == nil && s.dirtyTriggers {
@@ -2527,11 +2535,12 @@ func (s *Session) Save() (err error) {
 				argc = td.ArgumentCounts
 			}
 			wtgData, werr := wtg.Encode(triggers, argc)
-			addWrite("war3map.wtg", wtgData, werr, nil)
+			addWrite("war3map.wtg", wtgData, werr, func(s *Session, d bool) { s.dirtyTriggers = d }, nil)
 			// wct is required for any map with custom-script triggers or a
 			// global JASS header. Encode from a LOCAL copy so we don't mutate
-			// the shared s.triggersWct under the read lock; the clear closure
-			// publishes the rebuilt wct back to the session after the write.
+			// the shared s.triggersWct under the lock; onSaved publishes the
+			// rebuilt wct back to the session. (lw escapes to the heap because
+			// the closure outlives this scope — Go's escape analysis handles it.)
 			base := s.triggersWct
 			if base == nil {
 				base = &wct.File{Version: 0x80000004, SubVersion: 1}
@@ -2540,10 +2549,9 @@ func (s *Session) Save() (err error) {
 			localWct.CustomTexts = collectOrderedCustomTexts(triggers, base.IsPre131)
 			lw := &localWct
 			wctData, werr2 := wct.Encode(lw, triggers)
-			addWrite("war3map.wct", wctData, werr2, func(s *Session) {
-				s.dirtyTriggers = false
-				s.triggersWct = lw
-			})
+			addWrite("war3map.wct", wctData, werr2,
+				func(s *Session, d bool) { s.dirtyTriggers = d },
+				func(s *Session) { s.triggersWct = lw })
 		}
 	}
 	// war3map.imp re-encode — flush the import table (the imported bytes were
@@ -2555,7 +2563,7 @@ func (s *Session) Save() (err error) {
 			// dirty flag, but never crash if a future path trips this.
 			f = &imp.File{Version: 1}
 		}
-		addWrite("war3map.imp", f.Encode(), nil, func(s *Session) { s.dirtyImports = false })
+		addWrite("war3map.imp", f.Encode(), nil, func(s *Session, d bool) { s.dirtyImports = d }, nil)
 	}
 	// war3map.w3r re-encode — the Region Editor surface. Independent of every
 	// other file; w3r.Encode is byte-faithful for an unmodified table.
@@ -2567,9 +2575,21 @@ func (s *Session) Save() (err error) {
 			f = &w3r.File{Version: 5}
 		}
 		data, err := w3r.Encode(f)
-		addWrite("war3map.w3r", data, err, func(s *Session) { s.dirtyRegions = false })
+		addWrite("war3map.w3r", data, err, func(s *Session, d bool) { s.dirtyRegions = d }, nil)
 	}
-	s.mu.RUnlock()
+	// Mark every queued file SAVED + publish rebuilt objects, still under the
+	// write lock — a concurrent mutator can't run between encode and this clear,
+	// so it can't have its flag wrongly cleared. (On a later write FAILURE the
+	// unwritten files are re-dirtied below.)
+	if encErr == nil {
+		for _, pw := range pending {
+			pw.setDirty(s, false)
+			if pw.onSaved != nil {
+				pw.onSaved(s)
+			}
+		}
+	}
+	s.mu.Unlock()
 	// END ENCODE PHASE.
 
 	if encErr != nil {
@@ -2579,22 +2599,23 @@ func (s *Session) Save() (err error) {
 		return fmt.Errorf("no source for writing")
 	}
 
-	// WRITE PHASE — unlocked I/O on the immutable encoded buffers. Partial-write
-	// semantics preserved: each file's dirty flag clears (via its clear closure,
-	// re-locking briefly) only after its OWN successful write; the first write
-	// error wins and leaves the rest dirty for retry. (An ENCODE error above
-	// short-circuits before any write, so a failed encode commits nothing —
-	// slightly more atomic than the old per-file encode-then-write interleave.)
-	for _, pw := range pending {
+	// WRITE PHASE — unlocked I/O on the immutable encoded buffers. Dirty flags
+	// were already cleared under the encode lock above. On the first write
+	// error, re-dirty the failed file + every file after it (none of those were
+	// written) so the next Save retries them; earlier files stayed written +
+	// clean. (An ENCODE error short-circuited before any write — nothing was
+	// cleared or written.)
+	for i := range pending {
+		pw := pending[i]
 		if err := src.write(pw.name, pw.data); err != nil {
+			s.mu.Lock()
+			for _, rest := range pending[i:] {
+				rest.setDirty(s, true)
+			}
+			s.mu.Unlock()
 			return fmt.Errorf("write %s: %w", pw.name, err)
 		}
 		noteWrite(pw.name, len(pw.data))
-		if pw.clear != nil {
-			s.mu.Lock()
-			pw.clear(s)
-			s.mu.Unlock()
-		}
 	}
 	if pendingSky != nil {
 		scriptName := "war3map.j"

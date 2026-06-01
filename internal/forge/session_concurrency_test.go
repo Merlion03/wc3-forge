@@ -3,8 +3,6 @@ package forge
 import (
 	"sync"
 	"testing"
-
-	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 )
 
 // TestSaveConcurrentMutation_NoRace exercises the encode-under-RLock fix: a
@@ -72,21 +70,38 @@ func TestSaveConcurrentMutation_NoRace(t *testing.T) {
 	wg.Wait()
 	close(stop)
 
-	// Final consistency check: a clean Save then a re-parse of the units file
-	// must succeed (a torn concurrent encode would have produced a buffer whose
-	// declared entity count or trailing bytes don't line up).
+	// Capture the in-memory final position of each hammered unit (no mutators
+	// running now). Then a final Save + re-open must show EXACTLY these — proving
+	// (a) no torn encode (the file re-parses) and (b) no dropped dirty flag (the
+	// last mutation before a concurrent Save's flag-clear isn't lost — the bug
+	// the encode-under-write-lock + clear-under-lock fix prevents).
+	want := map[uint32][3]float32{}
+	for i := range s.Units().Entities {
+		e := s.Units().Entities[i]
+		for _, cn := range cns {
+			if e.CreationNumber == cn {
+				want[cn] = e.Position
+			}
+		}
+	}
 	if err := s.Save(); err != nil {
 		t.Fatalf("final Save: %v", err)
 	}
-	src := s.source
-	if src == nil {
-		t.Fatal("no source after save")
+	dir := s.Path()
+	s.Close()
+
+	s2 := &Session{}
+	if err := s2.Open(dir); err != nil {
+		t.Fatalf("re-Open after concurrent saves: %v", err)
 	}
-	data, ok, err := src.read("war3mapUnits.doo")
-	if err != nil || !ok {
-		t.Fatalf("read war3mapUnits.doo: ok=%v err=%v", ok, err)
+	defer s2.Close()
+	got := map[uint32][3]float32{}
+	for i := range s2.Units().Entities {
+		got[s2.Units().Entities[i].CreationNumber] = s2.Units().Entities[i].Position
 	}
-	if _, err := unitsdoo.Parse(data); err != nil {
-		t.Errorf("saved war3mapUnits.doo failed to re-parse (torn encode?): %v", err)
+	for cn, p := range want {
+		if got[cn] != p {
+			t.Errorf("unit cn=%d persisted at %v, want %v (a concurrent Save dropped the dirty flag → lost edit)", cn, got[cn], p)
+		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -1124,7 +1125,14 @@ func handleMapExtractToFolder(params json.RawMessage) (any, error) {
 	if err := Current.ExtractToFolder(p.Path); err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "path": p.Path}, nil
+	// Return the ABSOLUTE destination (ExtractToFolder resolved + created it
+	// there) so the agent's follow-up map.open is stable regardless of CWD —
+	// matching map.save_as, which returns Current.Path().
+	abs, err := filepath.Abs(p.Path)
+	if err != nil {
+		abs = p.Path
+	}
+	return map[string]any{"ok": true, "path": abs}, nil
 }
 
 // unitsListParams supports an optional filter on the units.list response so

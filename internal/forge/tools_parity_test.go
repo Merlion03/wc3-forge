@@ -90,6 +90,11 @@ func TestToolsCatalogParity(t *testing.T) {
 		}
 	}
 
+	// Log the tally so a vacuous pass (e.g. catalog parsed as empty) is obvious
+	// in -v output — the catalog should be ~150 and registered ~149.
+	t.Logf("catalog forwarded methods=%d, registered handlers=%d (incl. %d package-main)",
+		len(catalog), len(registered), len(packageMainBridgeMethods))
+
 	sort.Strings(missingHandler)
 	sort.Strings(missingCatalog)
 	if len(missingHandler) > 0 {
