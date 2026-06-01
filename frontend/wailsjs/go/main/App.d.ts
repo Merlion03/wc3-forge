@@ -283,6 +283,10 @@ export function SetTriggerVariable(arg1:number,arg2:string,arg3:string,arg4:bool
 
 export function SetUnitAnimation(arg1:number,arg2:string):Promise<void>;
 
+export function SetUnitInstanceField(arg1:number,arg2:string,arg3:number):Promise<void>;
+
+export function SetUnitInstanceItemDrops(arg1:number,arg2:Array<forge.UnitInstanceItemDrop>):Promise<void>;
+
 export function SetUnitObjectField(arg1:string,arg2:string,arg3:string):Promise<main.UnitObjectDetail>;
 
 export function SetWC3InstallPath(arg1:string):Promise<main.WC3InstallStatusDTO>;

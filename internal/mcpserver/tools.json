@@ -2955,6 +2955,68 @@
     "method": "units.scale"
   },
   {
+    "name": "units_set_field",
+    "description": "Set a per-instance field on a placed unit (gold mine amount, hp%/mana%, owning player, hero level/stats, custom color, item drops). Undo-aware; persists across save/reopen. For scalar fields pass `value` (a number); for field='item_drops' pass `item_drops` instead.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "creation_number": {
+          "type": "integer"
+        },
+        "field": {
+          "type": "string",
+          "enum": [
+            "gold",
+            "hp_pct",
+            "mana_pct",
+            "player",
+            "hero_level",
+            "hero_str",
+            "hero_agi",
+            "hero_int",
+            "target_acquisition",
+            "custom_color",
+            "item_drops"
+          ],
+          "description": "which per-instance field to set"
+        },
+        "value": {
+          "type": "number",
+          "description": "new value for scalar fields; hp_pct/mana_pct/custom_color accept -1 for 'unit default / no override'"
+        },
+        "item_drops": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "item_id": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 4
+              },
+              "chance": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "item_id",
+              "chance"
+            ],
+            "additionalProperties": false
+          },
+          "description": "drop list when field='item_drops' (flattened to a single set)"
+        }
+      },
+      "required": [
+        "creation_number",
+        "field"
+      ],
+      "additionalProperties": false
+    },
+    "method": "units.set_field"
+  },
+  {
     "name": "view_get_mode",
     "description": "Read the session's record of the viewport editing mode ('terrain' | 'doodad'). Tracks the last view_set_mode request (defaults to 'doodad'); the live renderer toggle is owned by the frontend, so this reflects the last request rather than a user's manual toolbar click.",
     "inputSchema": {

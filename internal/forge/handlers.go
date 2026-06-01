@@ -70,6 +70,7 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("units.move", handleUnitsMove)
 	reg("units.rotate", handleUnitsRotate)
 	reg("units.scale", handleUnitsScale)
+	reg("units.set_field", handleUnitsSetField)
 	reg("doodads.list", handleDoodadsList)
 	reg("doodads.get", handleDoodadsGet)
 	reg("doodads.move", handleDoodadsMove)

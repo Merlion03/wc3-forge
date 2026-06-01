@@ -554,6 +554,14 @@ export function SetUnitAnimation(arg1, arg2) {
   return window['go']['main']['App']['SetUnitAnimation'](arg1, arg2);
 }
 
+export function SetUnitInstanceField(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetUnitInstanceField'](arg1, arg2, arg3);
+}
+
+export function SetUnitInstanceItemDrops(arg1, arg2) {
+  return window['go']['main']['App']['SetUnitInstanceItemDrops'](arg1, arg2);
+}
+
 export function SetUnitObjectField(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetUnitObjectField'](arg1, arg2, arg3);
 }

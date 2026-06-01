@@ -402,6 +402,208 @@ func TestHandleUnitsCreate_NoMap(t *testing.T) {
 	}
 }
 
+// pickUnitCN returns the creation_number of an arbitrary placed unit from the
+// fixture (the first entity) — enough for the per-instance field tests, which
+// don't care which unit they edit.
+func pickUnitCN(t *testing.T, s *Session) uint32 {
+	t.Helper()
+	if len(s.units.Entities) == 0 {
+		t.Fatal("fixture has no units")
+	}
+	return s.units.Entities[0].CreationNumber
+}
+
+func findUnit(s *Session, cn uint32) *unitsdoo.Entity {
+	for i := range s.units.Entities {
+		if s.units.Entities[i].CreationNumber == cn {
+			return &s.units.Entities[i]
+		}
+	}
+	return nil
+}
+
+// TestSetUnitInstanceField_ScalarFields covers each scalar field's write +
+// dirty flip + value landing.
+func TestSetUnitInstanceField_ScalarFields(t *testing.T) {
+	s, _ := loadUnitsSession(t)
+	cn := pickUnitCN(t, s)
+
+	cases := []struct {
+		field string
+		value float64
+		check func(e *unitsdoo.Entity) bool
+	}{
+		{UnitFieldGold, 12500, func(e *unitsdoo.Entity) bool { return e.GoldAmount == 12500 }},
+		{UnitFieldHPPct, 50, func(e *unitsdoo.Entity) bool { return e.HitPointsPct == 50 }},
+		{UnitFieldHPPct, -1, func(e *unitsdoo.Entity) bool { return e.HitPointsPct == -1 }},
+		{UnitFieldManaPct, 75, func(e *unitsdoo.Entity) bool { return e.ManaPct == 75 }},
+		{UnitFieldPlayer, 5, func(e *unitsdoo.Entity) bool { return e.Player == 5 }},
+		{UnitFieldHeroLevel, 7, func(e *unitsdoo.Entity) bool { return e.HeroLevel == 7 }},
+		{UnitFieldHeroLevel, 0, func(e *unitsdoo.Entity) bool { return e.HeroLevel == 1 }}, // floored to 1
+		{UnitFieldHeroStr, 30, func(e *unitsdoo.Entity) bool { return e.HeroStr == 30 }},
+		{UnitFieldTargetAcquisition, 600, func(e *unitsdoo.Entity) bool { return e.TargetAcquisition == 600 }},
+		{UnitFieldCustomColor, 3, func(e *unitsdoo.Entity) bool { return e.CustomColor == 3 }},
+		{UnitFieldCustomColor, -1, func(e *unitsdoo.Entity) bool { return e.CustomColor == -1 }},
+	}
+	for _, tc := range cases {
+		s.dirtyUnits = false
+		if err := s.SetUnitInstanceField(cn, tc.field, tc.value); err != nil {
+			t.Fatalf("SetUnitInstanceField(%s=%v): %v", tc.field, tc.value, err)
+		}
+		e := findUnit(s, cn)
+		if e == nil {
+			t.Fatalf("unit cn=%d vanished after %s", cn, tc.field)
+		}
+		if !tc.check(e) {
+			t.Errorf("field %s=%v did not land: %+v", tc.field, tc.value, e)
+		}
+		if !s.dirtyUnits {
+			t.Errorf("field %s: expected dirtyUnits", tc.field)
+		}
+		// Edited fixture must still encode.
+		if _, err := unitsdoo.Encode(s.units); err != nil {
+			t.Fatalf("Encode after %s: %v", tc.field, err)
+		}
+	}
+}
+
+// TestSetUnitInstanceField_UnknownAndBad asserts validation errors for an
+// unknown field, a negative uint32 value, and item_drops routed through the
+// scalar setter.
+func TestSetUnitInstanceField_UnknownAndBad(t *testing.T) {
+	s, _ := loadUnitsSession(t)
+	cn := pickUnitCN(t, s)
+	if err := s.SetUnitInstanceField(cn, "bogus", 1); err == nil {
+		t.Error("expected error for unknown field")
+	}
+	if err := s.SetUnitInstanceField(cn, UnitFieldGold, -5); err == nil {
+		t.Error("expected error for negative gold")
+	}
+	if err := s.SetUnitInstanceField(cn, UnitFieldItemDrops, 0); err == nil {
+		t.Error("expected error routing item_drops through scalar setter")
+	}
+	if err := s.SetUnitInstanceField(999999, UnitFieldGold, 1); err == nil {
+		t.Error("expected error for missing creation_number")
+	}
+}
+
+// TestSetUnitInstanceField_NoOp asserts setting a field to its current value
+// does not flip the dirty flag (Save-pill stability for blur-commit panels).
+func TestSetUnitInstanceField_NoOp(t *testing.T) {
+	s, _ := loadUnitsSession(t)
+	cn := pickUnitCN(t, s)
+	cur := findUnit(s, cn).GoldAmount
+	s.dirtyUnits = false
+	if err := s.SetUnitInstanceField(cn, UnitFieldGold, float64(cur)); err != nil {
+		t.Fatalf("SetUnitInstanceField no-op: %v", err)
+	}
+	if s.dirtyUnits {
+		t.Error("no-op edit should not flip dirtyUnits")
+	}
+}
+
+// TestSetUnitInstanceField_UndoRedoBytes is the core acceptance test: a gold
+// edit, undone, must re-encode to the original bytes; redone, must re-apply.
+func TestSetUnitInstanceField_UndoRedoBytes(t *testing.T) {
+	s, preEdit := loadUnitsSession(t)
+	cn := pickUnitCN(t, s)
+	orig := findUnit(s, cn).GoldAmount
+
+	if err := s.SetUnitInstanceField(cn, UnitFieldGold, 12500); err != nil {
+		t.Fatalf("SetUnitInstanceField: %v", err)
+	}
+	if findUnit(s, cn).GoldAmount != 12500 {
+		t.Fatal("gold did not apply")
+	}
+	if err := s.Undo(); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	if got := findUnit(s, cn).GoldAmount; got != orig {
+		t.Fatalf("after undo gold = %d, want original %d", got, orig)
+	}
+	got, err := unitsdoo.Encode(s.units)
+	if err != nil {
+		t.Fatalf("Encode after undo: %v", err)
+	}
+	if !bytes.Equal(got, preEdit) {
+		t.Fatalf("undo of field edit did not restore exact bytes (len got=%d want=%d)", len(got), len(preEdit))
+	}
+	if err := s.Redo(); err != nil {
+		t.Fatalf("Redo: %v", err)
+	}
+	if findUnit(s, cn).GoldAmount != 12500 {
+		t.Fatal("redo did not re-apply gold")
+	}
+}
+
+// TestSetUnitInstanceItemDrops_SetGetUndo covers replacing the drop list,
+// clearing it, and undo restoring exact bytes (item-drop set boundaries are the
+// trickiest preservation field — see feedback_unitsdoo_drop_set_boundaries).
+func TestSetUnitInstanceItemDrops_SetGetUndo(t *testing.T) {
+	s, preEdit := loadUnitsSession(t)
+	cn := pickUnitCN(t, s)
+
+	drops := []UnitInstanceItemDrop{
+		{ItemID: "rde1", Chance: 60},
+		{ItemID: "rde2", Chance: 40},
+	}
+	if err := s.SetUnitInstanceItemDrops(cn, drops); err != nil {
+		t.Fatalf("SetUnitInstanceItemDrops: %v", err)
+	}
+	e := findUnit(s, cn)
+	if len(e.ItemDrops) != 2 || e.ItemDrops[0].ItemID != "rde1" || e.ItemDrops[1].Chance != 40 {
+		t.Fatalf("item drops did not land: %+v", e.ItemDrops)
+	}
+	// Must still encode (proves itemDropSetSizes was reset consistently).
+	if _, err := unitsdoo.Encode(s.units); err != nil {
+		t.Fatalf("Encode after set drops: %v", err)
+	}
+
+	// Undo restores byte-faithful original.
+	if err := s.Undo(); err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	got, err := unitsdoo.Encode(s.units)
+	if err != nil {
+		t.Fatalf("Encode after undo: %v", err)
+	}
+	if !bytes.Equal(got, preEdit) {
+		t.Fatalf("undo of item-drop edit did not restore exact bytes (len got=%d want=%d)", len(got), len(preEdit))
+	}
+
+	// Bad FourCC rejected.
+	if err := s.SetUnitInstanceItemDrops(cn, []UnitInstanceItemDrop{{ItemID: "toolong", Chance: 1}}); err == nil {
+		t.Error("expected error for non-4-byte item_id")
+	}
+}
+
+// TestHandleUnitsSetField_Wire exercises the MCP handler param-decode for both
+// the scalar value path and the item_drops path against the shared Current.
+func TestHandleUnitsSetField_Wire(t *testing.T) {
+	prev := Current
+	t.Cleanup(func() { Current = prev })
+	s, _ := loadUnitsSession(t)
+	Current = s
+	cn := pickUnitCN(t, s)
+
+	if _, err := handleUnitsSetField(json.RawMessage(`{"creation_number":` + itoa(cn) + `,"field":"gold","value":12500}`)); err != nil {
+		t.Fatalf("handleUnitsSetField gold: %v", err)
+	}
+	if findUnit(s, cn).GoldAmount != 12500 {
+		t.Fatal("wire gold edit did not land")
+	}
+	if _, err := handleUnitsSetField(json.RawMessage(`{"creation_number":` + itoa(cn) + `,"field":"item_drops","item_drops":[{"item_id":"rde1","chance":100}]}`)); err != nil {
+		t.Fatalf("handleUnitsSetField item_drops: %v", err)
+	}
+	if e := findUnit(s, cn); len(e.ItemDrops) != 1 || e.ItemDrops[0].ItemID != "rde1" {
+		t.Fatalf("wire item_drops edit did not land: %+v", findUnit(s, cn).ItemDrops)
+	}
+	// Missing value for a scalar field errors cleanly.
+	if _, err := handleUnitsSetField(json.RawMessage(`{"creation_number":` + itoa(cn) + `,"field":"gold"}`)); err == nil {
+		t.Error("expected error for scalar field with no value")
+	}
+}
+
 // itoa is a tiny uint32→string helper to avoid pulling strconv into the test's
 // hot loop assertions for a single conversion.
 func itoa(v uint32) string {

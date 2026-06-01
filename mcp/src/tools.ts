@@ -241,6 +241,44 @@ export function registerTools(server: McpServer): void {
     },
     wrap("units.scale")
   );
+  server.tool(
+    "units_set_field",
+    "Set a per-instance field on a placed unit (gold mine amount, hp%/mana%, owning player, hero level/stats, custom color, item drops). Undo-aware; persists across save/reopen. For scalar fields pass `value` (a number); for field='item_drops' pass `item_drops` instead.",
+    {
+      creation_number: z.number().int(),
+      field: z
+        .enum([
+          "gold",
+          "hp_pct",
+          "mana_pct",
+          "player",
+          "hero_level",
+          "hero_str",
+          "hero_agi",
+          "hero_int",
+          "target_acquisition",
+          "custom_color",
+          "item_drops",
+        ])
+        .describe("which per-instance field to set"),
+      value: z
+        .number()
+        .optional()
+        .describe(
+          "new value for scalar fields; hp_pct/mana_pct/custom_color accept -1 for 'unit default / no override'"
+        ),
+      item_drops: z
+        .array(
+          z.object({
+            item_id: z.string().length(4),
+            chance: z.number().int().min(0),
+          })
+        )
+        .optional()
+        .describe("drop list when field='item_drops' (flattened to a single set)"),
+    },
+    wrap("units.set_field")
+  );
 
   // --- doodads (placed instances) ----------------------------------------
   server.tool(

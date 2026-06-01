@@ -142,6 +142,302 @@ func (s *Session) DeleteUnit(creationNumber uint32) error {
 }
 
 // ---------------------------------------------------------------------------
+// Per-instance unit field editing
+//
+// unitsdoo already PARSES and losslessly round-trips the per-placement fields
+// (gold, hp%/mana%, owning player, hero level/stats, target acquisition, custom
+// color, item drops, ability mods). units.get returns them. This mutator closes
+// the read/write asymmetry: it lets both surfaces SET them, flowing through
+// recordCommand → undo/redo + entity-changed like every other placed-entity
+// edit.
+//
+// Undo is byte-faithful by SNAPSHOTTING THE WHOLE ENTITY (a struct copy carries
+// the unexported preservation fields — scaleRaw/skinIDPresent/parsed/
+// itemDropSetSizes — across the package boundary), then restoring it verbatim
+// on Revert. This is the same "snapshot the full record" strategy DeleteUnit
+// uses, and it sidesteps having to track per-field undo for the heterogeneous
+// field set.
+// ---------------------------------------------------------------------------
+
+// UnitInstanceField names the per-placement field a SetUnitInstanceField call
+// targets. Kept as a small closed set of string constants so both the wire
+// handler (units.set_field) and the Wails App method validate against the same
+// vocabulary.
+type UnitInstanceField = string
+
+const (
+	UnitFieldGold              UnitInstanceField = "gold"               // GoldAmount (gold-mine / gold-coin amount)
+	UnitFieldHPPct             UnitInstanceField = "hp_pct"             // HitPointsPct, -1 = unit default
+	UnitFieldManaPct           UnitInstanceField = "mana_pct"           // ManaPct, -1 = unit default
+	UnitFieldPlayer            UnitInstanceField = "player"             // owning player slot
+	UnitFieldHeroLevel         UnitInstanceField = "hero_level"         // HeroLevel (1+)
+	UnitFieldHeroStr           UnitInstanceField = "hero_str"           // HeroStr (sub>=11)
+	UnitFieldHeroAgi           UnitInstanceField = "hero_agi"           // HeroAgi (sub>=11)
+	UnitFieldHeroInt           UnitInstanceField = "hero_int"           // HeroInt (sub>=11)
+	UnitFieldTargetAcquisition UnitInstanceField = "target_acquisition" // TargetAcquisition, -1 = unit default
+	UnitFieldCustomColor       UnitInstanceField = "custom_color"       // CustomColor (player-color override), -1 = none
+	UnitFieldItemDrops         UnitInstanceField = "item_drops"         // ItemDrops (flattened to a single set)
+)
+
+// UnitInstanceItemDrop is the wire/binding shape of one item-drop entry for
+// SetUnitInstanceItemDrops. Mirrors unitsdoo.ItemDrop with JSON tags so the MCP
+// params and the Wails binding decode cleanly.
+type UnitInstanceItemDrop struct {
+	ItemID string `json:"item_id"`
+	Chance uint32 `json:"chance"`
+}
+
+// SetUnitInstanceField sets a scalar per-instance field on the placed unit with
+// the given creation_number. value carries the new value; its dynamic type must
+// match the field (int32 for gold/hp_pct/.../custom_color via a numeric, uint32
+// for player/hero_*). To keep the boundary simple and reuse one code path for
+// both surfaces, value is accepted as a float64 (the JSON-number lowest common
+// denominator) and converted per field. Item drops have their own typed setter
+// (SetUnitInstanceItemDrops) because they carry a slice.
+//
+// Returns an error for an unknown field, an out-of-range value, or a missing
+// creation_number. A no-op (new value equals current) returns nil without
+// recording history or flipping the dirty flag — matching MoveUnit, so the Save
+// pill doesn't go amber when the Properties panel commits an unchanged input.
+func (s *Session) SetUnitInstanceField(creationNumber uint32, field UnitInstanceField, value float64) error {
+	s.mu.Lock()
+	if s.units == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	idx := -1
+	for i := range s.units.Entities {
+		if s.units.Entities[i].CreationNumber == creationNumber {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no unit with creation_number %d", creationNumber)
+	}
+
+	// Snapshot the WHOLE entity (incl. unexported preservation fields) so Revert
+	// restores byte-identical state.
+	before := s.units.Entities[idx]
+	after := before
+
+	switch field {
+	case UnitFieldGold:
+		v, err := toUint32(field, value)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		after.GoldAmount = v
+	case UnitFieldHPPct:
+		after.HitPointsPct = clampPct(value)
+	case UnitFieldManaPct:
+		after.ManaPct = clampPct(value)
+	case UnitFieldPlayer:
+		v, err := toUint32(field, value)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		after.Player = v
+	case UnitFieldHeroLevel:
+		v, err := toUint32(field, value)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if v < 1 {
+			v = 1 // hero level is 1-based; 0 is not a valid placed level
+		}
+		after.HeroLevel = v
+	case UnitFieldHeroStr:
+		v, err := toUint32(field, value)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		after.HeroStr = v
+	case UnitFieldHeroAgi:
+		v, err := toUint32(field, value)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		after.HeroAgi = v
+	case UnitFieldHeroInt:
+		v, err := toUint32(field, value)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		after.HeroInt = v
+	case UnitFieldTargetAcquisition:
+		after.TargetAcquisition = float32(value)
+	case UnitFieldCustomColor:
+		// -1 means "use the player slot color"; otherwise a 0-based color index.
+		after.CustomColor = int32(value)
+	case UnitFieldItemDrops:
+		s.mu.Unlock()
+		return fmt.Errorf("field %q must be set via SetUnitInstanceItemDrops", field)
+	default:
+		s.mu.Unlock()
+		return fmt.Errorf("unknown unit instance field %q", field)
+	}
+
+	return s.applyUnitInstanceFieldLocked(creationNumber, idx, before, after, field)
+}
+
+// SetUnitInstanceItemDrops replaces the unit's item-drop list. The new list is
+// flattened into a single drop set (unitsdoo + the trigger codegen already
+// model the flattened list as one set), with each entry's FourCC validated.
+// Passing an empty slice clears all drops.
+func (s *Session) SetUnitInstanceItemDrops(creationNumber uint32, drops []UnitInstanceItemDrop) error {
+	conv := make([]unitsdoo.ItemDrop, 0, len(drops))
+	for i, d := range drops {
+		if len(d.ItemID) != 4 {
+			return fmt.Errorf("item_drops[%d].item_id %q must be exactly 4 bytes", i, d.ItemID)
+		}
+		conv = append(conv, unitsdoo.ItemDrop{ItemID: d.ItemID, Chance: d.Chance})
+	}
+
+	s.mu.Lock()
+	if s.units == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("no map loaded")
+	}
+	idx := -1
+	for i := range s.units.Entities {
+		if s.units.Entities[i].CreationNumber == creationNumber {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("no unit with creation_number %d", creationNumber)
+	}
+	before := s.units.Entities[idx]
+	after := before
+	unitsdoo.SetItemDrops(&after, conv)
+	return s.applyUnitInstanceFieldLocked(creationNumber, idx, before, after, UnitFieldItemDrops)
+}
+
+// applyUnitInstanceFieldLocked is the shared tail for the per-instance setters.
+// Called with s.mu HELD; it releases the lock. It short-circuits no-op edits,
+// writes `after`, records a snapshot-based undo command, and fires the standard
+// dirty + entity-changed (+ history) notifications post-unlock.
+func (s *Session) applyUnitInstanceFieldLocked(creationNumber uint32, idx int, before, after unitsdoo.Entity, field UnitInstanceField) error {
+	if unitInstanceEqual(before, after) {
+		s.mu.Unlock()
+		return nil
+	}
+	wasDirty := s.anyDirtyLocked()
+	s.units.Entities[idx] = after
+	s.dirtyUnits = true
+	s.recordCommand(&setUnitInstanceFieldCmd{cn: creationNumber, field: field, before: before, after: after})
+	historyChanged := s.groupDepth == 0
+	s.mu.Unlock()
+	if !wasDirty {
+		s.notifyDirty(true)
+	}
+	s.notifyEntityChanged(EntityChange{Kind: "unit", ID: creationNumber, Field: field})
+	if historyChanged {
+		s.notifyHistoryChanged()
+	}
+	return nil
+}
+
+// toUint32 converts a JSON-number value to uint32, rejecting negatives and
+// fractional values (which would silently truncate). Field name is woven into
+// the error so the surface reports which input was bad.
+func toUint32(field UnitInstanceField, value float64) (uint32, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("field %q must be >= 0, got %v", field, value)
+	}
+	if value > 4294967295 {
+		return 0, fmt.Errorf("field %q out of uint32 range: %v", field, value)
+	}
+	return uint32(value), nil
+}
+
+// clampPct normalizes an HP/Mana percentage. Any negative input maps to -1
+// ("use unit default", the on-disk sentinel); non-negative values pass through
+// truncated to an integer percent.
+func clampPct(value float64) int32 {
+	if value < 0 {
+		return -1
+	}
+	return int32(value)
+}
+
+// unitInstanceEqual reports whether two snapshots differ only in fields this
+// mutator can touch. It compares just the editable public fields (the unexported
+// preservation fields are carried verbatim in `after` from `before`, so they're
+// equal by construction except item drops, which SetItemDrops rewrites — hence
+// the explicit ItemDrops comparison).
+func unitInstanceEqual(a, b unitsdoo.Entity) bool {
+	if a.GoldAmount != b.GoldAmount ||
+		a.HitPointsPct != b.HitPointsPct ||
+		a.ManaPct != b.ManaPct ||
+		a.Player != b.Player ||
+		a.HeroLevel != b.HeroLevel ||
+		a.HeroStr != b.HeroStr ||
+		a.HeroAgi != b.HeroAgi ||
+		a.HeroInt != b.HeroInt ||
+		a.TargetAcquisition != b.TargetAcquisition ||
+		a.CustomColor != b.CustomColor {
+		return false
+	}
+	if len(a.ItemDrops) != len(b.ItemDrops) {
+		return false
+	}
+	for i := range a.ItemDrops {
+		if a.ItemDrops[i] != b.ItemDrops[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// setUnitInstanceFieldCmd snapshots the full pre/post entity for one
+// per-instance field edit. Apply/Revert overwrite the whole record (restoring
+// the unexported preservation fields too), so a save after undo re-encodes to
+// the original bytes.
+type setUnitInstanceFieldCmd struct {
+	cn            uint32
+	field         UnitInstanceField
+	before, after unitsdoo.Entity
+}
+
+func (c *setUnitInstanceFieldCmd) Label() string { return "Edit unit " + c.field }
+func (c *setUnitInstanceFieldCmd) Apply(s *Session) error {
+	return overwriteUnitByCN(s, c.cn, c.after)
+}
+func (c *setUnitInstanceFieldCmd) Revert(s *Session) error {
+	return overwriteUnitByCN(s, c.cn, c.before)
+}
+func (c *setUnitInstanceFieldCmd) Affected(s *Session) []EntityChange {
+	return []EntityChange{{Kind: "unit", ID: c.cn, Field: c.field}}
+}
+
+// overwriteUnitByCN replaces the entity record (in place, preserving slice
+// order) with the supplied snapshot. Called with s.mu held by Apply/Revert.
+func overwriteUnitByCN(s *Session, cn uint32, e unitsdoo.Entity) error {
+	if s.units == nil {
+		return fmt.Errorf("no map loaded")
+	}
+	for i := range s.units.Entities {
+		if s.units.Entities[i].CreationNumber == cn {
+			s.units.Entities[i] = e
+			s.dirtyUnits = true
+			return nil
+		}
+	}
+	return fmt.Errorf("no unit with creation_number %d", cn)
+}
+
+// ---------------------------------------------------------------------------
 // Doodad create / delete
 // ---------------------------------------------------------------------------
 

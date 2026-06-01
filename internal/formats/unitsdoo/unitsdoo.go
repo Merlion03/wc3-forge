@@ -601,6 +601,28 @@ func SetScaleRaw(e *Entity, raw [3]float32) {
 	e.scaleRaw = raw
 }
 
+// SetItemDrops replaces the entity's drop list AND reconstructs the unexported
+// itemDropSetSizes so Encode stays consistent. The original file groups drops
+// into N independently-rolled sets; Parse flattens them into a single
+// []ItemDrop and stashes the per-set counts in itemDropSetSizes for
+// byte-faithful round-tripping. When a caller HAND-EDITS the drop list there is
+// no way to know the user's intended set boundaries, so we collapse the new
+// list into a single set (sizes = [len]) — the same convention the trigger
+// codegen already uses for flattened drops (see triggers_codegen.go). An empty
+// list clears both fields so Encode emits zero sets.
+//
+// This accessor is needed because itemDropSetSizes is unexported; without
+// resetting it Encode's sum-check (sizes must total len(ItemDrops)) would fail
+// after any drop edit that changes the entry count.
+func SetItemDrops(e *Entity, drops []ItemDrop) {
+	e.ItemDrops = drops
+	if len(drops) == 0 {
+		e.itemDropSetSizes = nil
+		return
+	}
+	e.itemDropSetSizes = []uint32{uint32(len(drops))}
+}
+
 // --- reader ----------------------------------------------------------------
 
 // reader is a minimal little-endian cursor over a byte slice. Mirrors the

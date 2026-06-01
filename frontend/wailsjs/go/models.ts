@@ -199,6 +199,20 @@ export namespace forge {
 	        this.height = source["height"];
 	    }
 	}
+	export class UnitInstanceItemDrop {
+	    item_id: string;
+	    chance: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new UnitInstanceItemDrop(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.item_id = source["item_id"];
+	        this.chance = source["chance"];
+	    }
+	}
 
 }
 

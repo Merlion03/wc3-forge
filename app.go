@@ -1541,6 +1541,24 @@ func (a *App) ScaleDoodad(creationNumber uint32, sx, sy, sz float32) error {
 	return forge.Current.ScaleDoodad(creationNumber, sx, sy, sz)
 }
 
+// SetUnitInstanceField sets one scalar per-placement field on the unit with the
+// given creation_number (gold, hp_pct, mana_pct, player, hero_level, hero_str/
+// agi/int, target_acquisition, custom_color). The Properties panel calls this
+// on edit-commit (blur/Enter); the session mutator is undo-aware and emits the
+// entity-changed event the panel already re-fetches on. value is a JSON number
+// converted per field — see internal/forge/entities_mutate.go for the field
+// vocabulary + range rules. Use SetUnitInstanceItemDrops for the drop list.
+func (a *App) SetUnitInstanceField(creationNumber uint32, field string, value float64) error {
+	return forge.Current.SetUnitInstanceField(creationNumber, field, value)
+}
+
+// SetUnitInstanceItemDrops replaces the unit's item-drop list (flattened to a
+// single drop set). Companion to SetUnitInstanceField for the one per-instance
+// field that carries a slice rather than a scalar.
+func (a *App) SetUnitInstanceItemDrops(creationNumber uint32, drops []forge.UnitInstanceItemDrop) error {
+	return forge.Current.SetUnitInstanceItemDrops(creationNumber, drops)
+}
+
 // ---------------------------------------------------------------------------
 // Region (rect) Editor bindings. The Region panel + the viewport rect-draw
 // tool call these; they 1:1 wrap the session mutators (which are undo-aware

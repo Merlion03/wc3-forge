@@ -9,6 +9,7 @@
     GetUnitTypeIndex, GetDoodadTypeIndex,
     NewMapDialog as NewMapSaveDialog, CreateNewMap, WriteNewMap, ReportDiagnostics,
     MoveUnit, MoveDoodad, CreateDoodad, CreateUnit, DeleteSelection, IsDirty, SaveMap,
+    SetUnitInstanceField, SetUnitInstanceItemDrops,
     ListStartLocations, CreateStartLocation, MoveStartLocation, DeleteStartLocation,
     ListRegions, CreateRegion,
     PaintTerrainTile, BrushTerrainHeight, BrushTerrainCliff, BrushTerrainRamp, BrushTerrainWater, WaterAddHeightAt, GetTerrainTile,
@@ -2340,6 +2341,24 @@
     if (p < colors.length) return `${colors[p]} (${p})`
     return `Player ${p}`
   }
+  // playerOptions enumerates the selectable owning-player slots for the
+  // Identity player picker: the 24 color slots plus the conventional neutral
+  // slots. If the current entity's player is outside this set (unusual but
+  // possible in hand-edited maps) it's appended so the <select> can still show
+  // the truth without silently snapping to a different value.
+  function playerOptions(): { value: number; label: string }[] {
+    const opts: { value: number; label: string }[] = []
+    for (let p = 0; p < 24; p++) opts.push({ value: p, label: playerLabel(p) })
+    opts.push({ value: 24, label: 'Neutral Hostile (24)' })
+    opts.push({ value: 25, label: 'Neutral Passive (25)' })
+    opts.push({ value: 26, label: 'Neutral Extra (26)' })
+    opts.push({ value: 27, label: 'Neutral Victim (27)' })
+    const cur = primaryEntity?.Player
+    if (cur !== undefined && !opts.some(o => o.value === cur)) {
+      opts.push({ value: cur, label: `Player ${cur}` })
+    }
+    return opts
+  }
   function playerColorName(p: number): string {
     const colors = ['Red', 'Blue', 'Teal', 'Purple', 'Yellow', 'Orange', 'Green',
                     'Pink', 'Gray', 'LightBlue', 'DarkGreen', 'Brown']
@@ -2418,6 +2437,159 @@
         posEdit = { ...posEdit, [axis]: fmt(truth[idx]) }
       }
       ;(e.currentTarget as HTMLInputElement).blur()
+    }
+  }
+
+  // ----- Per-instance unit field editing (Status / Hero / Identity rows) -----
+  //
+  // Mirrors the posEdit pattern: a local string buffer (`unitFieldEdit`) holds
+  // the in-progress text so typing doesn't fight the entity-changed re-fetch,
+  // and edits commit explicitly on blur/Enter (NOT per keystroke — see the
+  // documented editor-autosave focus-loss footgun). Revert-to-truth on Escape
+  // or an invalid value. The buffer is re-seeded from primaryEntity whenever the
+  // focused unit changes (the run_2 effect below).
+  //
+  // Every scalar field flows through SetUnitInstanceField; item drops are
+  // committed as a whole list via SetUnitInstanceItemDrops. Both are undo-aware
+  // session mutators and fire entity-changed, so the panel re-fetches the truth
+  // (via the existing GetUnit-on-entity-changed handler) after a commit.
+
+  // 'unitFieldEditableField' is the set of scalar fields the panel edits, keyed
+  // by the wire field name SetUnitInstanceField expects.
+  type UnitScalarField =
+    | 'gold' | 'hp_pct' | 'mana_pct' | 'player'
+    | 'hero_level' | 'hero_str' | 'hero_agi' | 'hero_int'
+    | 'target_acquisition' | 'custom_color'
+
+  let unitFieldEdit: Record<UnitScalarField, string> = $state({
+    gold: '', hp_pct: '', mana_pct: '', player: '',
+    hero_level: '', hero_str: '', hero_agi: '', hero_int: '',
+    target_acquisition: '', custom_color: '',
+  })
+
+  // The field whose input currently has focus. Re-seeding from truth (on
+  // undo/redo or another agent's edit landing) skips this one field so we never
+  // overwrite text the user is actively typing — the explicit-commit half of
+  // the editor-autosave footgun fix.
+  let focusedUnitField: UnitScalarField | null = $state(null)
+
+  // Item-drop working buffer: the list the user is editing (committed as a
+  // whole). Each row is {item_id, chance} strings; parsed on commit.
+  let itemDropEdit: { item_id: string; chance: string }[] = $state([])
+
+  // Snapshot the current per-instance scalar truth from primaryEntity, for
+  // re-seeding the buffer + reverting bad/cancelled edits.
+  function unitFieldTruth(field: UnitScalarField): string {
+    const e = primaryEntity
+    if (!e) return ''
+    switch (field) {
+      case 'gold': return String(e.GoldAmount)
+      case 'hp_pct': return String(e.HitPointsPct)
+      case 'mana_pct': return String(e.ManaPct)
+      case 'player': return String(e.Player)
+      case 'hero_level': return String(e.HeroLevel || 1)
+      case 'hero_str': return String(e.HeroStr)
+      case 'hero_agi': return String(e.HeroAgi)
+      case 'hero_int': return String(e.HeroInt)
+      case 'target_acquisition': return String(e.TargetAcquisition)
+      case 'custom_color': return String(e.CustomColor)
+    }
+  }
+
+  // itemDropFocused is true while any item-drop row input has focus — re-seeding
+  // skips the whole list then, so a row the user is editing isn't yanked out.
+  let itemDropFocused = $state(false)
+
+  function seedUnitFieldBuffer() {
+    const e = primaryEntity
+    if (!e || e.TypeID === 'sloc') return
+    const next: Record<UnitScalarField, string> = {
+      gold: unitFieldTruth('gold'),
+      hp_pct: unitFieldTruth('hp_pct'),
+      mana_pct: unitFieldTruth('mana_pct'),
+      player: unitFieldTruth('player'),
+      hero_level: unitFieldTruth('hero_level'),
+      hero_str: unitFieldTruth('hero_str'),
+      hero_agi: unitFieldTruth('hero_agi'),
+      hero_int: unitFieldTruth('hero_int'),
+      target_acquisition: unitFieldTruth('target_acquisition'),
+      custom_color: unitFieldTruth('custom_color'),
+    }
+    // Preserve the field the user is actively typing in (avoid clobber).
+    if (focusedUnitField !== null) next[focusedUnitField] = unitFieldEdit[focusedUnitField]
+    unitFieldEdit = next
+    if (!itemDropFocused) {
+      itemDropEdit = (e.ItemDrops ?? []).map(d => ({ item_id: d.ItemID, chance: String(d.Chance) }))
+    }
+  }
+
+  async function commitUnitField(field: UnitScalarField) {
+    const e = primaryEntity
+    if (!e || e.TypeID === 'sloc') return
+    const cn = e.CreationNumber
+    const raw = unitFieldEdit[field]
+    const v = parseFloat(raw)
+    if (!Number.isFinite(v)) {
+      unitFieldEdit = { ...unitFieldEdit, [field]: unitFieldTruth(field) }
+      return
+    }
+    try {
+      await SetUnitInstanceField(cn, field, v)
+    } catch (err) {
+      console.error('SetUnitInstanceField failed:', err)
+      showToast('edit failed: ' + String(err), 'error')
+      unitFieldEdit = { ...unitFieldEdit, [field]: unitFieldTruth(field) }
+    }
+  }
+
+  function onUnitFieldKeydown(ev: KeyboardEvent, field: UnitScalarField) {
+    if (ev.key === 'Enter') {
+      ;(ev.currentTarget as HTMLInputElement).blur()
+    } else if (ev.key === 'Escape') {
+      ev.stopPropagation()
+      unitFieldEdit = { ...unitFieldEdit, [field]: unitFieldTruth(field) }
+      ;(ev.currentTarget as HTMLInputElement).blur()
+    }
+  }
+
+  // Player picker commits immediately on change (a <select>, not free text — no
+  // partial-typing concern, so no blur dance needed).
+  async function commitUnitPlayer(ev: Event) {
+    const e = primaryEntity
+    if (!e || e.TypeID === 'sloc') return
+    const v = parseInt((ev.currentTarget as HTMLSelectElement).value, 10)
+    if (!Number.isFinite(v)) return
+    try {
+      await SetUnitInstanceField(e.CreationNumber, 'player', v)
+    } catch (err) {
+      console.error('set player failed:', err)
+      showToast('set player failed: ' + String(err), 'error')
+    }
+  }
+
+  // Item-drop list edits. The working buffer commits as a whole on demand
+  // (add/remove row, or blur of a row input). Rows with a non-4-char item_id
+  // are dropped on commit (the backend would reject them); the buffer is then
+  // re-seeded from truth via the entity-changed re-fetch.
+  function addItemDropRow() {
+    itemDropEdit = [...itemDropEdit, { item_id: '', chance: '100' }]
+  }
+  function removeItemDropRow(idx: number) {
+    itemDropEdit = itemDropEdit.filter((_, i) => i !== idx)
+    void commitItemDrops()
+  }
+  async function commitItemDrops() {
+    const e = primaryEntity
+    if (!e || e.TypeID === 'sloc') return
+    const drops = itemDropEdit
+      .map(r => ({ item_id: r.item_id.trim(), chance: parseInt(r.chance, 10) }))
+      .filter(r => r.item_id.length === 4 && Number.isFinite(r.chance) && r.chance >= 0)
+    try {
+      await SetUnitInstanceItemDrops(e.CreationNumber, drops)
+    } catch (err) {
+      console.error('set item drops failed:', err)
+      showToast('set drops failed: ' + String(err), 'error')
+      itemDropEdit = (primaryEntity?.ItemDrops ?? []).map(d => ({ item_id: d.ItemID, chance: String(d.Chance) }))
     }
   }
 
@@ -2525,6 +2697,32 @@
         }
       }
     }
+  });
+  // Re-seed the per-instance field buffer when the FOCUSED unit changes
+  // (selecting a different unit). We deliberately key on the creation number,
+  // not on primaryEntity identity: the entity-changed handler re-fetches
+  // primaryEntity after every commit, and re-seeding on each of those would
+  // clobber a value the user is mid-typing in an adjacent field. Keying on the
+  // CN means we re-seed on selection change + undo/redo-of-a-different-unit
+  // only. Within the same focused unit, the buffer already mirrors the
+  // committed truth (commit writes the same value back), so no re-seed needed.
+  run_1(() => {
+    const e = primaryEntity
+    if (!e || e.TypeID === 'sloc') {
+      itemDropEdit = []
+      return
+    }
+    // Read the editable truth so this effect re-runs when the focused unit's
+    // values change — on selection change (a new CN) AND on undo/redo or an
+    // MCP/another-surface edit landing (the entity-changed handler re-fetches
+    // primaryEntity, mutating these reactive fields). Same dependency-tracking
+    // trick the posEdit effect uses for Position. seedUnitFieldBuffer skips the
+    // actively-focused field/list, so live typing survives the re-fetch — the
+    // explicit-commit, no-clobber half of the editor-autosave footgun fix.
+    void [e.CreationNumber, e.GoldAmount, e.HitPointsPct, e.ManaPct, e.Player,
+          e.HeroLevel, e.HeroStr, e.HeroAgi, e.HeroInt,
+          e.TargetAcquisition, e.CustomColor, e.ItemDrops]
+    seedUnitFieldBuffer()
   });
 </script>
 
@@ -3138,7 +3336,19 @@
                 {#if unitTypes[e.TypeID]?.category}
                   <dt>Category</dt>         <dd>{unitTypes[e.TypeID].category}</dd>
                 {/if}
-                <dt>Player</dt>             <dd>{playerLabel(e.Player)}</dd>
+                <dt>Player</dt>
+                {#if e.TypeID === 'sloc'}
+                  <dd>{playerLabel(e.Player)}</dd>
+                {:else}
+                  <dd class="field-edit">
+                    <select value={String(e.Player)} onchange={commitUnitPlayer}
+                            title="Owning player slot.">
+                      {#each playerOptions() as opt}
+                        <option value={String(opt.value)}>{opt.label}</option>
+                      {/each}
+                    </select>
+                  </dd>
+                {/if}
               </dl>
             </div>
           </Accordion>
@@ -3171,25 +3381,103 @@
           </Accordion>
           <Accordion id="p:status" label="Status" open={isOpen('p:status', true)}
                      onToggle={onSectionToggle}>
-            <dl class="props">
-              <dt>HP %</dt>               <dd>{e.HitPointsPct < 0 ? 'default' : e.HitPointsPct + '%'}</dd>
-              <dt>Mana %</dt>             <dd>{e.ManaPct < 0 ? 'default' : e.ManaPct + '%'}</dd>
-              {#if e.GoldAmount > 0}
-                <dt>Gold</dt>             <dd>{e.GoldAmount}</dd>
-              {/if}
-              {#if e.TargetAcquisition !== 0}
-                <dt>Acquisition</dt>      <dd class="mono">{fmt(e.TargetAcquisition, 1)}</dd>
-              {/if}
-            </dl>
+            {#if e.TypeID === 'sloc'}
+              <dl class="props">
+                <dt>HP %</dt>             <dd>{e.HitPointsPct < 0 ? 'default' : e.HitPointsPct + '%'}</dd>
+                <dt>Mana %</dt>           <dd>{e.ManaPct < 0 ? 'default' : e.ManaPct + '%'}</dd>
+              </dl>
+            {:else}
+              <dl class="props">
+                <dt>HP %</dt>
+                <dd class="field-edit">
+                  <input type="number" step="1" min="-1" max="100"
+                         bind:value={unitFieldEdit.hp_pct}
+                         onfocus={() => (focusedUnitField = 'hp_pct')}
+                         onblur={() => { focusedUnitField = null; void commitUnitField('hp_pct') }}
+                         onkeydown={(ev) => onUnitFieldKeydown(ev, 'hp_pct')}
+                         title="Starting HP percent. -1 = unit default. Enter to commit, Esc to revert." />
+                  <span class="field-suffix">%</span>
+                </dd>
+                <dt>Mana %</dt>
+                <dd class="field-edit">
+                  <input type="number" step="1" min="-1" max="100"
+                         bind:value={unitFieldEdit.mana_pct}
+                         onfocus={() => (focusedUnitField = 'mana_pct')}
+                         onblur={() => { focusedUnitField = null; void commitUnitField('mana_pct') }}
+                         onkeydown={(ev) => onUnitFieldKeydown(ev, 'mana_pct')}
+                         title="Starting mana percent. -1 = unit default. Enter to commit, Esc to revert." />
+                  <span class="field-suffix">%</span>
+                </dd>
+                <dt>Gold</dt>
+                <dd class="field-edit">
+                  <input type="number" step="1" min="0"
+                         bind:value={unitFieldEdit.gold}
+                         onfocus={() => (focusedUnitField = 'gold')}
+                         onblur={() => { focusedUnitField = null; void commitUnitField('gold') }}
+                         onkeydown={(ev) => onUnitFieldKeydown(ev, 'gold')}
+                         title="Gold-mine / gold-coin amount (0 = none). Enter to commit, Esc to revert." />
+                </dd>
+                <dt>Acquisition</dt>
+                <dd class="field-edit">
+                  <input type="number" step="1" min="-1"
+                         bind:value={unitFieldEdit.target_acquisition}
+                         onfocus={() => (focusedUnitField = 'target_acquisition')}
+                         onblur={() => { focusedUnitField = null; void commitUnitField('target_acquisition') }}
+                         onkeydown={(ev) => onUnitFieldKeydown(ev, 'target_acquisition')}
+                         title="Target acquisition range. -1 = unit default. Enter to commit, Esc to revert." />
+                </dd>
+                <dt>Custom Color</dt>
+                <dd class="field-edit">
+                  <input type="number" step="1" min="-1" max="27"
+                         bind:value={unitFieldEdit.custom_color}
+                         onfocus={() => (focusedUnitField = 'custom_color')}
+                         onblur={() => { focusedUnitField = null; void commitUnitField('custom_color') }}
+                         onkeydown={(ev) => onUnitFieldKeydown(ev, 'custom_color')}
+                         title="Player-color override (0-based color index). -1 = use player slot color. Enter to commit, Esc to revert." />
+                </dd>
+              </dl>
+            {/if}
           </Accordion>
           {#if isHero(e)}
             <Accordion id="p:hero" label="Hero" open={isOpen('p:hero', true)}
                        onToggle={onSectionToggle}>
               <dl class="props">
-                <dt>Level</dt>            <dd>{e.HeroLevel || 1}</dd>
-                {#if e.HeroStr > 0 || e.HeroAgi > 0 || e.HeroInt > 0}
-                  <dt>Stats</dt>          <dd class="mono">STR {e.HeroStr} · AGI {e.HeroAgi} · INT {e.HeroInt}</dd>
-                {/if}
+                <dt>Level</dt>
+                <dd class="field-edit">
+                  <input type="number" step="1" min="1"
+                         bind:value={unitFieldEdit.hero_level}
+                         onfocus={() => (focusedUnitField = 'hero_level')}
+                         onblur={() => { focusedUnitField = null; void commitUnitField('hero_level') }}
+                         onkeydown={(ev) => onUnitFieldKeydown(ev, 'hero_level')}
+                         title="Starting hero level (1+). Enter to commit, Esc to revert." />
+                </dd>
+                <dt>STR</dt>
+                <dd class="field-edit">
+                  <input type="number" step="1" min="0"
+                         bind:value={unitFieldEdit.hero_str}
+                         onfocus={() => (focusedUnitField = 'hero_str')}
+                         onblur={() => { focusedUnitField = null; void commitUnitField('hero_str') }}
+                         onkeydown={(ev) => onUnitFieldKeydown(ev, 'hero_str')}
+                         title="Bonus strength (Reforged sub-version 11+). Enter to commit, Esc to revert." />
+                </dd>
+                <dt>AGI</dt>
+                <dd class="field-edit">
+                  <input type="number" step="1" min="0"
+                         bind:value={unitFieldEdit.hero_agi}
+                         onfocus={() => (focusedUnitField = 'hero_agi')}
+                         onblur={() => { focusedUnitField = null; void commitUnitField('hero_agi') }}
+                         onkeydown={(ev) => onUnitFieldKeydown(ev, 'hero_agi')}
+                         title="Bonus agility (Reforged sub-version 11+). Enter to commit, Esc to revert." />
+                </dd>
+                <dt>INT</dt>
+                <dd class="field-edit">
+                  <input type="number" step="1" min="0"
+                         bind:value={unitFieldEdit.hero_int}
+                         onfocus={() => (focusedUnitField = 'hero_int')}
+                         onblur={() => { focusedUnitField = null; void commitUnitField('hero_int') }}
+                         onkeydown={(ev) => onUnitFieldKeydown(ev, 'hero_int')}
+                         title="Bonus intelligence (Reforged sub-version 11+). Enter to commit, Esc to revert." />
+                </dd>
               </dl>
             </Accordion>
           {/if}
@@ -3203,14 +3491,32 @@
               </dl>
             </Accordion>
           {/if}
-          {#if e.ItemDrops && e.ItemDrops.length > 0}
-            <Accordion id="p:drops" label="Item Drops" open={isOpen('p:drops', true)}
+          {#if e.TypeID !== 'sloc'}
+            <Accordion id="p:drops" label="Item Drops" open={isOpen('p:drops', (e.ItemDrops?.length ?? 0) > 0)}
                        onToggle={onSectionToggle}>
-              <dl class="props">
-                {#each e.ItemDrops as drop}
-                  <dt class="mono">{drop.ItemID}</dt><dd>{drop.Chance}%</dd>
+              <div class="drops-edit">
+                {#each itemDropEdit as row, i (i)}
+                  <div class="drop-row">
+                    <input class="mono drop-item" type="text" maxlength="4" placeholder="iIID"
+                           bind:value={row.item_id}
+                           onfocus={() => (itemDropFocused = true)}
+                           onblur={() => { itemDropFocused = false; void commitItemDrops() }}
+                           title="Item type ID (4-char FourCC)." />
+                    <input class="drop-chance" type="number" step="1" min="0"
+                           bind:value={row.chance}
+                           onfocus={() => (itemDropFocused = true)}
+                           onblur={() => { itemDropFocused = false; void commitItemDrops() }}
+                           title="Relative drop weight within the set." />
+                    <span class="field-suffix">%</span>
+                    <button type="button" class="drop-del" title="Remove this drop"
+                            onclick={() => removeItemDropRow(i)}>×</button>
+                  </div>
                 {/each}
-              </dl>
+                {#if itemDropEdit.length === 0}
+                  <div class="drops-empty">No item drops.</div>
+                {/if}
+                <button type="button" class="drop-add" onclick={addItemDropRow}>+ Add drop</button>
+              </div>
             </Accordion>
           {/if}
           {#if e.AbilityModifications && e.AbilityModifications.length > 0}
@@ -3510,4 +3816,53 @@
   .pos-edit input::-webkit-outer-spin-button {
     -webkit-appearance: none; margin: 0;
   }
+
+  /* Per-instance editable field rows (gold, hp%/mana%, hero stats, custom
+     color) + the player <select>. Mirrors .pos-edit's compact input look so the
+     Properties panel stays visually consistent. */
+  .field-edit { display: flex; align-items: center; gap: 4px; }
+  .field-edit input,
+  .field-edit select {
+    width: 84px; padding: 2px 4px;
+    background: var(--background); color: var(--foreground);
+    border: 1px solid var(--border); border-radius: 3px;
+    font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px;
+  }
+  .field-edit select { width: auto; max-width: 160px; }
+  .field-edit input:focus,
+  .field-edit select:focus { outline: none; border-color: var(--ring); }
+  .field-edit input::-webkit-inner-spin-button,
+  .field-edit input::-webkit-outer-spin-button {
+    -webkit-appearance: none; margin: 0;
+  }
+  .field-suffix { color: var(--muted-foreground); font-size: 11px; }
+
+  /* Item-drop editor: a vertical list of {item_id, chance, delete} rows plus an
+     add button. Spans the full Properties width (not the dl grid). */
+  .drops-edit { padding: 10px 16px; display: flex; flex-direction: column; gap: 6px; }
+  .drop-row { display: flex; align-items: center; gap: 4px; }
+  .drop-row input {
+    padding: 2px 4px;
+    background: var(--background); color: var(--foreground);
+    border: 1px solid var(--border); border-radius: 3px;
+    font-size: 12px;
+  }
+  .drop-row input:focus { outline: none; border-color: var(--ring); }
+  .drop-item { width: 64px; }
+  .drop-chance { width: 56px; }
+  .drop-chance::-webkit-inner-spin-button,
+  .drop-chance::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .drop-del {
+    margin-left: auto; width: 20px; height: 20px; line-height: 1;
+    background: transparent; color: var(--muted-foreground);
+    border: 1px solid var(--border); border-radius: 3px; cursor: pointer;
+  }
+  .drop-del:hover { color: var(--foreground); border-color: var(--ring); }
+  .drops-empty { color: var(--muted-foreground); font-size: 11px; }
+  .drop-add {
+    align-self: start; padding: 2px 8px; font-size: 11px; cursor: pointer;
+    background: transparent; color: var(--muted-foreground);
+    border: 1px solid var(--border); border-radius: 3px;
+  }
+  .drop-add:hover { color: var(--foreground); border-color: var(--ring); }
 </style>
