@@ -151,6 +151,7 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("history.list", handleHistoryList)
 	reg("history.begin_group", handleHistoryBeginGroup)
 	reg("history.end_group", handleHistoryEndGroup)
+	reg("history.abort_group", handleHistoryAbortGroup)
 	// _ui.send_command — escape hatch for test/verification drivers. Routes
 	// a raw test-command string through Session.EmitUICommand → App →
 	// wc3-forge:test-command Wails event → existing App.svelte dispatch.
@@ -1247,19 +1248,18 @@ func handleDoodadsGet(params json.RawMessage) (any, error) {
 var _ = doodadsdoo.File{}
 var _ = unitsdoo.File{}
 
-// handleViewSetMode toggles the editor's terrain/doodad pick mode. The
-// authoritative state lives in JS (App.svelte's `terrainPickModeOn`), so the
-// handler funnels through the existing wc3-forge:test-command event bus.
+// handleViewSetMode SETS the editor's terrain/doodad pick mode to an explicit
+// target (idempotent — calling it twice with the same mode lands on that mode,
+// never oscillates). The authoritative renderer state lives in JS (App.svelte's
+// `terrainPickModeOn`), so the handler funnels an explicit `view.mode <mode>`
+// command through the wc3-forge:test-command bus; the JS handler SETS the state
+// (not toggles), so idempotency holds regardless of the current state.
 //
-// The current shape of the JS handler is a TOGGLE, not a SET — so the MCP
-// call only emits the toggle when the requested mode differs from the
-// current one would require a query. To keep the handler simple we treat
-// `terrain` and `doodad` modes as a toggle target: every call emits a single
-// toggle which flips the mode. Callers needing idempotency should read
-// current state via the (not-yet-existent) `view.get_mode` or just inspect
-// the streamed wc3-forge:selection-changed/etc. events.
+// `mode` is required ("terrain" or "doodad"). The resulting mode is recorded on
+// the session (read back by view.get_mode) and echoed in the response so an
+// agent can confirm the call landed without a follow-up query.
 type viewSetModeParams struct {
-	Mode string `json:"mode"` // "terrain" | "doodad" — informational; the toggle event flips state regardless
+	Mode string `json:"mode"` // "terrain" | "doodad" — the explicit target mode (required)
 }
 
 func handleViewSetMode(params json.RawMessage) (any, error) {
@@ -1270,32 +1270,32 @@ func handleViewSetMode(params json.RawMessage) (any, error) {
 		}
 	}
 	switch p.Mode {
-	case "", "terrain", "doodad":
-		// Accepted values — informational only; the JS receiver flips state.
+	case "terrain", "doodad":
+		// Explicit, valid target.
+	case "":
+		return nil, errors.New("mode is required: 'terrain' or 'doodad'")
 	default:
 		return nil, fmt.Errorf("mode must be 'terrain' or 'doodad' (got %q)", p.Mode)
 	}
-	// Record the requested mode on the session so view.get_mode can report a
-	// value (no-op when p.Mode is "" — SetViewMode ignores non-mode values).
-	// This tracks the last REQUEST, not the live frontend toggle; see
-	// Session.ViewMode for the caveat.
+	// Record the target on the session for read-back, then emit the explicit
+	// SET command. The JS receiver only flips when the current state differs,
+	// so repeated identical calls are no-ops on the renderer.
 	Current.SetViewMode(p.Mode)
-	Current.EmitUICommand("terrain.toggle")
-	return map[string]any{"ok": true, "mode_requested": p.Mode}, nil
+	Current.EmitUICommand("view.mode " + p.Mode)
+	return map[string]any{"ok": true, "mode": p.Mode}, nil
 }
 
-// handleViewSetDoodadCategoryVisible mirrors the View menu's per-category
-// visibility checkbox. Routes through EmitUICommand so the existing
-// `doodad.toggle <cat>` test-command handler in App.svelte applies the
-// change to the scene.
+// handleViewSetDoodadCategoryVisible SETS a doodad category's visibility to an
+// explicit value (idempotent — the `visible` field is honored, not toggled).
+// Routes an explicit `doodad.set <bool> <cat>` command through EmitUICommand;
+// the JS handler SETS the visibility (not toggles), so calling it repeatedly
+// lands on the requested value. category "*" sets ALL known categories.
 //
-// Quirk: the JS handler ignores the `visible` field and TOGGLES the current
-// state. For now we forward the call regardless — agents calling this in a
-// loop will see the value oscillate, but the single-call case (the common
-// one) lands correctly.
+// The resulting visibility is recorded on the session (per-category; "*" is a
+// bulk frontend op and isn't shadowed) and echoed in the response for read-back.
 type viewSetDoodadCategoryVisibleParams struct {
 	Category string `json:"category"` // "Trees/Destructibles", "Structures", … or "*" for all
-	Visible  bool   `json:"visible"`  // informational; the underlying JS handler toggles
+	Visible  bool   `json:"visible"`  // the explicit target visibility (honored, not toggled)
 }
 
 func handleViewSetDoodadCategoryVisible(params json.RawMessage) (any, error) {
@@ -1306,8 +1306,12 @@ func handleViewSetDoodadCategoryVisible(params json.RawMessage) (any, error) {
 	if p.Category == "" {
 		return nil, errors.New("category is required")
 	}
-	Current.EmitUICommand("doodad.toggle " + p.Category)
-	return map[string]any{"ok": true, "category": p.Category, "visible_requested": p.Visible}, nil
+	// Record for read-back (no-op for "*", which the session can't enumerate),
+	// then emit the explicit SET. bool goes first so a category name containing
+	// spaces (e.g. "Pathing Blockers") stays a single trailing token.
+	Current.SetDoodadCategoryVisible(p.Category, p.Visible)
+	Current.EmitUICommand(fmt.Sprintf("doodad.set %t %s", p.Visible, p.Category))
+	return map[string]any{"ok": true, "category": p.Category, "visible": p.Visible}, nil
 }
 
 // handleCameraSetView pans the camera pivot to (x, y, z) and optionally sets
@@ -1489,6 +1493,18 @@ func handleHistoryBeginGroup(params json.RawMessage) (any, error) {
 // nesting). Returns an error if called without a matching begin.
 func handleHistoryEndGroup(params json.RawMessage) (any, error) {
 	if err := Current.EndUndoGroup(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+// handleHistoryAbortGroup discards an open undo group without publishing it,
+// collapsing any nesting to depth 0 and unblocking Undo/Redo. Recovery tool
+// for a dangling group left by a crashed/cancelled agent — the already-applied
+// mutations stay in place (see Session.AbortUndoGroup). Errors if no group is
+// open. Pair with history.list's open_group_depth to detect the wedge.
+func handleHistoryAbortGroup(params json.RawMessage) (any, error) {
+	if err := Current.AbortUndoGroup(); err != nil {
 		return nil, err
 	}
 	return map[string]any{"ok": true}, nil

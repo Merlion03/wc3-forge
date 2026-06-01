@@ -1156,6 +1156,13 @@
         case 'terrain.toggle':
           toggleTerrainPickMode()
           break
+        case 'view.mode': {
+          // Idempotent SET (from view.set_mode): args[0] is 'terrain' | 'doodad'.
+          // Flip only when the current mode differs so repeated calls are no-ops.
+          const wantTerrain = args[0] === 'terrain'
+          if (wantTerrain !== terrainPickModeOn) toggleTerrainPickMode()
+          break
+        }
         case 'terrain.set': {
           // Args: col row. Auto-fills info from the cached terrain DTO via
           // the picker module by simulating a click at that cell's center.
@@ -1178,6 +1185,16 @@
           } else {
             doodadVisibility = { ...doodadVisibility, [cat]: next }
           }
+          break
+        }
+        case 'doodad.set': {
+          // Idempotent SET (from view.set_doodad_category_visible):
+          // "doodad.set <true|false> <category…>". bool is first so a category
+          // name containing spaces stays a single trailing token. onViewToggle
+          // SETS visibility (not toggles) + handles the "*" all-categories case.
+          const vis = args[0] === 'true'
+          const cat = args.slice(1).join(' ')
+          if (cat) onViewToggle({ category: cat, visible: vis })
           break
         }
         case 'section.toggle': {

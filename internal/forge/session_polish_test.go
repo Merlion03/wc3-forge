@@ -279,3 +279,69 @@ func TestHandleViewSetMode_RecordsRequest(t *testing.T) {
 		t.Errorf("after view.set_mode terrain, ViewMode = %q, want \"terrain\"", got)
 	}
 }
+
+// TestHandleViewSetMode_Idempotent verifies the SET-not-TOGGLE contract: two
+// identical calls land on the requested mode (no oscillation) and the response
+// echoes the resulting mode for read-back.
+func TestHandleViewSetMode_Idempotent(t *testing.T) {
+	Current.SetViewMode("doodad")
+	t.Cleanup(func() { Current.SetViewMode("doodad") })
+	params, _ := json.Marshal(map[string]any{"mode": "terrain"})
+	for i := 0; i < 2; i++ {
+		res, err := handleViewSetMode(params)
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		m := res.(map[string]any)
+		if m["mode"] != "terrain" {
+			t.Errorf("call %d: response mode = %v, want \"terrain\"", i, m["mode"])
+		}
+		if got := Current.ViewMode(); got != "terrain" {
+			t.Errorf("call %d: ViewMode = %q, want \"terrain\" (must not oscillate)", i, got)
+		}
+	}
+}
+
+// TestHandleViewSetMode_RequiresMode verifies an empty/missing mode is rejected
+// (SET needs an explicit target — no more toggle fallback).
+func TestHandleViewSetMode_RequiresMode(t *testing.T) {
+	if _, err := handleViewSetMode(json.RawMessage(`{}`)); err == nil {
+		t.Errorf("handleViewSetMode with no mode should error")
+	}
+	if _, err := handleViewSetMode(json.RawMessage(`{"mode":"bogus"}`)); err == nil {
+		t.Errorf("handleViewSetMode with invalid mode should error")
+	}
+}
+
+// TestHandleViewSetDoodadCategoryVisible_Idempotent verifies the SET-not-TOGGLE
+// contract for doodad visibility: repeated identical calls keep the recorded
+// state stable and the response echoes the resulting visibility.
+func TestHandleViewSetDoodadCategoryVisible_Idempotent(t *testing.T) {
+	const cat = "Trees/Destructibles"
+	t.Cleanup(func() { Current.SetDoodadCategoryVisible(cat, true) })
+	params, _ := json.Marshal(map[string]any{"category": cat, "visible": false})
+	for i := 0; i < 2; i++ {
+		res, err := handleViewSetDoodadCategoryVisible(params)
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		m := res.(map[string]any)
+		if m["visible"] != false {
+			t.Errorf("call %d: response visible = %v, want false", i, m["visible"])
+		}
+		if m["category"] != cat {
+			t.Errorf("call %d: response category = %v, want %q", i, m["category"], cat)
+		}
+		if got := Current.GetDoodadCategoryVisible(cat); got != false {
+			t.Errorf("call %d: GetDoodadCategoryVisible = %v, want false (must not oscillate)", i, got)
+		}
+	}
+	// Categories never set default to visible; "*" is never shadowed.
+	if !Current.GetDoodadCategoryVisible("Structures") {
+		t.Errorf("unset category should default visible")
+	}
+	Current.SetDoodadCategoryVisible("*", false)
+	if !Current.GetDoodadCategoryVisible("*") {
+		t.Errorf("\"*\" must not be shadowed (always reports default visible)")
+	}
+}

@@ -51,6 +51,13 @@ type HistoryEntry struct {
 type HistoryState struct {
 	Undo []HistoryEntry `json:"undo"` // oldest-first
 	Redo []HistoryEntry `json:"redo"` // oldest-first
+	// OpenGroupDepth is the current undo-group nesting depth (0 = no group
+	// open). When > 0, Undo/Redo are blocked until the group is closed
+	// (EndUndoGroup) or discarded (AbortUndoGroup). An agent that began a
+	// group and then aborted/crashed without ending it leaves this > 0,
+	// wedging undo/redo for the whole session — surfacing it here lets a
+	// caller detect the dangling group and recover via history.abort_group.
+	OpenGroupDepth int `json:"open_group_depth"`
 }
 
 // ---------------------------------------------------------------------------
@@ -778,6 +785,35 @@ func (s *Session) ClearHistory() {
 	}
 }
 
+// AbortUndoGroup discards an open undo group WITHOUT publishing it to the
+// history stack, collapsing any nesting straight to depth 0 and unblocking
+// Undo/Redo. Returns an error if no group is open (mirrors EndUndoGroup).
+//
+// Recovery, not rollback: the commands recorded into the open group have
+// ALREADY mutated session state and fired entity-changed events to both
+// surfaces. Aborting only drops the group WRAPPER — the mutations stay in
+// place (un-grouped, but never recorded onto the undo stack since a pending
+// group's commands live only in pendingGroup until EndUndoGroup publishes
+// them). Reverting them here would desync the frontend, so we don't; callers
+// wanting true rollback should snapshot HistoryUndoCount() at begin-time and
+// UndoTo() it instead. The purpose is to rescue a session whose undo/redo is
+// wedged by a dangling group (e.g. an agent that began a group then crashed
+// or cancelled before EndUndoGroup).
+func (s *Session) AbortUndoGroup() error {
+	s.mu.Lock()
+	if s.groupDepth == 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("AbortUndoGroup without BeginUndoGroup")
+	}
+	s.groupDepth = 0
+	s.pendingGroup = nil
+	s.mu.Unlock()
+	// The undo/redo availability changed (it was blocked while the group was
+	// open); notify so the UI re-enables its Edit menu / toolbar.
+	s.notifyHistoryChanged()
+	return nil
+}
+
 // CanUndo / CanRedo report whether the corresponding action is available.
 // For UI enable/disable state (Edit menu, toolbar buttons).
 func (s *Session) CanUndo() bool {
@@ -879,8 +915,9 @@ func (s *Session) HistoryList() HistoryState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := HistoryState{
-		Undo: make([]HistoryEntry, len(s.history)),
-		Redo: make([]HistoryEntry, len(s.redoStack)),
+		Undo:           make([]HistoryEntry, len(s.history)),
+		Redo:           make([]HistoryEntry, len(s.redoStack)),
+		OpenGroupDepth: s.groupDepth,
 	}
 	for i, c := range s.history {
 		out.Undo[i] = HistoryEntry{Index: i, Label: c.Label(), Active: i == len(s.history)-1}

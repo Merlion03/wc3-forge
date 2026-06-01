@@ -356,8 +356,8 @@ export function registerTools(server: McpServer): void {
   // --- view + camera ------------------------------------------------------
   server.tool(
     "view_set_mode",
-    "Toggle the viewport's editing mode. Accepts 'terrain' or 'doodad' (the underlying handler toggles state — call once per change). Records the requested mode on the session; read it back with view_get_mode.",
-    { mode: z.enum(["terrain", "doodad"]).optional() },
+    "Set the viewport's editing mode to 'terrain' or 'doodad' (idempotent — calling it twice with the same mode lands on that mode, never oscillates). mode is required. Returns { ok, mode } echoing the resulting mode (also readable via view_get_mode).",
+    { mode: z.enum(["terrain", "doodad"]) },
     wrap("view.set_mode")
   );
   server.tool(
@@ -368,7 +368,7 @@ export function registerTools(server: McpServer): void {
   );
   server.tool(
     "view_set_doodad_category_visible",
-    "Toggle visibility of a doodad category in the viewport. Category matches the View menu's entries (e.g. 'Trees/Destructibles', 'Structures', or '*' for all).",
+    "Set the visibility of a doodad category in the viewport to an explicit value (idempotent — the visible flag is honored, not toggled). Category matches the View menu's entries (e.g. 'Trees/Destructibles', 'Structures', or '*' for all). Returns { ok, category, visible } echoing the resulting visibility.",
     {
       category: z.string(),
       visible: z.boolean(),
@@ -422,7 +422,7 @@ export function registerTools(server: McpServer): void {
   );
   server.tool(
     "history_list",
-    "Return the current undo/redo stacks (oldest-first) with their labels.",
+    "Return the current undo/redo stacks (oldest-first) with their labels, plus open_group_depth (the current undo-group nesting depth; >0 means a group is open and Undo/Redo are blocked until it is closed with history_end_group or discarded with history_abort_group).",
     {},
     wrap("history.list")
   );
@@ -437,6 +437,12 @@ export function registerTools(server: McpServer): void {
     "Close the outermost undo group (or decrement nesting depth).",
     {},
     wrap("history.end_group")
+  );
+  server.tool(
+    "history_abort_group",
+    "Discard an open undo group without closing it normally: collapses any nesting to depth 0 and re-enables Undo/Redo. Recovery for a dangling group (e.g. an agent began a group then crashed/cancelled before history_end_group, wedging undo/redo). The already-applied mutations stay in place — this drops only the group wrapper, it does not roll back. Errors if no group is open. Detect the wedge via history_list's open_group_depth.",
+    {},
+    wrap("history.abort_group")
   );
 
   // --- object data (definitions) — all 7 kinds via the objects.<kind>.* wire

@@ -1302,7 +1302,9 @@ func (a *App) SetUnitAnimation(creationNumber uint32, animName string) {
 // Commands are free-form strings parsed JS-side; conventional shape:
 //   "terrain.toggle"               toggle terrain-pick mode
 //   "terrain.set <col> <row>"      set terrain cell (auto-fills info)
+//   "view.mode <terrain|doodad>"   SET terrain-pick mode (idempotent)
 //   "doodad.toggle <cat>"          toggle doodad category visibility
+//   "doodad.set <bool> <cat…>"     SET doodad category visibility (idempotent)
 //   "section.toggle <id>"          toggle accordion section open state
 //   "splitter.set <pct>"           set right-column explorer pct
 func (a *App) EmitTestCommand(cmd string) {

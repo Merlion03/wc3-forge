@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
@@ -186,6 +187,132 @@ func TestUndoGroup_GizmoStyleBatch(t *testing.T) {
 	}
 	if got := s.Units().Entities[0].Position; got[0] != orig1[0]+50 {
 		t.Errorf("cn1 post-redo X = %v, want %v", got[0], orig1[0]+50)
+	}
+}
+
+// TestAbortUndoGroup_ClosesOpenGroup verifies the dangling-group recovery
+// path: a group is open (blocking undo/redo), AbortUndoGroup() collapses it
+// to depth 0 and re-enables undo. The in-flight mutation's effect REMAINS
+// applied (no rollback), but it is NOT published to the undo stack — pending
+// commands live only in pendingGroup and abort drops that wrapper.
+func TestAbortUndoGroup_ClosesOpenGroup(t *testing.T) {
+	tmp := copyFixtureToTemp(t, `C:\Users\4step\projects\wc3-survival-game\map\extracted`)
+	s := &Session{}
+	if err := s.Open(tmp); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	units := s.Units()
+	if units == nil || len(units.Entities) < 2 {
+		t.Skipf("fixture has %d entities, test wants ≥2", len(units.Entities))
+	}
+	cn1 := units.Entities[0].CreationNumber
+	cn2 := units.Entities[1].CreationNumber
+	orig1 := units.Entities[0].Position
+	orig2 := units.Entities[1].Position
+
+	// A baseline (ungrouped) command so the undo stack is non-empty — Undo()
+	// no-ops on an empty stack BEFORE it reaches the group-open guard, so we
+	// need real history to observe the "blocked while group open" behavior.
+	if err := s.MoveUnit(cn1, orig1[0]+50, orig1[1], orig1[2]); err != nil {
+		t.Fatalf("baseline MoveUnit: %v", err)
+	}
+
+	s.BeginUndoGroup("dangling")
+	if err := s.MoveUnit(cn2, orig2[0]+50, orig2[1], orig2[2]); err != nil {
+		t.Fatalf("grouped MoveUnit: %v", err)
+	}
+	// Group is open: depth reported, undo blocked (history has the baseline).
+	if got := s.HistoryList().OpenGroupDepth; got != 1 {
+		t.Fatalf("OpenGroupDepth while open = %d, want 1", got)
+	}
+	if err := s.Undo(); err == nil {
+		t.Fatalf("Undo while group open should error (blocked)")
+	}
+
+	if err := s.AbortUndoGroup(); err != nil {
+		t.Fatalf("AbortUndoGroup: %v", err)
+	}
+	// Group gone, undo unblocked, pending command NOT published (only the
+	// baseline remains on the stack).
+	if got := s.HistoryList().OpenGroupDepth; got != 0 {
+		t.Errorf("OpenGroupDepth after abort = %d, want 0", got)
+	}
+	if got := len(s.HistoryList().Undo); got != 1 {
+		t.Errorf("undo depth after abort = %d, want 1 (only baseline; aborted command dropped, not published)", got)
+	}
+	// The grouped mutation's effect remains (abort does not roll back).
+	if got := s.Units().Entities[1].Position; got[0] != orig2[0]+50 {
+		t.Errorf("cn2 position after abort = %v, want X=%v (effect must remain)", got, orig2[0]+50)
+	}
+	// Undo now works again — it reverts the baseline (the only stack entry).
+	if err := s.Undo(); err != nil {
+		t.Fatalf("Undo after abort: %v", err)
+	}
+	if got := s.Units().Entities[0].Position; got != orig1 {
+		t.Errorf("cn1 after undo = %v, want %v (baseline reverted)", got, orig1)
+	}
+}
+
+// TestAbortUndoGroup_WithoutBegin verifies abort errors when no group is open
+// (mirrors EndUndoGroup's mismatched-call guard).
+func TestAbortUndoGroup_WithoutBegin(t *testing.T) {
+	s := &Session{}
+	err := s.AbortUndoGroup()
+	if err == nil {
+		t.Fatalf("AbortUndoGroup without BeginUndoGroup should error")
+	}
+	if !strings.Contains(err.Error(), "without BeginUndoGroup") {
+		t.Errorf("error = %q, want it to mention 'without BeginUndoGroup'", err.Error())
+	}
+}
+
+// TestHistoryList_ReportsOpenGroupDepth verifies HistoryList surfaces the live
+// nesting depth so an agent can detect a dangling group.
+func TestHistoryList_ReportsOpenGroupDepth(t *testing.T) {
+	s := &Session{}
+	if got := s.HistoryList().OpenGroupDepth; got != 0 {
+		t.Fatalf("initial OpenGroupDepth = %d, want 0", got)
+	}
+	s.BeginUndoGroup("a")
+	if got := s.HistoryList().OpenGroupDepth; got != 1 {
+		t.Errorf("after 1 begin = %d, want 1", got)
+	}
+	s.BeginUndoGroup("b")
+	if got := s.HistoryList().OpenGroupDepth; got != 2 {
+		t.Errorf("after 2 begins = %d, want 2", got)
+	}
+	if err := s.EndUndoGroup(); err != nil {
+		t.Fatalf("EndUndoGroup: %v", err)
+	}
+	if got := s.HistoryList().OpenGroupDepth; got != 1 {
+		t.Errorf("after 1 end = %d, want 1", got)
+	}
+	if err := s.EndUndoGroup(); err != nil {
+		t.Fatalf("EndUndoGroup: %v", err)
+	}
+	if got := s.HistoryList().OpenGroupDepth; got != 0 {
+		t.Errorf("after 2 ends = %d, want 0", got)
+	}
+}
+
+// TestAbortUndoGroup_NestedCollapses verifies abort collapses ALL nesting to
+// depth 0 at once (not decrement-by-one), so a subsequent EndUndoGroup errors.
+func TestAbortUndoGroup_NestedCollapses(t *testing.T) {
+	s := &Session{}
+	s.BeginUndoGroup("outer")
+	s.BeginUndoGroup("inner")
+	if got := s.HistoryList().OpenGroupDepth; got != 2 {
+		t.Fatalf("OpenGroupDepth = %d, want 2", got)
+	}
+	if err := s.AbortUndoGroup(); err != nil {
+		t.Fatalf("AbortUndoGroup: %v", err)
+	}
+	if got := s.HistoryList().OpenGroupDepth; got != 0 {
+		t.Errorf("OpenGroupDepth after nested abort = %d, want 0 (collapses all levels)", got)
+	}
+	// The outer End now has no matching open group.
+	if err := s.EndUndoGroup(); err == nil {
+		t.Errorf("EndUndoGroup after abort should error (depth already 0)")
 	}
 }
 

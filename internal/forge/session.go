@@ -428,6 +428,14 @@ type Session struct {
 	// frontend's initial "doodad" default in that case. See
 	// session_polish_cmd.go for the accessor + the read-back rationale.
 	viewMode string
+
+	// doodadVisibility is the session's record of per-category doodad
+	// visibility, updated by view.set_doodad_category_visible and read back as
+	// that handler's return value. Like viewMode it shadows the last MCP
+	// REQUEST, not the live frontend state (App.svelte's doodadVisibility is
+	// authoritative for the renderer). A category absent from the map defaults
+	// to visible, so GetDoodadCategoryVisible returns true for unknown keys.
+	doodadVisibility map[string]bool
 }
 
 // EntityChange is the payload for OnEntityChanged. Kind/ID identify which

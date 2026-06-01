@@ -166,6 +166,43 @@ func (s *Session) SetViewMode(mode string) {
 	s.mu.Unlock()
 }
 
+// GetDoodadCategoryVisible reports the session's recorded visibility for a
+// doodad category. Categories default to VISIBLE, so a category that has never
+// been toggled (or isn't present in the map) reports true. Like ViewMode this
+// tracks the last view.set_doodad_category_visible REQUEST, not the live
+// frontend state. The "*" pseudo-category (all categories) is never stored —
+// it's a bulk frontend op — so GetDoodadCategoryVisible("*") always returns the
+// default true.
+func (s *Session) GetDoodadCategoryVisible(category string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.doodadVisibility == nil {
+		return true
+	}
+	v, ok := s.doodadVisibility[category]
+	if !ok {
+		return true
+	}
+	return v
+}
+
+// SetDoodadCategoryVisible records a category's visibility on the session.
+// Pure bookkeeping for the read-back; does NOT emit a UI command (the caller,
+// handleViewSetDoodadCategoryVisible, owns the doodad.set emission). The "*"
+// bulk pseudo-category is not stored (it would need per-category expansion the
+// session can't enumerate — that lives in the frontend).
+func (s *Session) SetDoodadCategoryVisible(category string, visible bool) {
+	if category == "" || category == "*" {
+		return
+	}
+	s.mu.Lock()
+	if s.doodadVisibility == nil {
+		s.doodadVisibility = make(map[string]bool)
+	}
+	s.doodadVisibility[category] = visible
+	s.mu.Unlock()
+}
+
 // ---------------------------------------------------------------------------
 // Handlers — new file so RegisterAll's reg() lines (additive) are the only
 // touch to handlers.go.
