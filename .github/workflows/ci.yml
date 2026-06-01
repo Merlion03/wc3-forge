@@ -78,3 +78,42 @@ jobs:
 
       - name: Go build
         run: go build ./...
+
+  # macOS leg: compile + test the darwin/unix Go paths (casc_unix.go,
+  # liveness_unix.go, launch_darwin.go, wc3path_other.go, update_run_other.go,
+  # asset_handler_darwin.go) that the Windows job never builds. There's no macOS
+  # release artifact, so this is purely a compile/lint/test gate — no wails build.
+  # It still builds the frontend because the root package embeds frontend/dist
+  # (//go:embed all:frontend/dist), so `go build ./...` needs dist to exist.
+  # CASC/WC3-dependent tests skip themselves when no install is present (the
+  # casc_test.go t.Skipf guards), so `go test ./...` is green on a bare runner.
+  darwin:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Build the frontend so the root package's go:embed of frontend/dist
+      # resolves (the binary itself isn't shipped from this leg).
+      - name: Frontend build
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test
+        run: go test ./...
+
+      - name: Go build
+        run: go build ./...
