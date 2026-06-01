@@ -633,6 +633,10 @@ export interface SceneAPI {
   setPathingVisible(visible: boolean): void
   /** Current pathing-overlay visibility — for UI display. */
   isPathingVisible(): boolean
+  /** Toggle viewport visibility of start-location markers. Defaults to on. */
+  setSlocsVisible(visible: boolean): void
+  /** Current start-location-marker visibility — for UI display. */
+  areSlocsVisible(): boolean
   /**
    * Toggle terrain-pick mode. When active, plain LMB clicks on the canvas
    * route to the terrain picker (onTerrainPick callback) instead of the
@@ -899,6 +903,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     flog('[sky-gradient] build failed:', e instanceof Error ? e.message : String(e))
   }
   let slocRenderer: SlocRenderer | null = null
+  // Start-location marker visibility — toggled from the Explorer "Markers"
+  // section eye button. Default on; remembered here so a rebuilt renderer
+  // (new map load) re-applies the user's current choice.
+  let slocsVisible = true
   let pathing: PathingOverlay | null = null
   // Pathing overlay visibility — toggled from the header pill. Default off
   // to match HiveWE; users opt in when debugging unit placement / arena
@@ -1089,6 +1097,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       scene,
       unitInstances,
     )
+    // Re-apply the current toggle so a hidden-markers preference survives a
+    // map reload (which rebuilds the renderer).
+    slocRenderer?.setVisible(slocsVisible)
   } catch (e) {
     flog('[slocs] init failed:', e instanceof Error ? e.message : String(e))
   }
@@ -2157,6 +2168,11 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     }
 
     for (const [cn, inst] of unitInstances) {
+      // Slocs live in unitInstances as HIDDEN CircleOfPower MDX (kept for the
+      // gizmo/transform) but are picked solely via slocRenderer.pickInfos()
+      // below, which returns nothing while the markers are toggled hidden.
+      // Skip them here so a hidden marker can't be clicked or box-selected.
+      if ((inst as any).__wc3ForgeTypeId === 'sloc') continue
       const wb = instanceWorldBounds(inst)
       if (wb) considerSphere(wb.cx, wb.cy, wb.cz, wb.r, { kind: 'unit', id: cn }, inst)
     }
@@ -2288,6 +2304,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
           && p.y >= rect.y && p.y <= rect.y + rect.h
     }
     for (const [cn, inst] of unitInstances) {
+      // Hidden slocs (CircleOfPower MDX kept for the gizmo) are box-picked via
+      // slocRenderer.pickInfos() below, which respects the hide toggle — skip
+      // them here so box-select doesn't grab hidden markers.
+      if ((inst as any).__wc3ForgeTypeId === 'sloc') continue
       const wb = instanceWorldBounds(inst)
       if (!wb) continue
       if (inside(worldToCanvasPx(wb.cx, wb.cy, wb.cz))) {
@@ -3934,6 +3954,13 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     },
     isPathingVisible() {
       return pathingVisible
+    },
+    setSlocsVisible(visible: boolean) {
+      slocsVisible = visible
+      slocRenderer?.setVisible(visible)
+    },
+    areSlocsVisible() {
+      return slocsVisible
     },
     setTerrainPickMode(active: boolean) {
       if (active === terrainPickMode) return
