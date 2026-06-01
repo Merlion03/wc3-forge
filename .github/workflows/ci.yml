@@ -55,6 +55,21 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      # The MCP catalog (internal/mcpserver/tools.json) is generated from
+      # mcp/src/tools.ts. Regenerate it and fail if it differs from what's
+      # committed, so a tools.ts edit that wasn't followed by `npm run gen:tools`
+      # can't merge with a stale catalog. The Go TestToolsCatalogParity test
+      # separately enforces handler↔catalog 1:1 correspondence.
+      - name: MCP catalog in sync (gen:tools, fail on drift)
+        shell: bash
+        run: |
+          set -eo pipefail
+          cd mcp && npm ci && npm run gen:tools && cd ..
+          if ! git diff --exit-status internal/mcpserver/tools.json; then
+            echo "::error::internal/mcpserver/tools.json is out of sync with mcp/src/tools.ts. Run 'cd mcp && npm run gen:tools' and commit the result."
+            exit 1
+          fi
+
       - name: Go vet
         run: go vet ./...
 

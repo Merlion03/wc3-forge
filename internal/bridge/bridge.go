@@ -20,6 +20,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sort"
 	"sync"
 )
 
@@ -59,6 +60,20 @@ func (b *Bridge) TokenShort() string {
 		return b.token
 	}
 	return b.token[:8]
+}
+
+// ListHandlers returns the sorted set of registered method names. Used by the
+// handler/catalog parity test (internal/forge) to verify every registered
+// bridge method has a matching tools.json entry and vice versa.
+func (b *Bridge) ListHandlers() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, 0, len(b.handlers))
+	for m := range b.handlers {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (b *Bridge) Start() error {
