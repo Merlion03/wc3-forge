@@ -71,6 +71,10 @@
   // it back on commit so typing doesn't fight the live list.
   type BoundsBuf = { name: string; minX: string; minY: string; maxX: string; maxY: string }
   let editBuf: Record<number, BoundsBuf> = $state({})
+  // The region whose name/bounds input is currently focused (being typed).
+  // refresh() preserves that region's edit buffer so an external refresh
+  // (MCP / undo / another surface) can't clobber what the user is mid-typing.
+  let focusedRegion: number | null = null
 
   // Re-fetch whenever the panel opens, the map (re)loads, or App bumps the
   // refresh token. onMount-style imperative fetch via $effect keyed on those
@@ -95,7 +99,14 @@
       // Seed/refresh the per-region edit buffer for any region not mid-edit.
       const next: Record<number, BoundsBuf> = {}
       for (const r of regions) {
-        next[r.creation_number] = {
+        const cn = r.creation_number
+        // Keep the in-progress buffer for the region the user is actively
+        // typing; re-seed every other region from the backend.
+        if (cn === focusedRegion && editBuf[cn]) {
+          next[cn] = editBuf[cn]
+          continue
+        }
+        next[cn] = {
           name: r.name,
           minX: String(r.min_x),
           minY: String(r.min_y),
@@ -151,6 +162,9 @@
   }
 
   async function commitBounds(cn: number) {
+    // The field just blurred/committed — clear focus tracking so the post-commit
+    // refresh re-seeds the validated/normalized bounds, not the raw input.
+    focusedRegion = null
     const b = editBuf[cn]
     if (!b) return
     try {
@@ -164,6 +178,7 @@
   }
 
   async function commitName(cn: number) {
+    focusedRegion = null
     const b = editBuf[cn]
     if (!b) return
     const name = b.name.trim()
@@ -282,6 +297,7 @@
                   bind:value={editBuf[r.creation_number].name}
                   spellcheck="false"
                   onclick={(e) => e.stopPropagation()}
+                  onfocus={() => (focusedRegion = r.creation_number)}
                   onblur={() => commitName(r.creation_number)}
                   onkeydown={(e) => onKey(e, () => commitName(r.creation_number))}
                 />
@@ -292,21 +308,25 @@
               <div class="row-edit">
                 <label>minX
                   <input type="number" bind:value={editBuf[r.creation_number].minX}
+                    onfocus={() => (focusedRegion = r.creation_number)}
                     onblur={() => commitBounds(r.creation_number)}
                     onkeydown={(e) => onKey(e, () => commitBounds(r.creation_number))} />
                 </label>
                 <label>minY
                   <input type="number" bind:value={editBuf[r.creation_number].minY}
+                    onfocus={() => (focusedRegion = r.creation_number)}
                     onblur={() => commitBounds(r.creation_number)}
                     onkeydown={(e) => onKey(e, () => commitBounds(r.creation_number))} />
                 </label>
                 <label>maxX
                   <input type="number" bind:value={editBuf[r.creation_number].maxX}
+                    onfocus={() => (focusedRegion = r.creation_number)}
                     onblur={() => commitBounds(r.creation_number)}
                     onkeydown={(e) => onKey(e, () => commitBounds(r.creation_number))} />
                 </label>
                 <label>maxY
                   <input type="number" bind:value={editBuf[r.creation_number].maxY}
+                    onfocus={() => (focusedRegion = r.creation_number)}
                     onblur={() => commitBounds(r.creation_number)}
                     onkeydown={(e) => onKey(e, () => commitBounds(r.creation_number))} />
                 </label>
