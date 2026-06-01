@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -54,6 +57,14 @@ func (a *App) DownloadAndRunInstaller(rawURL string) error {
 		return err
 	}
 
+	// Verify the download's SHA-256 against the release's published SHA256SUMS
+	// BEFORE we UAC-elevate and run it. On mismatch the temp file is removed and
+	// we refuse to launch — a corrupted or tampered installer never executes.
+	if err := a.verifyInstaller(rawURL, dst); err != nil {
+		os.Remove(dst)
+		return err
+	}
+
 	if err := runInstaller(dst); err != nil {
 		return fmt.Errorf("launch installer: %w", err)
 	}
@@ -82,6 +93,84 @@ func validateInstallerURL(rawURL string) error {
 		return fmt.Errorf("refusing update URL from untrusted host %q", host)
 	}
 	return nil
+}
+
+// verifyInstaller confirms the downloaded installer matches the SHA-256 the
+// release published in its SHA256SUMS asset. The checksums file is the sibling
+// asset of the installer URL (same release-download path). On a release that
+// predates SHA256SUMS (older versions) it's absent — we log and proceed, since
+// TLS to github already protects the transport; the checksum is defense against
+// a corrupted/tampered download for releases that publish it (v0.9.0+).
+func (a *App) verifyInstaller(installerURL, filePath string) error {
+	sumsURL, err := update.ChecksumsURL(installerURL)
+	if err != nil {
+		return fmt.Errorf("derive checksums URL: %w", err)
+	}
+	// Same github-over-https guard the installer URL passed.
+	if err := validateInstallerURL(sumsURL); err != nil {
+		return err
+	}
+	expected, found, err := a.fetchExpectedSHA256(sumsURL, installerURL)
+	if err != nil {
+		return fmt.Errorf("fetch checksums: %w", err)
+	}
+	if !found {
+		log.Printf("update: release has no %s; skipping installer hash verification", update.ChecksumsAssetName)
+		return nil
+	}
+	actual, err := sha256File(filePath)
+	if err != nil {
+		return fmt.Errorf("hash installer: %w", err)
+	}
+	if !strings.EqualFold(actual, expected) {
+		return fmt.Errorf("installer verification failed: SHA-256 %s does not match the published %s — the download may be corrupt or tampered, so it was NOT run", actual, expected)
+	}
+	log.Printf("update: installer SHA-256 verified (%s)", actual)
+	return nil
+}
+
+// fetchExpectedSHA256 downloads the SHA256SUMS asset and returns the hash for
+// the installer's base name. found=false (no error) when the asset is absent
+// (404) — i.e. an older release without checksums.
+func (a *App) fetchExpectedSHA256(sumsURL, installerURL string) (string, bool, error) {
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sumsURL, nil)
+	if err != nil {
+		return "", false, err
+	}
+	req.Header.Set("User-Agent", "wc3-forge-updater/"+a.GetAppVersion())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", false, fmt.Errorf("unexpected status %s", resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // SHA256SUMS is tiny; cap at 1 MiB
+	if err != nil {
+		return "", false, err
+	}
+	sum, ok := update.ParseSHA256SUMS(data, installerURL)
+	return sum, ok, nil
+}
+
+// sha256File returns the lowercase hex SHA-256 of the file at path.
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // downloadInstaller streams rawURL into a temp .exe, emitting throttled

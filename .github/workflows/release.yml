@@ -73,6 +73,22 @@ jobs:
           Compress-Archive -Path "$staging/*" -DestinationPath $zip -Force
           Get-ChildItem $zip | Select-Object Name, Length
 
+      - name: Compute checksums (SHA256SUMS)
+        # Publish a SHA256SUMS asset so the in-app updater can verify the
+        # downloaded installer before UAC-elevating + running it (the binary is
+        # unsigned; this is the integrity check). Standard sha256sum format:
+        # "<lowercase-hex>  <basename>", one per artifact.
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
+          $files = @("build/bin/wc3-forge-amd64-installer.exe", "wc3-forge-$tag-windows-amd64.zip")
+          $lines = foreach ($f in $files) {
+            $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash.ToLower()
+            "$h  $(Split-Path -Leaf $f)"
+          }
+          Set-Content -Path SHA256SUMS -Value $lines -Encoding ascii
+          Write-Host "--- SHA256SUMS ---"; Get-Content SHA256SUMS
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -83,3 +99,4 @@ jobs:
           files: |
             wc3-forge-${{ steps.ver.outputs.tag }}-windows-amd64.zip
             build/bin/wc3-forge-amd64-installer.exe
+            SHA256SUMS
