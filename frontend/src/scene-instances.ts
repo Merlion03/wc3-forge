@@ -864,6 +864,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   // we need the depth buffer to survive into the scene's render pass.
   ;(scene as any).alpha = true
   ;(scene as any).color = [0.07, 0.07, 0.09] // matches the app's dark chrome
+  // Light MDX (HD) models from the SAME direction terrain.ts lights the ground —
+  // HiveWE's normalize(1, 1, -3) — so units/doodads aren't shaded against the
+  // terrain. lightPosition is a world-space point; scale the direction out far
+  // so it reads as directional. (mdx-m3-viewer Scene.lightPosition; affects HD.)
+  ;(scene as any).lightPosition = (() => {
+    const x = 1, y = 1, z = -3
+    const len = Math.sqrt(x * x + y * y + z * z)
+    const dist = 10000
+    return new Float32Array([(x / len) * dist, (y / len) * dist, (z / len) * dist])
+  })()
 
   // WC3-style RTS camera. Mutates scene.camera in response to mouse/keyboard;
   // initial state has it framing the world origin from a 45°-down angle, and
@@ -3225,7 +3235,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   function markTerrainDirty(field: string) {
     switch (field) {
       case 'tile': terrainDirty = true; break
-      case 'height': terrainDirty = true; waterDirty = true; break
+      case 'height': terrainDirty = true; cliffsDirty = true; waterDirty = true; break // cliffs re-drape over new heights
       case 'cliff': terrainDirty = true; cliffsDirty = true; break
       case 'ramp': terrainDirty = true; cliffsDirty = true; break
       case 'water': waterDirty = true; break
