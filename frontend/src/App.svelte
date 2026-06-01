@@ -64,6 +64,10 @@
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
   import EyeIcon from '@lucide/svelte/icons/eye'
   import EyeOffIcon from '@lucide/svelte/icons/eye-off'
+  import FolderOpenIcon from '@lucide/svelte/icons/folder-open'
+  import FilePlusIcon from '@lucide/svelte/icons/file-plus-2'
+  import BotIcon from '@lucide/svelte/icons/bot'
+  import CopyIcon from '@lucide/svelte/icons/copy'
 
   // Wails drops struct typedefs from models.ts when they appear as map values,
   // so the unit/doodad type-index shapes are declared locally here. Must stay
@@ -417,6 +421,21 @@
   let newMapBusy: boolean = $state(false)
   function openNewMap() {
     showNewMap = true
+  }
+
+  // First-run / Claude-Code setup: the empty-state overlay's "Set up Claude
+  // Code" action opens this dialog with the one-line MCP registration command.
+  let showMcpSetup: boolean = $state(false)
+  let mcpCopied: boolean = $state(false)
+  const mcpSetupCmd = 'claude mcp add wc3-forge --scope user -- "<install>\\wc3-forge.exe" --mcp'
+  async function copyMcpCmd() {
+    try {
+      await navigator.clipboard.writeText(mcpSetupCmd)
+      mcpCopied = true
+      setTimeout(() => (mcpCopied = false), 1500)
+    } catch {
+      /* clipboard blocked — the command stays visible to copy manually */
+    }
   }
   // Run the create flow: pick a .w3x destination, write the map, then open it.
   // When a map is already loaded we don't clobber the current session — write
@@ -1422,7 +1441,7 @@
       const tagName = tgt?.tagName?.toLowerCase()
       if (tagName === 'input' || tagName === 'textarea' || tgt?.isContentEditable) return
       if (showObjectEditor || showTriggerEditor || showConvertToLua || showMapInfoEditor
-          || showNewMap || showUpdateDialog || showWC3InstallDialog || quitGuardOpen) return
+          || showNewMap || showMcpSetup || showUpdateDialog || showWC3InstallDialog || quitGuardOpen) return
       if (selectionItems.length === 0) return
       e.preventDefault()
       void deleteSelection()
@@ -3095,6 +3114,28 @@
   <div class="grid min-h-0 flex-1" style="grid-template-columns: 1fr 4px {rightColWidthPx}px;">
     <section class="viewport">
       <canvas bind:this={canvas}></canvas>
+      <!-- First-run empty state: shown over the bare viewport whenever no map is
+           loaded. Reuses the existing open/new handlers; auto-hides the instant
+           status.loaded flips true. -->
+      {#if !status.loaded}
+        <div class="firstrun">
+          <div class="firstrun-card">
+            <h1>wc3-forge</h1>
+            <p>Open a Warcraft III map to start editing — or create a new one.</p>
+            <div class="firstrun-actions">
+              <Button size="lg" onclick={() => void pickAndOpen()}>
+                <FolderOpenIcon class="size-4" /> Open Map
+              </Button>
+              <Button size="lg" variant="secondary" onclick={openNewMap}>
+                <FilePlusIcon class="size-4" /> New Map
+              </Button>
+              <Button size="lg" variant="ghost" onclick={() => (showMcpSetup = true)}>
+                <BotIcon class="size-4" /> Set up Claude Code
+              </Button>
+            </div>
+          </div>
+        </div>
+      {/if}
       {#if showMinimap}
         <Minimap {scene} {mapLoadGen} />
       {/if}
@@ -3634,6 +3675,38 @@
     />
   {/if}
 
+  <!-- "Set up Claude Code" — the MCP registration command, copyable. Opened
+       from the first-run overlay. -->
+  <Dialog.Root bind:open={showMcpSetup}>
+    <Dialog.Content class="max-w-xl">
+      <Dialog.Header>
+        <Dialog.Title>Set up Claude Code</Dialog.Title>
+      </Dialog.Header>
+      <div class="mcp-setup">
+        <p>
+          wc3-forge is also an MCP server, so you can drive the editor from
+          <a href="https://claude.ai/code" target="_blank" rel="noreferrer">Claude Code</a>.
+          Register it once from a terminal:
+        </p>
+        <div class="mcp-cmd">
+          <code>{mcpSetupCmd}</code>
+          <Button size="sm" variant="secondary" onclick={copyMcpCmd}>
+            <CopyIcon class="size-3.5" /> {mcpCopied ? 'Copied' : 'Copy'}
+          </Button>
+        </div>
+        <p class="mcp-note">
+          Replace <code>&lt;install&gt;</code> with the folder holding
+          <code>wc3-forge.exe</code>. Then run <code>claude mcp list</code> —
+          wc3-forge should show <code>✓ Connected</code>. (macOS: point it at a
+          locally-built binary; there is no prebuilt macOS release.)
+        </p>
+      </div>
+      <Dialog.Footer>
+        <Button onclick={() => (showMcpSetup = false)}>Done</Button>
+      </Dialog.Footer>
+    </Dialog.Content>
+  </Dialog.Root>
+
   {#if showSwapTileset}
     <SwapTilesetDialog
       bind:open={showSwapTileset}
@@ -3767,6 +3840,21 @@
 
   .viewport { position: relative; min-width: 0; min-height: 0; }
   canvas { display: block; width: 100%; height: 100%; }
+
+  /* First-run empty-state overlay (no map loaded). */
+  .firstrun { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: color-mix(in oklab, var(--background) 72%, transparent); backdrop-filter: blur(2px); z-index: 5; }
+  .firstrun-card { display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; padding: 32px 40px; }
+  .firstrun-card h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: 0.5px; color: var(--foreground); }
+  .firstrun-card p { margin: 0; max-width: 440px; font-size: 13px; color: var(--muted-foreground); }
+  .firstrun-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 6px; }
+  /* "Set up Claude Code" dialog body. */
+  .mcp-setup { display: flex; flex-direction: column; gap: 14px; padding: 4px 0; font-size: 13px; }
+  .mcp-setup p { margin: 0; color: var(--muted-foreground); }
+  .mcp-setup a { color: var(--primary); text-decoration: underline; }
+  .mcp-cmd { display: flex; align-items: center; gap: 8px; background: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+  .mcp-cmd code { flex: 1; overflow-x: auto; white-space: nowrap; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; color: var(--foreground); }
+  .mcp-note { font-size: 12px; }
+  .mcp-note code { padding: 1px 4px; border-radius: 3px; background: var(--muted); font-family: 'Cascadia Mono', Consolas, monospace; }
 
   .error { background: color-mix(in oklab, var(--destructive) 18%, transparent); color: var(--destructive); padding: 6px 14px; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; flex: 0 0 auto; max-height: 200px; overflow: auto; }
   .error pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
