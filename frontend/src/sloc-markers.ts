@@ -324,6 +324,8 @@ export interface SlocRenderer {
   pickInfos(): SlocPickInfo[]
   /** Release GL resources and detach lib instances. */
   dispose(): void
+  /** Toggle viewport visibility of all start-location markers. */
+  setVisible(visible: boolean): void
 }
 
 /**
@@ -382,6 +384,9 @@ export function buildSlocRenderer(
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, MARKER_INDICES, gl.STATIC_DRAW)
 
   let markers: SlocMarker[] = []
+  // Viewport visibility for all start-location markers, toggled from the
+  // Explorer "Markers" section eye button. Hidden markers neither draw nor pick.
+  let visible = true
   // Per-marker hidden CircleOfPower MdxModelInstance, or absent if the model
   // failed to load / the load is still in flight when setMarkers was called.
   // These instances never render (inst.hide()); they exist only to carry the
@@ -546,6 +551,7 @@ export function buildSlocRenderer(
     },
 
     pickInfos(): SlocPickInfo[] {
+      if (!visible) return []
       const out: SlocPickInfo[] = []
       for (const m of markers) {
         // One AABB per marker, centered on the live location. The box
@@ -565,6 +571,7 @@ export function buildSlocRenderer(
     },
 
     draw(viewProj: Float32Array, selected: Set<number>) {
+      if (!visible) return
       if (markers.length === 0) return
 
       // The lib's render path leaves an unknown WebGL state behind: vertex
@@ -613,6 +620,9 @@ export function buildSlocRenderer(
       gl.deleteBuffer(ibo)
       gl.deleteProgram(prog.program)
       markers = []
+    },
+    setVisible(b: boolean) {
+      visible = b
     },
   }
 }

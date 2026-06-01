@@ -55,6 +55,8 @@
   import { Input } from '$lib/components/ui/input'
   import { Toaster } from '$lib/components/ui/sonner'
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
+  import EyeIcon from '@lucide/svelte/icons/eye'
+  import EyeOffIcon from '@lucide/svelte/icons/eye-off'
 
   // Wails drops struct typedefs from models.ts when they appear as map values,
   // so the unit/doodad type-index shapes are declared locally here. Must stay
@@ -104,6 +106,9 @@
   let busy: boolean = $state(false)
   let reforged: boolean = $state(false)
   let pathingVisible: boolean = $state(false)
+  // Start-location markers are shown by default; the Explorer "Markers"
+  // section has an eye button to hide them from the viewport.
+  let slocsVisible: boolean = $state(true)
 
   // Terrain-pick mode state. Owned here, mirrored to the scene via
   // scene.setTerrainPickMode. When a click hits a cell, terrainCell is set
@@ -746,6 +751,7 @@
       try { reforged = await GetReforgedMode() } catch { reforged = false }
       scene = createScene(canvas, reforged)
       scene.setPathingVisible(pathingVisible)
+      scene.setSlocsVisible(slocsVisible)
       scene.onPick(handlePick)
       scene.onTerrainPick(handleTerrainPick)
       scene.onPlacementPick(handlePlacementPick)
@@ -1788,6 +1794,10 @@
     pathingVisible = !pathingVisible
     scene?.setPathingVisible(pathingVisible)
   }
+  function toggleSlocs() {
+    slocsVisible = !slocsVisible
+    scene?.setSlocsVisible(slocsVisible)
+  }
   // View → Overlays sub-menu dispatches `overlay-toggle` events. Route per id
   // to the relevant scene toggle. Add new overlay ids here as the menu's
   // OVERLAYS list in ViewMenu.svelte grows.
@@ -2571,7 +2581,24 @@
             {#each groups as g (g.id)}
               <Accordion id={g.id} label={g.label} open={isOpen(g.id, true)}
                          onToggle={onSectionToggle}>
-                {#snippet headerExtras()}{g.entries.length}{/snippet}
+                {#snippet headerExtras()}
+                  {#if g.id === 'markers'}
+                    <!-- Hide/show all start-location markers in the viewport.
+                         role=button (not <button>) since headerExtras renders
+                         inside the Accordion trigger button; stopPropagation
+                         keeps the click from also toggling the section. -->
+                    <span class="inline-flex items-center cursor-pointer opacity-70 hover:opacity-100"
+                          role="button" tabindex="0"
+                          aria-pressed={!slocsVisible}
+                          title={slocsVisible ? 'Hide start-location markers' : 'Show start-location markers'}
+                          onpointerdown={(e) => e.stopPropagation()}
+                          onclick={(e) => { e.stopPropagation(); e.preventDefault(); toggleSlocs() }}
+                          onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); toggleSlocs() } }}>
+                      {#if slocsVisible}<EyeIcon size={12} />{:else}<EyeOffIcon size={12} />{/if}
+                    </span>
+                  {/if}
+                  {g.entries.length}
+                {/snippet}
                 <ul class="explorer-list">
                   {#each g.entries as u (u.creation_number)}
                     <li class:selected={selectedIds.has(u.creation_number)}

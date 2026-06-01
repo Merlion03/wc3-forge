@@ -632,6 +632,10 @@ export interface SceneAPI {
   setPathingVisible(visible: boolean): void
   /** Current pathing-overlay visibility — for UI display. */
   isPathingVisible(): boolean
+  /** Toggle viewport visibility of start-location markers. Defaults to on. */
+  setSlocsVisible(visible: boolean): void
+  /** Current start-location-marker visibility — for UI display. */
+  areSlocsVisible(): boolean
   /**
    * Toggle terrain-pick mode. When active, plain LMB clicks on the canvas
    * route to the terrain picker (onTerrainPick callback) instead of the
@@ -878,6 +882,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     flog('[sky-gradient] build failed:', e instanceof Error ? e.message : String(e))
   }
   let slocRenderer: SlocRenderer | null = null
+  // Start-location marker visibility — toggled from the Explorer "Markers"
+  // section eye button. Default on; remembered here so a rebuilt renderer
+  // (new map load) re-applies the user's current choice.
+  let slocsVisible = true
   let pathing: PathingOverlay | null = null
   // Pathing overlay visibility — toggled from the header pill. Default off
   // to match HiveWE; users opt in when debugging unit placement / arena
@@ -1068,6 +1076,9 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
       scene,
       unitInstances,
     )
+    // Re-apply the current toggle so a hidden-markers preference survives a
+    // map reload (which rebuilds the renderer).
+    slocRenderer?.setVisible(slocsVisible)
   } catch (e) {
     flog('[slocs] init failed:', e instanceof Error ? e.message : String(e))
   }
@@ -3898,6 +3909,13 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     },
     isPathingVisible() {
       return pathingVisible
+    },
+    setSlocsVisible(visible: boolean) {
+      slocsVisible = visible
+      slocRenderer?.setVisible(visible)
+    },
+    areSlocsVisible() {
+      return slocsVisible
     },
     setTerrainPickMode(active: boolean) {
       if (active === terrainPickMode) return
