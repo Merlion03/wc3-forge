@@ -47,6 +47,7 @@ import {
   buildSlocRenderer, type SlocRenderer, type SlocMarker,
 } from './sloc-markers'
 import { buildCellHighlight, type CellHighlight } from './cell-highlight'
+import { buildRegionOverlay, type RegionOverlay, type RegionRect } from './region-overlay'
 import { buildBrushCursor, type BrushCursor } from './brush-cursor'
 import { buildInstanceOutline, type InstanceOutline } from './instance-outline'
 import { buildBoundsDebug, type BoundsDebug } from './bounds-debug'
@@ -712,6 +713,18 @@ export interface SceneAPI {
    */
   setHighlightedCell(cell: { col: number; row: number } | null): void
   /**
+   * Replace the region-rectangle overlay's region list (war3map.w3r). Each
+   * rect is drawn as a flat outline on the ground plane. Pass [] to clear.
+   * App.svelte mirrors the Region panel's list here and re-pushes after any
+   * region create/move/resize/delete so the overlay tracks edits live.
+   */
+  setRegionOverlay(regions: RegionRect[]): void
+  /**
+   * Highlight the region with this creation_number in the overlay (bright cyan),
+   * or null to clear the highlight. Mirrors the panel's selected region.
+   */
+  setSelectedRegion(creationNumber: number | null): void
+  /**
    * Hide or show every doodad instance in a category. Pass "*" to affect
    * every doodad. Visibility is rendering-only — the underlying data is
    * unchanged, never persisted. Re-applied on every loadMap so hidden
@@ -1079,6 +1092,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     cellHighlight = buildCellHighlight((viewer as any).gl as WebGLRenderingContext)
   } catch (e) {
     flog('[cell-highlight] init failed:', e instanceof Error ? e.message : String(e))
+  }
+  // Region (rect) outlines (war3map.w3r). Built once per scene; the region
+  // list + selected id are pushed in via setRegionOverlay / setSelectedRegion
+  // (App.svelte mirrors them from the Region panel + entity-changed events).
+  // Same overlay lifetime as cellHighlight; non-fatal if build fails.
+  let regionOverlay: RegionOverlay | null = null
+  try {
+    regionOverlay = buildRegionOverlay((viewer as any).gl as WebGLRenderingContext)
+  } catch (e) {
+    flog('[region-overlay] init failed:', e instanceof Error ? e.message : String(e))
   }
   // Terrain-brush footprint ring (shown under the cursor while the Terrain
   // Palette is armed). Same overlay lifetime as cellHighlight; non-fatal build.
@@ -1468,6 +1491,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // Drawn LAST before the gizmo so the wireframe sits visually on top
         // of every other layer including water.
         if (cellHighlight) cellHighlight.draw(scene.camera.viewProjectionMatrix)
+        if (regionOverlay) regionOverlay.draw(scene.camera.viewProjectionMatrix)
         // Terrain-brush footprint ring (only visible while the palette is armed
         // and the cursor is over the map). Same always-on-top overlay tier.
         if (brushCursor) brushCursor.draw(scene.camera.viewProjectionMatrix)
@@ -3647,6 +3671,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         cellHighlight.dispose()
         cellHighlight = null
       }
+      if (regionOverlay) {
+        regionOverlay.dispose()
+        regionOverlay = null
+      }
       if (brushCursor) {
         brushCursor.dispose()
         brushCursor = null
@@ -3981,6 +4009,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     },
     setHighlightedCell(cell: { col: number; row: number } | null) {
       cellHighlight?.setCell(cell)
+    },
+    setRegionOverlay(regions: RegionRect[]) {
+      regionOverlay?.setRegions(regions)
+    },
+    setSelectedRegion(creationNumber: number | null) {
+      regionOverlay?.setSelected(creationNumber)
     },
     setDoodadCategoryVisible(category: string, visible: boolean) {
       // "*" affects every category. Walk the per-instance category map and

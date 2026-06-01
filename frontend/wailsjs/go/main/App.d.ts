@@ -65,11 +65,15 @@ export function CreateDoodad(arg1:string,arg2:number,arg3:number,arg4:number,arg
 
 export function CreateNewMap(arg1:main.NewMapParams):Promise<main.MapStatus>;
 
+export function CreateRegion(arg1:string,arg2:number,arg3:number,arg4:number,arg5:number,arg6:string,arg7:string,arg8:Array<number>):Promise<number>;
+
 export function DeleteCustomObject(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteCustomUnit(arg1:string):Promise<void>;
 
 export function DeleteDoodad(arg1:number):Promise<void>;
+
+export function DeleteRegion(arg1:number):Promise<void>;
 
 export function DeleteSelection():Promise<number>;
 
@@ -115,6 +119,8 @@ export function GetPathingMap():Promise<main.PathingMapDTO>;
 
 export function GetReforgedMode():Promise<boolean>;
 
+export function GetRegion(arg1:number):Promise<forge.RegionInfo>;
+
 export function GetSelection():Promise<main.SelectionDTO>;
 
 export function GetTerrain():Promise<main.TerrainDTO>;
@@ -153,6 +159,8 @@ export function ListImportedLoadingScreens():Promise<Array<string>>;
 
 export function ListObjects(arg1:string):Promise<Array<main.UnitObjectListEntity>>;
 
+export function ListRegions():Promise<Array<forge.RegionInfo>>;
+
 export function ListSkyModels():Promise<Array<main.SkyModelOption>>;
 
 export function ListSoundEnvironments():Promise<Array<main.LabeledOption>>;
@@ -185,6 +193,8 @@ export function MapInfoGet():Promise<w3i.Info>;
 
 export function MoveDoodad(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
+export function MoveRegion(arg1:number,arg2:number,arg3:number):Promise<void>;
+
 export function MoveTriggerECA(arg1:number,arg2:Array<number>,arg3:number):Promise<main.TriggerMutationResultDTO>;
 
 export function MoveTriggerNode(arg1:number,arg2:number):Promise<main.TriggerMutationResultDTO>;
@@ -207,9 +217,13 @@ export function PaintTerrainTile(arg1:number,arg2:number,arg3:number,arg4:string
 
 export function Redo():Promise<void>;
 
+export function RenameRegion(arg1:number,arg2:string):Promise<void>;
+
 export function RenameTriggerNode(arg1:number,arg2:string):Promise<main.TriggerMutationResultDTO>;
 
 export function ReportDiagnostics(arg1:string):Promise<void>;
+
+export function ResizeRegion(arg1:number,arg2:number,arg3:number,arg4:number,arg5:number):Promise<void>;
 
 export function RotateDoodad(arg1:number,arg2:number):Promise<void>;
 

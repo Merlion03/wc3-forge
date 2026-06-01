@@ -1224,6 +1224,194 @@
     "method": "objects.upgrades.set_field"
   },
   {
+    "name": "regions_create",
+    "description": "Create a new region (rect) in war3map.w3r. min/max are WC3 world units (origin = map center); corners may be given in any order (they're normalized). Allocates a war3map.w3r table if the map shipped none. Returns { creation_number }. Undo-aware.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "region name (becomes the gg_rct_<name> codegen handle)"
+        },
+        "min_x": {
+          "type": "number",
+          "description": "min world X (left)"
+        },
+        "min_y": {
+          "type": "number",
+          "description": "min world Y (bottom)"
+        },
+        "max_x": {
+          "type": "number",
+          "description": "max world X (right)"
+        },
+        "max_y": {
+          "type": "number",
+          "description": "max world Y (top)"
+        },
+        "weather_id": {
+          "type": "string",
+          "description": "4-char weather FourCC, e.g. 'RAhr'; omit/empty for none"
+        },
+        "ambient_id": {
+          "type": "string",
+          "description": "ambient sound label; omit/empty for none"
+        },
+        "color": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "[r,g,b] 0..255 overlay/preview color; default opaque white"
+        }
+      },
+      "required": [
+        "name",
+        "min_x",
+        "min_y",
+        "max_x",
+        "max_y"
+      ],
+      "additionalProperties": false
+    },
+    "method": "regions.create"
+  },
+  {
+    "name": "regions_delete",
+    "description": "Delete a region by creation_number. Returns { ok: true }. Undo-aware.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "creation_number": {
+          "type": "integer",
+          "description": "creation_number from regions_list"
+        }
+      },
+      "required": [
+        "creation_number"
+      ],
+      "additionalProperties": false
+    },
+    "method": "regions.delete"
+  },
+  {
+    "name": "regions_get",
+    "description": "Get one region by creation_number. Returns the full RegionInfo (name, bounds, weather_id, ambient_id, color, gg_ref).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "creation_number": {
+          "type": "integer",
+          "description": "creation_number from regions_list"
+        }
+      },
+      "required": [
+        "creation_number"
+      ],
+      "additionalProperties": false
+    },
+    "method": "regions.get"
+  },
+  {
+    "name": "regions_list",
+    "description": "List the map's regions (war3map.w3r) with full detail: name, creation_number, bounds (min_x/min_y/max_x/max_y in world units), weather_id, ambient_id, color [r,g,b], and gg_rct_* codegen handle. Returns { regions: [...] }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "method": "regions.list"
+  },
+  {
+    "name": "regions_move",
+    "description": "Translate a region by (dx, dy) world units, preserving its size. Returns { ok: true }. Undo-aware. Zero delta is a no-op.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "creation_number": {
+          "type": "integer",
+          "description": "creation_number from regions_list"
+        },
+        "dx": {
+          "type": "number",
+          "description": "world-X delta"
+        },
+        "dy": {
+          "type": "number",
+          "description": "world-Y delta"
+        }
+      },
+      "required": [
+        "creation_number",
+        "dx",
+        "dy"
+      ],
+      "additionalProperties": false
+    },
+    "method": "regions.move"
+  },
+  {
+    "name": "regions_rename",
+    "description": "Rename a region (changes its gg_rct_<name> codegen handle). Returns { ok: true }. Undo-aware.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "creation_number": {
+          "type": "integer",
+          "description": "creation_number from regions_list"
+        },
+        "name": {
+          "type": "string",
+          "description": "new region name"
+        }
+      },
+      "required": [
+        "creation_number",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "method": "regions.rename"
+  },
+  {
+    "name": "regions_resize",
+    "description": "Set a region's absolute bounds (WC3 world units; corners normalized so min<=max). Returns { ok: true }. Undo-aware.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "creation_number": {
+          "type": "integer",
+          "description": "creation_number from regions_list"
+        },
+        "min_x": {
+          "type": "number",
+          "description": "min world X (left)"
+        },
+        "min_y": {
+          "type": "number",
+          "description": "min world Y (bottom)"
+        },
+        "max_x": {
+          "type": "number",
+          "description": "max world X (right)"
+        },
+        "max_y": {
+          "type": "number",
+          "description": "max world Y (top)"
+        }
+      },
+      "required": [
+        "creation_number",
+        "min_x",
+        "min_y",
+        "max_x",
+        "max_y"
+      ],
+      "additionalProperties": false
+    },
+    "method": "regions.resize"
+  },
+  {
     "name": "selection_clear",
     "description": "Clear the current selection.",
     "inputSchema": {

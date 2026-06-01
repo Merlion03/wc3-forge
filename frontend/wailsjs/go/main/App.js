@@ -118,6 +118,10 @@ export function CreateNewMap(arg1) {
   return window['go']['main']['App']['CreateNewMap'](arg1);
 }
 
+export function CreateRegion(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
+  return window['go']['main']['App']['CreateRegion'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
+}
+
 export function DeleteCustomObject(arg1, arg2) {
   return window['go']['main']['App']['DeleteCustomObject'](arg1, arg2);
 }
@@ -128,6 +132,10 @@ export function DeleteCustomUnit(arg1) {
 
 export function DeleteDoodad(arg1) {
   return window['go']['main']['App']['DeleteDoodad'](arg1);
+}
+
+export function DeleteRegion(arg1) {
+  return window['go']['main']['App']['DeleteRegion'](arg1);
 }
 
 export function DeleteSelection() {
@@ -218,6 +226,10 @@ export function GetReforgedMode() {
   return window['go']['main']['App']['GetReforgedMode']();
 }
 
+export function GetRegion(arg1) {
+  return window['go']['main']['App']['GetRegion'](arg1);
+}
+
 export function GetSelection() {
   return window['go']['main']['App']['GetSelection']();
 }
@@ -294,6 +306,10 @@ export function ListObjects(arg1) {
   return window['go']['main']['App']['ListObjects'](arg1);
 }
 
+export function ListRegions() {
+  return window['go']['main']['App']['ListRegions']();
+}
+
 export function ListSkyModels() {
   return window['go']['main']['App']['ListSkyModels']();
 }
@@ -358,6 +374,10 @@ export function MoveDoodad(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['MoveDoodad'](arg1, arg2, arg3, arg4);
 }
 
+export function MoveRegion(arg1, arg2, arg3) {
+  return window['go']['main']['App']['MoveRegion'](arg1, arg2, arg3);
+}
+
 export function MoveTriggerECA(arg1, arg2, arg3) {
   return window['go']['main']['App']['MoveTriggerECA'](arg1, arg2, arg3);
 }
@@ -402,12 +422,20 @@ export function Redo() {
   return window['go']['main']['App']['Redo']();
 }
 
+export function RenameRegion(arg1, arg2) {
+  return window['go']['main']['App']['RenameRegion'](arg1, arg2);
+}
+
 export function RenameTriggerNode(arg1, arg2) {
   return window['go']['main']['App']['RenameTriggerNode'](arg1, arg2);
 }
 
 export function ReportDiagnostics(arg1) {
   return window['go']['main']['App']['ReportDiagnostics'](arg1);
+}
+
+export function ResizeRegion(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['ResizeRegion'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function RotateDoodad(arg1, arg2) {

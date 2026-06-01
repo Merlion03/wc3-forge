@@ -971,6 +971,80 @@ function registerContractTools(server: McpServer): void {
     { creation_number: z.number().int().describe("creation_number from doodads_list") },
     wrap("doodads.delete")
   );
+  // --- Region (rect) Editor (war3map.w3r) --------------------------------
+  // Regions are the foundational authoring primitive for playable maps (spawn
+  // zones, "unit enters region" events, waygate destinations, cinematic
+  // bounds). min/max are WC3 world units (origin = map center), the same
+  // convention as units_move. All mutators are undo-aware and emit the standard
+  // change events. regions_list/get are the richer read accessors (vs the
+  // trigger-picker triggers_list_regions, which is just name + gg_ref).
+  server.tool(
+    "regions_list",
+    "List the map's regions (war3map.w3r) with full detail: name, creation_number, bounds (min_x/min_y/max_x/max_y in world units), weather_id, ambient_id, color [r,g,b], and gg_rct_* codegen handle. Returns { regions: [...] }.",
+    {},
+    wrap("regions.list")
+  );
+  server.tool(
+    "regions_get",
+    "Get one region by creation_number. Returns the full RegionInfo (name, bounds, weather_id, ambient_id, color, gg_ref).",
+    { creation_number: z.number().int().describe("creation_number from regions_list") },
+    wrap("regions.get")
+  );
+  server.tool(
+    "regions_create",
+    "Create a new region (rect) in war3map.w3r. min/max are WC3 world units (origin = map center); corners may be given in any order (they're normalized). Allocates a war3map.w3r table if the map shipped none. Returns { creation_number }. Undo-aware.",
+    {
+      name: z.string().describe("region name (becomes the gg_rct_<name> codegen handle)"),
+      min_x: z.number().describe("min world X (left)"),
+      min_y: z.number().describe("min world Y (bottom)"),
+      max_x: z.number().describe("max world X (right)"),
+      max_y: z.number().describe("max world Y (top)"),
+      weather_id: z.string().optional().describe("4-char weather FourCC, e.g. 'RAhr'; omit/empty for none"),
+      ambient_id: z.string().optional().describe("ambient sound label; omit/empty for none"),
+      color: z
+        .array(z.number().int())
+        .optional()
+        .describe("[r,g,b] 0..255 overlay/preview color; default opaque white"),
+    },
+    wrap("regions.create")
+  );
+  server.tool(
+    "regions_move",
+    "Translate a region by (dx, dy) world units, preserving its size. Returns { ok: true }. Undo-aware. Zero delta is a no-op.",
+    {
+      creation_number: z.number().int().describe("creation_number from regions_list"),
+      dx: z.number().describe("world-X delta"),
+      dy: z.number().describe("world-Y delta"),
+    },
+    wrap("regions.move")
+  );
+  server.tool(
+    "regions_resize",
+    "Set a region's absolute bounds (WC3 world units; corners normalized so min<=max). Returns { ok: true }. Undo-aware.",
+    {
+      creation_number: z.number().int().describe("creation_number from regions_list"),
+      min_x: z.number().describe("min world X (left)"),
+      min_y: z.number().describe("min world Y (bottom)"),
+      max_x: z.number().describe("max world X (right)"),
+      max_y: z.number().describe("max world Y (top)"),
+    },
+    wrap("regions.resize")
+  );
+  server.tool(
+    "regions_rename",
+    "Rename a region (changes its gg_rct_<name> codegen handle). Returns { ok: true }. Undo-aware.",
+    {
+      creation_number: z.number().int().describe("creation_number from regions_list"),
+      name: z.string().describe("new region name"),
+    },
+    wrap("regions.rename")
+  );
+  server.tool(
+    "regions_delete",
+    "Delete a region by creation_number. Returns { ok: true }. Undo-aware.",
+    { creation_number: z.number().int().describe("creation_number from regions_list") },
+    wrap("regions.delete")
+  );
   server.tool(
     "terrain_set_tile",
     "Set the ground texture (tile) at a terrain corner. col/row are 0-based corner grid indices. ground_tile_id is a 4-char FourCC that must be in the map's ground tile palette. Returns { ok: true }. Undo-aware.",

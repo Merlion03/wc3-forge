@@ -9,6 +9,7 @@
     GetUnitTypeIndex, GetDoodadTypeIndex,
     NewMapDialog as NewMapSaveDialog, CreateNewMap, WriteNewMap, ReportDiagnostics,
     MoveUnit, MoveDoodad, CreateDoodad, DeleteSelection, IsDirty, SaveMap,
+    ListRegions, CreateRegion,
     PaintTerrainTile, BrushTerrainHeight, BrushTerrainCliff, BrushTerrainRamp, BrushTerrainWater, WaterAddHeightAt, GetTerrainTile,
     BeginUndoGroup, EndUndoGroup,
     LaunchInWC3,
@@ -24,6 +25,7 @@
     createScene,
     type SceneAPI, type PickHit, type SelectMode, type TerrainCellInfo,
   } from './scene-instances'
+  import type { RegionRect } from './region-overlay'
   import Splitter from './Splitter.svelte'
   import Accordion from './Accordion.svelte'
   import ViewMenu from './ViewMenu.svelte'
@@ -41,6 +43,7 @@
   import Minimap from './Minimap.svelte'
   import DoodadPalette from './DoodadPalette.svelte'
   import TerrainPalette, { type TerrainBrush } from './TerrainPalette.svelte'
+  import RegionPanel from './RegionPanel.svelte'
   import UpdateDialog from './UpdateDialog.svelte'
   import CameraOrbitGizmo from './CameraOrbitGizmo.svelte'
   import DiagnosticsOverlay from './DiagnosticsOverlay.svelte'
@@ -118,6 +121,18 @@
   // null = nothing armed. Owned here; mirrored to the scene via
   // scene.setPlacementMode and read by the palette to highlight the armed icon.
   let armedDoodadType: string | null = $state(null)
+
+  // Region (rect) Editor state. The RegionPanel owns its own list UI + the
+  // numeric editors (it calls the Wails region bindings directly); App owns the
+  // viewport-facing pieces: the rect-draw tool (armed flag + two-corner capture)
+  // and the scene overlay sync. selectedRegionCN drives the overlay highlight;
+  // regionRefreshToken is bumped to tell the panel + overlay to re-fetch after
+  // an out-of-panel change (rect-draw create, MCP edit, undo/redo). regionRectA
+  // holds the first corner while a rect-draw is mid-capture (null = idle).
+  let regionRectDrawArmed: boolean = $state(false)
+  let selectedRegionCN: number | null = $state(null)
+  let regionRefreshToken: number = $state(0)
+  let regionRectA: { x: number; y: number } | null = null
 
   // Terrain-brush state. The Terrain Palette reports the armed brush here; we
   // mirror its size/shape to the scene's footprint cursor and put the scene in
@@ -846,6 +861,10 @@
       mapLoadGen += 1
       if (status.loaded) {
         await reloadMap()
+        // Push the loaded map's regions into the viewport overlay + refresh the
+        // panel (a new map may have a different region set).
+        await syncRegionOverlay()
+        regionRefreshToken++
       } else {
         units = []
         doodads = []
@@ -862,6 +881,13 @@
         // sit in placement mode with the palette (now unmounted) gone.
         armedDoodadType = null
         scene?.setPlacementMode(false)
+        // Map closed — clear the region overlay + disarm rect-draw.
+        regionRectDrawArmed = false
+        regionRectA = null
+        selectedRegionCN = null
+        scene?.setRegionOverlay([])
+        scene?.setSelectedRegion(null)
+        regionRefreshToken++
       }
     })
     EventsOn(DEV_ANIM_EVENT, (payload: { creation_number: number; anim_name: string }) => {
@@ -909,6 +935,15 @@
     EventsOn(ENTITY_EVENT, async (payload: { kind: string; id: number; field: string; position: number[] }) => {
       bumpEvent(ENTITY_EVENT)
       if (!payload) return
+      if (payload.kind === 'region') {
+        // Any region create/move/resize/rename/delete (from the panel, MCP, or
+        // undo/redo) — re-push the overlay rects and tell the RegionPanel to
+        // re-fetch its list. Cheap (one ListRegions call + a tiny buffer upload),
+        // so no throttle needed; region counts are small.
+        await syncRegionOverlay()
+        regionRefreshToken++
+        return
+      }
       if (payload.kind === 'terrain') {
         // Only a TILESET SWAP (field "tileset": initial Apply, Undo, or Redo)
         // needs a full map reload — the palette changed, so the atlas + minimap
@@ -1518,6 +1553,59 @@
     scene?.setPlacementGhost(typeId, doodadTypes as unknown as Record<string, any>)
   }
 
+  // ── Region (rect) Editor wiring ──────────────────────────────────────────
+  // The RegionPanel owns the list + numeric editors (direct Wails calls); App
+  // owns the overlay sync + the viewport rect-draw tool. syncRegionOverlay
+  // fetches the current regions and pushes them into the scene overlay; called
+  // on map load, after any panel edit (via onRegionsChanged), and on
+  // region entity-changed events from MCP/undo. Never writes the same $state it
+  // reads — it only mutates the scene + bumps the refresh token.
+  async function syncRegionOverlay() {
+    if (!scene) return
+    try {
+      const list = await ListRegions()
+      const rects: RegionRect[] = (list ?? []).map((r) => ({
+        creationNumber: r.creation_number,
+        minX: r.min_x, minY: r.min_y, maxX: r.max_x, maxY: r.max_y,
+        color: [r.color[0], r.color[1], r.color[2]] as [number, number, number],
+      }))
+      scene.setRegionOverlay(rects)
+      // Drop the highlight if the selected region no longer exists.
+      if (selectedRegionCN !== null && !rects.some((x) => x.creationNumber === selectedRegionCN)) {
+        selectedRegionCN = null
+      }
+      scene.setSelectedRegion(selectedRegionCN)
+    } catch (e) {
+      flogError('[regions] overlay sync failed:', e)
+    }
+  }
+
+  // Arm/disarm the viewport rect-draw tool. Reuses the scene's placement-mode
+  // machinery for a two-click rectangle: first map click = corner A, second =
+  // corner B → CreateRegion. Rect-draw and doodad placement are mutually
+  // exclusive (both ride placement mode), so arming one disarms the other.
+  function armRegionRectDraw(armed: boolean) {
+    if (armed && !status.loaded) {
+      showToast('Open a map before drawing regions', 'error')
+      return
+    }
+    regionRectDrawArmed = armed
+    regionRectA = null
+    if (armed) {
+      armDoodad(null)            // doodad + region rect-draw are exclusive
+      onTerrainBrushChange(null) // and exclusive with the terrain brush
+      scene?.setPlacementGhost(null, {})
+      scene?.setPlacementMode(true)
+    } else {
+      scene?.setPlacementMode(false)
+    }
+  }
+
+  function onSelectRegion(cn: number | null) {
+    selectedRegionCN = cn
+    scene?.setSelectedRegion(cn)
+  }
+
   // Terrain Palette → scene wiring. The palette (shown only in Terrain Mode)
   // reports the armed brush (tool + size/shape/strength + selected tiles) or
   // null to disarm. We mirror the footprint to the scene's cursor and toggle
@@ -1636,6 +1724,32 @@
   // then add the rendered instance live and reflect it in our doodads array —
   // no full map reload. A null hit means the user cancelled (Escape): disarm.
   async function handlePlacementPick(hit: { worldX: number; worldY: number; z: number } | null) {
+    // Region rect-draw rides placement mode: two clicks define the rectangle.
+    // Takes priority over doodad placement (the two are armed mutually
+    // exclusively, but guard explicitly).
+    if (regionRectDrawArmed) {
+      if (!hit) { armRegionRectDraw(false); return } // Escape / off-map cancel
+      if (!regionRectA) {
+        regionRectA = { x: hit.worldX, y: hit.worldY }
+        showToast('Click the opposite corner to finish the region.', 'info')
+        return
+      }
+      const a = regionRectA
+      regionRectA = null
+      try {
+        const name = `Region ${Date.now() % 100000}`
+        const cn = await CreateRegion(name, a.x, a.y, hit.worldX, hit.worldY, '', '', [255, 255, 255])
+        await syncRegionOverlay()
+        onSelectRegion(cn)
+        regionRefreshToken++
+        dirty = true
+      } catch (e) {
+        showToast('Create region failed: ' + String(e), 'error')
+      }
+      // Stay armed so the user can draw several regions in a row (Escape or the
+      // Draw toggle disarms).
+      return
+    }
     if (!hit) { armDoodad(null); return }
     const typeId = armedDoodadType
     if (!typeId) return
@@ -2556,6 +2670,21 @@
            the scene's brush mode + the Go brush calls. -->
       {#if status.loaded && terrainPickModeOn}
         <TerrainPalette loaded={status.loaded} onChange={onTerrainBrushChange} />
+      {/if}
+      <!-- Region (rect) panel: floating launcher (bottom-left, stacks beside
+           the doodad/terrain FABs). Available in any mode — regions are not a
+           terrain/doodad sub-mode. Owns its list + numeric editors (direct Wails
+           calls); App owns the overlay sync + the rect-draw viewport tool. -->
+      {#if status.loaded}
+        <RegionPanel
+          loaded={status.loaded}
+          rectDrawArmed={regionRectDrawArmed}
+          selectedCN={selectedRegionCN}
+          refreshToken={regionRefreshToken}
+          onArmRectDraw={armRegionRectDraw}
+          onSelectRegion={onSelectRegion}
+          onRegionsChanged={() => { void syncRegionOverlay(); regionRefreshToken++ }}
+        />
       {/if}
     </section>
 

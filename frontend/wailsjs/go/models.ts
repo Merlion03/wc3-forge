@@ -133,6 +133,36 @@ export namespace forge {
 		    return a;
 		}
 	}
+	export class RegionInfo {
+	    name: string;
+	    creation_number: number;
+	    min_x: number;
+	    min_y: number;
+	    max_x: number;
+	    max_y: number;
+	    weather_id: string;
+	    ambient_id: string;
+	    color: number[];
+	    gg_ref: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RegionInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.creation_number = source["creation_number"];
+	        this.min_x = source["min_x"];
+	        this.min_y = source["min_y"];
+	        this.max_x = source["max_x"];
+	        this.max_y = source["max_y"];
+	        this.weather_id = source["weather_id"];
+	        this.ambient_id = source["ambient_id"];
+	        this.color = source["color"];
+	        this.gg_ref = source["gg_ref"];
+	    }
+	}
 	export class TerrainTileInfo {
 	    col: number;
 	    row: number;

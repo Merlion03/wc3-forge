@@ -81,6 +81,19 @@ func RegisterAll(b *bridge.Bridge) {
 	reg("units.delete", handleUnitsDelete)
 	reg("doodads.create", handleDoodadsCreate)
 	reg("doodads.delete", handleDoodadsDelete)
+	// Region (rect) Editor — create/move/resize/rename/delete the war3map.w3r
+	// regions table (spawn zones, "unit enters region", waygate dests, cinematic
+	// bounds). Undo-aware; emit entity-changed with Kind="region". list/get are
+	// the read-only accessors (richer than triggers.list_regions — they carry
+	// weather/ambient/color). Handlers in handlers_regions.go; mutators in
+	// regions_mutate.go.
+	reg("regions.list", handleRegionsList)
+	reg("regions.get", handleRegionsGet)
+	reg("regions.create", handleRegionsCreate)
+	reg("regions.move", handleRegionsMove)
+	reg("regions.resize", handleRegionsResize)
+	reg("regions.rename", handleRegionsRename)
+	reg("regions.delete", handleRegionsDelete)
 	reg("map.save", handleMapSave)
 	reg("selection.get", handleSelectionGet)
 	// selection.set honors an optional client `primary` (index or kind:id);

@@ -345,7 +345,13 @@ type Session struct {
 	// buffered/durable per the source); this flag only gates the war3map.imp
 	// re-encode in Save and the public dirty event. Reset on Open/Close/Save
 	// like every other dirty flag.
-	dirtyImports   bool
+	dirtyImports bool
+	// dirtyRegions tracks pending edits to the loaded map's war3map.w3r regions
+	// table (the Region Editor's create/move/resize/delete/rename surface). Save
+	// re-encodes the whole table via w3r.Encode when set. Reset on
+	// Open/Close/Save like every other dirty flag. Independent of every other
+	// file on disk + the dirty bus.
+	dirtyRegions   bool
 	dirtyListeners []func(bool)
 
 	// Sky-model override: set by the Map Info → Sky picker (or any caller
@@ -728,6 +734,7 @@ func (s *Session) Open(path string) error {
 	s.dirtyUpgradeMods = false
 	s.dirtyTriggers = false
 	s.dirtyImports = false
+	s.dirtyRegions = false
 	// Reset history — previous map's undo stack must not leak across opens
 	// (creation_numbers would dangle and Revert would error). Mutating the
 	// slices directly under the existing write-lock; ClearHistory's own lock
@@ -876,6 +883,7 @@ func (s *Session) Close() {
 	s.dirtyUpgradeMods = false
 	s.dirtyTriggers = false
 	s.dirtyImports = false
+	s.dirtyRegions = false
 	hadHistory := len(s.history) > 0 || len(s.redoStack) > 0
 	s.history = nil
 	s.redoStack = nil
@@ -2207,7 +2215,8 @@ func (s *Session) anyDirtyLocked() bool {
 		s.dirtyGameplay || s.dirtyUnitMods || s.dirtyItemMods ||
 		s.dirtyAbilityMods || s.dirtyBuffMods || s.dirtyDestructibleMods ||
 		s.dirtyDoodadMods || s.dirtyUpgradeMods ||
-		s.dirtyTriggers || s.mapHeaderScriptDirty || s.dirtyImports
+		s.dirtyTriggers || s.mapHeaderScriptDirty || s.dirtyImports ||
+		s.dirtyRegions
 }
 
 // ---------------------------------------------------------------------------
@@ -2415,6 +2424,8 @@ func (s *Session) Save() (err error) {
 	mapHeaderScriptName := s.mapHeaderScriptName
 	saveImports := s.dirtyImports
 	impFile := s.imp
+	saveRegions := s.dirtyRegions
+	regionsFile := s.regions
 	s.mu.Unlock()
 
 	if src == nil {
@@ -2618,6 +2629,31 @@ func (s *Session) Save() (err error) {
 		noteWrite("war3map.imp", len(impData))
 		s.mu.Lock()
 		s.dirtyImports = false
+		s.mu.Unlock()
+	}
+	// war3map.w3r re-encode — the Region Editor's create/move/resize/delete/
+	// rename surface. Independent of every other file on disk + the dirty bus,
+	// so partial-write semantics match the rest of Save (the flag clears only
+	// after its own successful write). w3r.Encode is byte-faithful for an
+	// unmodified table, so a save that touched only OTHER files never reaches
+	// here (saveRegions stays false) and the on-disk w3r is left untouched.
+	if saveRegions {
+		if regionsFile == nil {
+			// Defensive: the region mutators always allocate s.regions before
+			// flipping the dirty flag, but never crash if a future path trips
+			// this. A version-5 empty table is a valid (and tiny) on-disk shape.
+			regionsFile = &w3r.File{Version: 5}
+		}
+		data, err := w3r.Encode(regionsFile)
+		if err != nil {
+			return fmt.Errorf("encode war3map.w3r: %w", err)
+		}
+		if err := src.write("war3map.w3r", data); err != nil {
+			return fmt.Errorf("write war3map.w3r: %w", err)
+		}
+		noteWrite("war3map.w3r", len(data))
+		s.mu.Lock()
+		s.dirtyRegions = false
 		s.mu.Unlock()
 	}
 	if pendingSky != nil {

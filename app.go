@@ -1492,6 +1492,63 @@ func (a *App) ScaleDoodad(creationNumber uint32, sx, sy, sz float32) error {
 }
 
 // ---------------------------------------------------------------------------
+// Region (rect) Editor bindings. The Region panel + the viewport rect-draw
+// tool call these; they 1:1 wrap the session mutators (which are undo-aware
+// and emit entity-changed Kind="region" + dirty events the existing startup
+// subscriptions already forward). min/max are WC3 world units (origin = map
+// center), the same convention as Move{Unit,Doodad}. See internal/forge/
+// regions_mutate.go + handlers_regions.go.
+// ---------------------------------------------------------------------------
+
+// ListRegions returns every region (war3map.w3r) as a RegionInfo for the
+// Region panel + the viewport overlay. Empty slice when no map / no regions.
+func (a *App) ListRegions() []forge.RegionInfo {
+	return forge.BuildRegionInfos()
+}
+
+// GetRegion returns one region by creation_number. Errors when no map is
+// loaded or no region matches (mirrors GetUnit/GetDoodad).
+func (a *App) GetRegion(creationNumber int32) (*forge.RegionInfo, error) {
+	info, ok := forge.FindRegionInfo(creationNumber)
+	if !ok {
+		return nil, fmt.Errorf("no region with creation_number %d", creationNumber)
+	}
+	return &info, nil
+}
+
+// CreateRegion adds a new region with the given name + bounds. color is an
+// optional [r,g,b] (0..255); a nil/empty slice defaults to opaque white.
+// weatherID is an optional 4-byte FourCC (empty = none); ambientID is an
+// optional sound label. Returns the allocated creation_number.
+func (a *App) CreateRegion(name string, minX, minY, maxX, maxY float32, weatherID, ambientID string, color []int) (int32, error) {
+	c, err := forge.ParseRegionColor(color)
+	if err != nil {
+		return 0, err
+	}
+	return forge.Current.CreateRegion(name, minX, minY, maxX, maxY, weatherID, ambientID, c)
+}
+
+// MoveRegion translates the region by (dx, dy) world units, preserving size.
+func (a *App) MoveRegion(creationNumber int32, dx, dy float32) error {
+	return forge.Current.MoveRegion(creationNumber, dx, dy)
+}
+
+// ResizeRegion sets the region's absolute bounds (normalized so min<=max).
+func (a *App) ResizeRegion(creationNumber int32, minX, minY, maxX, maxY float32) error {
+	return forge.Current.ResizeRegion(creationNumber, minX, minY, maxX, maxY)
+}
+
+// RenameRegion sets the region's name (changes its gg_rct_<Name> handle).
+func (a *App) RenameRegion(creationNumber int32, name string) error {
+	return forge.Current.RenameRegion(creationNumber, name)
+}
+
+// DeleteRegion removes the region with the given creation_number.
+func (a *App) DeleteRegion(creationNumber int32) error {
+	return forge.Current.DeleteRegion(creationNumber)
+}
+
+// ---------------------------------------------------------------------------
 // Terrain brush bindings. The Terrain Palette panel calls these on click-drag
 // over the viewport; each is one "dab" (a brush footprint resolved Go-side from
 // center/radius/shape) recorded as one undo step. A whole stroke is wrapped in
