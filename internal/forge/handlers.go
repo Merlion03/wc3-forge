@@ -185,6 +185,22 @@ func RegisterAll(b *bridge.Bridge) {
 	// baked BLP textures and imports them into the loaded map. Single route
 	// (models.import); see handlers_models.go.
 	registerModelHandlers(reg)
+	// General Import Manager — list/add/remove/rename of ARBITRARY files in the
+	// loaded map's archive, registered in war3map.imp (custom icons, loading
+	// screens, sounds, replacement textures). Generalizes models.import to any
+	// bytes under any in-archive path. Handlers in handlers_imports.go; mutators
+	// in imports_mutate.go. NOT undoable (file-system ops, like models.import).
+	reg("imports.list", handleImportsList)
+	reg("imports.add", handleImportsAdd)
+	reg("imports.remove", handleImportsRemove)
+	reg("imports.rename", handleImportsRename)
+	// Three formerly GUI-only edits, now reachable from agents too (the project
+	// invariant: every edit on both surfaces). Each calls the EXISTING Session
+	// mutator — no duplicated logic. minimap.bake lives at the App/main layer
+	// (its bake fn needs top-level CASC-color helpers) — registered in app.go.
+	reg("gameplay_constants.get", handleGameplayConstantsGet)
+	reg("gameplay_constants.apply", handleGameplayConstantsApply)
+	reg("terrain.swap_tileset", handleTerrainSwapTileset)
 }
 
 // handleUISendCommand forwards a raw test-driver command string. Used by

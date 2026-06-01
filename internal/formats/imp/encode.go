@@ -57,6 +57,56 @@ func (f *File) Has(path string) bool {
 	return false
 }
 
+// Remove drops the entry matching path (case- and slash-insensitively),
+// reporting whether one was removed. A no-op (returns false) when path isn't
+// registered, so callers can treat removal idempotently. Mirrors Has's
+// comparison so a path added with either slash style is removable by either.
+func (f *File) Remove(path string) bool {
+	want := canonical(path)
+	for i, e := range f.Entries {
+		if canonical(e.Path) == want {
+			f.Entries = append(f.Entries[:i], f.Entries[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// Rename changes the registered path of an existing entry from oldPath to
+// newPath, preserving the entry's original flag byte (so renaming a stock-flag
+// import doesn't silently rewrite its path-kind). newPath is normalized
+// (forward slashes → backslashes) before storage. Returns whether the rename
+// occurred — false when oldPath isn't registered. If newPath already exists as
+// a separate entry it is removed first so the table never ends up with two
+// rows for the same canonical path.
+func (f *File) Rename(oldPath, newPath string) bool {
+	wantOld := canonical(oldPath)
+	norm := normalizePath(newPath)
+	wantNew := canonical(norm)
+	idx := -1
+	for i, e := range f.Entries {
+		if canonical(e.Path) == wantOld {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false
+	}
+	// Drop any pre-existing distinct entry at the new path so the rename can't
+	// create a duplicate (skip if it IS the entry we're renaming).
+	for i := len(f.Entries) - 1; i >= 0; i-- {
+		if i != idx && canonical(f.Entries[i].Path) == wantNew {
+			f.Entries = append(f.Entries[:i], f.Entries[i+1:]...)
+			if i < idx {
+				idx--
+			}
+		}
+	}
+	f.Entries[idx].Path = norm
+	return true
+}
+
 // normalizePath converts forward slashes to backslashes for on-disk storage,
 // matching the war3map.imp / WC3-archive convention. Casing is left intact so
 // the stored path keeps the caller's intended display form.

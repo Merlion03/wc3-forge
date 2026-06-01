@@ -133,6 +133,24 @@ export namespace forge {
 		    return a;
 		}
 	}
+	export class ImportEntry {
+	    path: string;
+	    flag: number;
+	    size: number;
+	    present: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ImportEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.flag = source["flag"];
+	        this.size = source["size"];
+	        this.present = source["present"];
+	    }
+	}
 	export class RegionInfo {
 	    name: string;
 	    creation_number: number;

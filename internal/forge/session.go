@@ -1992,20 +1992,9 @@ func (s *Session) ImportModel(req ImportModelReq) (ImportModelResult, error) {
 	// Lazily parse the existing war3map.imp once per session; start a fresh
 	// v1 table when the map ships none. Cached on s.imp so repeated imports
 	// don't re-read.
-	if s.imp == nil {
-		if data, ok, err := src.read("war3map.imp"); err != nil {
-			s.mu.Unlock()
-			return ImportModelResult{}, fmt.Errorf("read war3map.imp: %w", err)
-		} else if ok {
-			parsed, perr := imp.Parse(data)
-			if perr != nil {
-				s.mu.Unlock()
-				return ImportModelResult{}, fmt.Errorf("parse war3map.imp: %w", perr)
-			}
-			s.imp = parsed
-		} else {
-			s.imp = &imp.File{Version: 1}
-		}
+	if err := s.ensureImpLocked(src); err != nil {
+		s.mu.Unlock()
+		return ImportModelResult{}, err
 	}
 
 	// Write the MDX, then each texture. Register every written path in the

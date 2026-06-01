@@ -234,6 +234,56 @@
     "method": "doodads.scale"
   },
   {
+    "name": "gameplay_constants_apply",
+    "description": "Replace the loaded map's gameplay-constant overrides (war3mapMisc.txt) with the given FULL row set (snapshot replace, not a diff). Rows are written in order; an empty rows array clears all overrides. Returns { ok: true, rows_applied }. Marks the map dirty (Save to persist).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "section": {
+                "type": "string",
+                "description": "ini section (default 'Misc')"
+              },
+              "key": {
+                "type": "string",
+                "description": "constant key, e.g. 'DamageBonusNormal'"
+              },
+              "value": {
+                "type": "string",
+                "description": "raw value string (comma-separated for list-valued)"
+              }
+            },
+            "required": [
+              "key",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          "description": "full post-edit row set"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "additionalProperties": false
+    },
+    "method": "gameplay_constants.apply"
+  },
+  {
+    "name": "gameplay_constants_get",
+    "description": "Get the loaded map's per-map gameplay-constant overrides (war3mapMisc.txt). Returns { rows: [{ section, key, value }, ...] } — value is the raw stored string (comma-separated verbatim for list-valued constants like DamageBonusNormal). Empty rows for a map that ships no overrides.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "method": "gameplay_constants.get"
+  },
+  {
     "name": "history_begin_group",
     "description": "Start an undo transaction. Subsequent mutations until history_end_group land in one undo step. Nested begins increment depth — match each with an end.",
     "inputSchema": {
@@ -286,6 +336,79 @@
       "additionalProperties": false
     },
     "method": "history.undo"
+  },
+  {
+    "name": "imports_add",
+    "description": "Add (or overwrite) an arbitrary file in the loaded map's archive and register it in war3map.imp. Use for custom icons (BLP), loading screens, sounds, replacement textures at stock paths, etc. path is the in-archive destination (forward or back slashes accepted; e.g. 'war3mapImported\\BTNFoo.blp' or a stock path to override). data_base64 is the file's bytes base64-encoded ('' imports a zero-byte placeholder). Returns { path } (the normalized in-archive path). Re-adding the same path overwrites the bytes. Persists on save.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "in-archive destination path, e.g. 'war3mapImported\\\\BTNFoo.blp'"
+        },
+        "data_base64": {
+          "type": "string",
+          "description": "file bytes, base64-encoded (omit/empty for a zero-byte placeholder)"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "method": "imports.add"
+  },
+  {
+    "name": "imports_list",
+    "description": "List every file registered in the loaded map's war3map.imp import table. Returns { imports: [{ path, flag, size, present }, ...] } — path is the in-archive path (e.g. war3mapImported\\foo.blp), flag is the path-kind byte, size is the on-source byte length, present is false for an orphaned table entry whose backing file is missing.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "method": "imports.list"
+  },
+  {
+    "name": "imports_remove",
+    "description": "Remove an imported file from the loaded map's archive AND its war3map.imp entry. path is case- and slash-insensitive. Returns { ok: true }. Persists on save.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "in-archive path to remove (from imports_list)"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "method": "imports.remove"
+  },
+  {
+    "name": "imports_rename",
+    "description": "Rename/move an imported file from old_path to new_path in the archive + war3map.imp (preserving its flag byte). Returns { ok: true }. Errors if old_path isn't present. Persists on save.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "old_path": {
+          "type": "string",
+          "description": "current in-archive path (from imports_list)"
+        },
+        "new_path": {
+          "type": "string",
+          "description": "new in-archive path"
+        }
+      },
+      "required": [
+        "old_path",
+        "new_path"
+      ],
+      "additionalProperties": false
+    },
+    "method": "imports.rename"
   },
   {
     "name": "map_close",
@@ -363,6 +486,21 @@
       "additionalProperties": false
     },
     "method": "map.status"
+  },
+  {
+    "name": "minimap_bake",
+    "description": "Bake a minimap from the loaded map's terrain (one pixel per cell, colored by ground tile + water). Returns { ok, ext:'png', bytes_base64, width, height, png_path, persisted, blp_path? }. png_path is a temp PNG file the agent can OPEN to self-verify the result visually. Set persist=true to also write the baked image as war3mapMap.blp into the map (marks dirty; Save to persist on disk).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "persist": {
+          "type": "boolean",
+          "description": "also write war3mapMap.blp into the map (default false)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "method": "minimap.bake"
   },
   {
     "name": "models_import",
@@ -1917,6 +2055,56 @@
       "additionalProperties": false
     },
     "method": "terrain.set_tile"
+  },
+  {
+    "name": "terrain_swap_tileset",
+    "description": "Re-tile the loaded map: replace the ground/cliff palettes and remap every tilepoint via the from→to tables, updating the tileset letter in both .w3e and .w3i. Caller must pre-resolve the full remap (no auto-pick). *_from_to[oldSlot] = newSlot index into the corresponding new palette. Returns { ok: true }. Undo-aware. See terrain_get_tile to verify.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "new_letter": {
+          "type": "string",
+          "description": "single-char tileset code, e.g. 'L', 'A'"
+        },
+        "new_ground_tilesets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "ordered ground-tileset FourCCs (1..16 for v11, 1..64 for v12+)"
+        },
+        "new_cliff_tilesets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "ordered cliff-tileset FourCCs (0..16)"
+        },
+        "ground_from_to": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "len == old ground palette; value = index into new_ground_tilesets"
+        },
+        "cliff_from_to": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "len == old cliff palette; value = index into new_cliff_tilesets"
+        }
+      },
+      "required": [
+        "new_letter",
+        "new_ground_tilesets",
+        "new_cliff_tilesets",
+        "ground_from_to",
+        "cliff_from_to"
+      ],
+      "additionalProperties": false
+    },
+    "method": "terrain.swap_tileset"
   },
   {
     "name": "triggers_add_category",

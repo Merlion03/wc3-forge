@@ -10,6 +10,10 @@ export function AddGUITrigger(arg1, arg2) {
   return window['go']['main']['App']['AddGUITrigger'](arg1, arg2);
 }
 
+export function AddImportFile(arg1) {
+  return window['go']['main']['App']['AddImportFile'](arg1);
+}
+
 export function AddScriptTrigger(arg1, arg2) {
   return window['go']['main']['App']['AddScriptTrigger'](arg1, arg2);
 }
@@ -314,6 +318,10 @@ export function ListImportedLoadingScreens() {
   return window['go']['main']['App']['ListImportedLoadingScreens']();
 }
 
+export function ListImports() {
+  return window['go']['main']['App']['ListImports']();
+}
+
 export function ListObjects(arg1) {
   return window['go']['main']['App']['ListObjects'](arg1);
 }
@@ -440,6 +448,14 @@ export function PaintTerrainTile(arg1, arg2, arg3, arg4, arg5) {
 
 export function Redo() {
   return window['go']['main']['App']['Redo']();
+}
+
+export function RemoveImport(arg1) {
+  return window['go']['main']['App']['RemoveImport'](arg1);
+}
+
+export function RenameImport(arg1, arg2) {
+  return window['go']['main']['App']['RenameImport'](arg1, arg2);
 }
 
 export function RenameRegion(arg1, arg2) {

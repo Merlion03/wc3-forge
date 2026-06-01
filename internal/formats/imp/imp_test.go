@@ -147,6 +147,85 @@ func TestAddRoundTripsThroughParse(t *testing.T) {
 	}
 }
 
+// TestRemove covers removal: drops the matching entry (case/slash-insensitive),
+// reports whether one was removed, and is idempotent for an absent path. The
+// kept entries (and their flags) are preserved.
+func TestRemove(t *testing.T) {
+	f, err := Parse(loadFixture(t))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	before := len(f.Entries)
+
+	// Remove the bare Crystal.mdx via a different-case query.
+	if !f.Remove("CRYSTAL.MDX") {
+		t.Fatalf("Remove(CRYSTAL.MDX) = false, want true")
+	}
+	if got := len(f.Entries); got != before-1 {
+		t.Fatalf("after Remove, len(Entries) = %d, want %d", got, before-1)
+	}
+	if f.Has("Crystal.mdx") {
+		t.Errorf("Crystal.mdx still present after Remove")
+	}
+	// The 0x0D shadow entries are untouched.
+	if !f.Has("war3mapSkin.w3a") {
+		t.Errorf("Remove dropped an unrelated entry")
+	}
+
+	// Idempotent: removing an absent path is a no-op false.
+	if f.Remove("war3mapImported/notthere.mdx") {
+		t.Errorf("Remove(notthere) = true, want false")
+	}
+}
+
+// TestRename covers renaming: moves an entry's path, preserves its flag byte,
+// normalizes slashes on the new path, reports whether it occurred, and dedupes
+// when the new path already exists.
+func TestRename(t *testing.T) {
+	f := &File{Version: 1}
+	f.Entries = append(f.Entries, Entry{Flag: 0x1D, Path: "Crystal.mdx"})
+	f.Add("war3mapImported/cube.mdx")
+
+	// Rename Crystal.mdx (a 0x1D entry) to a new war3mapImported path with a
+	// forward slash to confirm normalization + flag preservation.
+	if !f.Rename("crystal.mdx", "war3mapImported/gem.mdx") {
+		t.Fatalf("Rename(crystal.mdx) = false, want true")
+	}
+	if f.Has("Crystal.mdx") {
+		t.Errorf("old path still present after Rename")
+	}
+	if !f.Has("war3mapImported\\gem.mdx") {
+		t.Errorf("new path missing after Rename")
+	}
+	for _, e := range f.Entries {
+		if canonical(e.Path) == canonical("war3mapImported/gem.mdx") {
+			if e.Flag != 0x1D {
+				t.Errorf("renamed entry flag = 0x%02X, want 0x1D (preserved)", e.Flag)
+			}
+		}
+	}
+
+	// Renaming an absent path is a no-op false.
+	if f.Rename("nope.mdx", "also-nope.mdx") {
+		t.Errorf("Rename(absent) = true, want false")
+	}
+
+	// Renaming onto an existing distinct path dedupes (no two rows for the
+	// same canonical path).
+	if !f.Rename("war3mapImported/gem.mdx", "war3mapImported/cube.mdx") {
+		t.Fatalf("Rename onto existing = false, want true")
+	}
+	count := 0
+	for _, e := range f.Entries {
+		if canonical(e.Path) == canonical("war3mapImported/cube.mdx") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("after dedup rename, cube.mdx rows = %d, want 1 (entries: %+v)", count, f.Entries)
+	}
+}
+
 // TestParseEmpty handles the common "no imports" table (version 1, count 0).
 func TestParseEmpty(t *testing.T) {
 	empty := []byte{0x01, 0, 0, 0, 0, 0, 0, 0}

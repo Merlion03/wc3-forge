@@ -13,7 +13,6 @@ import (
 
 	"github.com/StephenSHorton/wc3-forge/internal/forge"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/doodadsdoo"
-	"github.com/StephenSHorton/wc3-forge/internal/formats/miscdata"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/unitsdoo"
 	"github.com/StephenSHorton/wc3-forge/internal/formats/w3i"
 	"github.com/StephenSHorton/wc3-forge/internal/wc3path"
@@ -2303,28 +2302,16 @@ type GameplayConstantRow struct {
 // Returns an error only when no map is loaded; the dialog gates open on
 // IsLoaded() so this is a programmer-error path, not a normal flow.
 func (a *App) GameplayConstantsGet() ([]GameplayConstantRow, error) {
-	if !forge.Current.IsLoaded() {
-		return nil, fmt.Errorf("no map loaded")
+	// Delegate to the canonical Session accessor so the GUI and the
+	// gameplay_constants.get MCP handler return the exact same rows. The
+	// per-package row type is identical in shape; convert at the boundary.
+	rows, err := forge.Current.GetGameplayConstants()
+	if err != nil {
+		return nil, err
 	}
-	g := forge.Current.Gameplay()
-	if g == nil {
-		return []GameplayConstantRow{}, nil
-	}
-	out := make([]GameplayConstantRow, 0, 32)
-	for _, s := range g.Sections {
-		if s == nil {
-			continue
-		}
-		for _, e := range s.Entries {
-			if e == nil || e.Key == "" {
-				continue
-			}
-			out = append(out, GameplayConstantRow{
-				Section: s.Name,
-				Key:     e.Key,
-				Value:   e.Value,
-			})
-		}
+	out := make([]GameplayConstantRow, len(rows))
+	for i, r := range rows {
+		out[i] = GameplayConstantRow{Section: r.Section, Key: r.Key, Value: r.Value}
 	}
 	return out, nil
 }
@@ -2341,40 +2328,12 @@ func (a *App) GameplayConstantsGet() ([]GameplayConstantRow, error) {
 //
 // Returns the MutateGameplay error (e.g. no map loaded).
 func (a *App) GameplayConstantsApply(rows []GameplayConstantRow) error {
-	return forge.Current.MutateGameplay(func(f *miscdata.File) {
-		// Replace contents wholesale. Group rows by section, preserving
-		// first-seen order so the UI's order survives the round-trip.
-		f.Sections = f.Sections[:0]
-		sectionsByName := map[string]*miscdata.Section{}
-		var order []string
-		for _, r := range rows {
-			section := strings.TrimSpace(r.Section)
-			if section == "" {
-				section = "Misc"
-			}
-			key := strings.TrimSpace(r.Key)
-			if key == "" {
-				continue
-			}
-			s, ok := sectionsByName[section]
-			if !ok {
-				s = &miscdata.Section{Name: section}
-				sectionsByName[section] = s
-				order = append(order, section)
-			}
-			s.Entries = append(s.Entries, &miscdata.Entry{
-				Key:   key,
-				Value: r.Value,
-			})
-		}
-		for _, name := range order {
-			f.Sections = append(f.Sections, sectionsByName[name])
-		}
-		// Always guarantee a [Misc] section exists so a re-Get from the
-		// editor shows the canonical structure even when the user cleared
-		// every row.
-		if _, ok := sectionsByName["Misc"]; !ok {
-			f.Sections = append(f.Sections, &miscdata.Section{Name: "Misc"})
-		}
-	})
+	// Delegate to the canonical Session mutator so the GUI commit and the
+	// gameplay_constants.apply MCP handler share ONE implementation (section
+	// grouping, [Misc] guarantee, dirty-tracking). Convert at the boundary.
+	fr := make([]forge.GameplayConstantRow, len(rows))
+	for i, r := range rows {
+		fr[i] = forge.GameplayConstantRow{Section: r.Section, Key: r.Key, Value: r.Value}
+	}
+	return forge.Current.ApplyGameplayConstants(fr)
 }

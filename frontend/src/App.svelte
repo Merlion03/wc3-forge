@@ -39,6 +39,7 @@
   import SwapTilesetDialog from './SwapTilesetDialog.svelte'
   import ConvertToLuaDialog from './ConvertToLuaDialog.svelte'
   import ImportModelDialog from './ImportModelDialog.svelte'
+  import ImportManager from './ImportManager.svelte'
   import WC3InstallDialog from './WC3InstallDialog.svelte'
   import GameplayConstantsEditor from './GameplayConstantsEditor.svelte'
   import BridgeConsole from './BridgeConsole.svelte'
@@ -455,6 +456,26 @@
     showImportModel = false
   }
   async function onModelImported() {
+    if (status.loaded) await reloadMap({ keepCamera: true })
+  }
+
+  // ----- Import Manager modal -----
+  // General (any-file) Import Manager: list/add/remove/rename of the files
+  // registered in war3map.imp. Distinct from "Import 3D Model" (which converts
+  // a mesh); this manages arbitrary imports (icons, loading screens, sounds,
+  // textures). Add/remove/rename commit immediately via Wails App methods that
+  // share the forge.Session mutators with the imports.* MCP verbs. After a
+  // change we refresh assets (keepCamera) so the new/renamed/removed file
+  // resolves in the viewport + previews.
+  let showImportManager: boolean = $state(false)
+  function openImportManager() {
+    if (!status.loaded) return
+    showImportManager = true
+  }
+  function closeImportManager() {
+    showImportManager = false
+  }
+  async function onImportsChanged() {
     if (status.loaded) await reloadMap({ keepCamera: true })
   }
 
@@ -2799,6 +2820,13 @@
           <span class="flex-1">Import 3D Model…</span>
         </DropdownMenu.Item>
         <DropdownMenu.Item
+          onSelect={runMenuAction(openImportManager)}
+          disabled={!status.loaded}
+          title="Manage imported files (war3map.imp): add a custom icon, loading screen, sound, or texture; remove or rename an import."
+        >
+          <span class="flex-1">Import Manager…</span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Item
           onSelect={runMenuAction(openGameplayConstantsEditor)}
           disabled={!status.loaded}
           title="Edit per-map gameplay constants (war3mapMisc.txt)."
@@ -3575,6 +3603,14 @@
       {reforged}
       onClose={closeImportModel}
       onImported={onModelImported}
+    />
+  {/if}
+
+  {#if showImportManager}
+    <ImportManager
+      bind:open={showImportManager}
+      onClose={closeImportManager}
+      onChanged={onImportsChanged}
     />
   {/if}
 

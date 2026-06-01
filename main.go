@@ -104,6 +104,9 @@ func main() {
 	if !noBridge {
 		b = bridge.New()
 		forge.RegisterAll(b)
+		// minimap.bake lives at the App/main layer (its bake fn depends on
+		// top-level CASC-color helpers) — register it after the forge catalog.
+		registerMinimapBridge(b)
 		if err := b.Start(); err != nil {
 			log.Fatalf("bridge start failed: %v", err)
 		}

@@ -498,6 +498,50 @@ export function registerTools(server: McpServer): void {
     wrap("models.import")
   );
 
+  // --- general Import Manager --------------------------------------------
+  // list/add/remove/rename of ARBITRARY files in the loaded map's archive,
+  // registered in war3map.imp (custom icons, loading screens, sounds,
+  // replacement textures). Generalizes models_import (which is model-specific)
+  // to any bytes under any in-archive path. Persists across save/reopen. NOT
+  // undoable (file-system ops, like models_import).
+  server.tool(
+    "imports_list",
+    "List every file registered in the loaded map's war3map.imp import table. Returns { imports: [{ path, flag, size, present }, ...] } — path is the in-archive path (e.g. war3mapImported\\foo.blp), flag is the path-kind byte, size is the on-source byte length, present is false for an orphaned table entry whose backing file is missing.",
+    {},
+    wrap("imports.list")
+  );
+  server.tool(
+    "imports_add",
+    "Add (or overwrite) an arbitrary file in the loaded map's archive and register it in war3map.imp. Use for custom icons (BLP), loading screens, sounds, replacement textures at stock paths, etc. path is the in-archive destination (forward or back slashes accepted; e.g. 'war3mapImported\\BTNFoo.blp' or a stock path to override). data_base64 is the file's bytes base64-encoded ('' imports a zero-byte placeholder). Returns { path } (the normalized in-archive path). Re-adding the same path overwrites the bytes. Persists on save.",
+    {
+      path: z
+        .string()
+        .describe("in-archive destination path, e.g. 'war3mapImported\\\\BTNFoo.blp'"),
+      data_base64: z
+        .string()
+        .optional()
+        .describe("file bytes, base64-encoded (omit/empty for a zero-byte placeholder)"),
+    },
+    wrap("imports.add")
+  );
+  server.tool(
+    "imports_remove",
+    "Remove an imported file from the loaded map's archive AND its war3map.imp entry. path is case- and slash-insensitive. Returns { ok: true }. Persists on save.",
+    {
+      path: z.string().describe("in-archive path to remove (from imports_list)"),
+    },
+    wrap("imports.remove")
+  );
+  server.tool(
+    "imports_rename",
+    "Rename/move an imported file from old_path to new_path in the archive + war3map.imp (preserving its flag byte). Returns { ok: true }. Errors if old_path isn't present. Persists on save.",
+    {
+      old_path: z.string().describe("current in-archive path (from imports_list)"),
+      new_path: z.string().describe("new in-archive path"),
+    },
+    wrap("imports.rename")
+  );
+
   // --- triggers (Trigger Editor) -----------------------------------------
   registerTriggerTools(server);
 
@@ -1223,5 +1267,63 @@ function registerContractTools(server: McpServer): void {
       height: z.number().optional().describe("absolute water-surface height (game-Z studs), applied flat; omit to auto-place just above the ground"),
     },
     wrap("terrain.brush_water")
+  );
+
+  // --- formerly GUI-only edits, now on the agent surface too -------------
+  // gameplay constants, swap tileset, and minimap bake existed only in the GUI;
+  // these verbs call the SAME Session mutators the GUI does (the project
+  // invariant: every edit on both surfaces).
+  server.tool(
+    "gameplay_constants_get",
+    "Get the loaded map's per-map gameplay-constant overrides (war3mapMisc.txt). Returns { rows: [{ section, key, value }, ...] } — value is the raw stored string (comma-separated verbatim for list-valued constants like DamageBonusNormal). Empty rows for a map that ships no overrides.",
+    {},
+    wrap("gameplay_constants.get")
+  );
+  server.tool(
+    "gameplay_constants_apply",
+    "Replace the loaded map's gameplay-constant overrides (war3mapMisc.txt) with the given FULL row set (snapshot replace, not a diff). Rows are written in order; an empty rows array clears all overrides. Returns { ok: true, rows_applied }. Marks the map dirty (Save to persist).",
+    {
+      rows: z
+        .array(
+          z.object({
+            section: z.string().optional().describe("ini section (default 'Misc')"),
+            key: z.string().describe("constant key, e.g. 'DamageBonusNormal'"),
+            value: z.string().describe("raw value string (comma-separated for list-valued)"),
+          })
+        )
+        .describe("full post-edit row set"),
+    },
+    wrap("gameplay_constants.apply")
+  );
+  server.tool(
+    "terrain_swap_tileset",
+    "Re-tile the loaded map: replace the ground/cliff palettes and remap every tilepoint via the from→to tables, updating the tileset letter in both .w3e and .w3i. Caller must pre-resolve the full remap (no auto-pick). *_from_to[oldSlot] = newSlot index into the corresponding new palette. Returns { ok: true }. Undo-aware. See terrain_get_tile to verify.",
+    {
+      new_letter: z.string().describe("single-char tileset code, e.g. 'L', 'A'"),
+      new_ground_tilesets: z
+        .array(z.string())
+        .describe("ordered ground-tileset FourCCs (1..16 for v11, 1..64 for v12+)"),
+      new_cliff_tilesets: z
+        .array(z.string())
+        .describe("ordered cliff-tileset FourCCs (0..16)"),
+      ground_from_to: z
+        .array(z.number().int())
+        .describe("len == old ground palette; value = index into new_ground_tilesets"),
+      cliff_from_to: z
+        .array(z.number().int())
+        .describe("len == old cliff palette; value = index into new_cliff_tilesets"),
+    },
+    wrap("terrain.swap_tileset")
+  );
+  server.tool(
+    "minimap_bake",
+    "Bake a minimap from the loaded map's terrain (one pixel per cell, colored by ground tile + water). Returns { ok, ext:'png', bytes_base64, width, height, png_path, persisted, blp_path? }. png_path is a temp PNG file the agent can OPEN to self-verify the result visually. Set persist=true to also write the baked image as war3mapMap.blp into the map (marks dirty; Save to persist on disk).",
+    {
+      persist: z
+        .boolean()
+        .optional()
+        .describe("also write war3mapMap.blp into the map (default false)"),
+    },
+    wrap("minimap.bake")
   );
 }
