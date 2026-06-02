@@ -24,38 +24,42 @@
   import XIcon from '@lucide/svelte/icons/x'
   import PlusIcon from '@lucide/svelte/icons/plus'
   import Trash2Icon from '@lucide/svelte/icons/trash-2'
-  import SquareDashedIcon from '@lucide/svelte/icons/square-dashed'
+  import EyeIcon from '@lucide/svelte/icons/eye'
+  import EyeOffIcon from '@lucide/svelte/icons/eye-off'
 
   let {
     loaded = false,
-    rectDrawArmed = false,
     selectedCN = null,
     refreshToken = 0,
-    onArmRectDraw,
     onSelectRegion,
     onRegionsChanged,
+    overlayVisible = true,
+    onToggleOverlay,
   }: {
     // Whether a map is loaded — gates the launcher.
     loaded?: boolean
-    // Whether the viewport rect-draw tool is currently armed (owned by App).
-    rectDrawArmed?: boolean
     // The creation_number of the selected region (owned by App so the viewport
     // overlay + the panel stay in sync), or null.
     selectedCN?: number | null
     // Bumped by App whenever the region set changes outside the panel (e.g. a
-    // rect-draw create, an MCP edit, an undo/redo) so we re-fetch the list.
+    // viewport draw, an MCP edit, an undo/redo) so we re-fetch the list.
     refreshToken?: number
-    // Arm/disarm the viewport rect-draw tool (pass true to arm, false to cancel).
-    onArmRectDraw: (armed: boolean) => void
     // Report the selected region to App (drives the overlay highlight + lets
     // the viewport know which region is active). null clears.
     onSelectRegion: (cn: number | null) => void
     // Fired after any panel-driven create/resize/rename/delete so App can
     // re-push the overlay region list + refresh anything else.
     onRegionsChanged: () => void
+    // Whether the region-rectangle overlay is currently drawn in the viewport
+    // (owned + persisted by App). Drives the eye toggle's icon/state.
+    overlayVisible?: boolean
+    // Toggle the viewport overlay on/off (App persists the preference).
+    onToggleOverlay: () => void
   } = $props()
 
-  let open = $state(false)
+  // Default open: this panel only mounts while in Region mode, so showing it
+  // immediately (rather than behind the FAB) matches it being the mode's panel.
+  let open = $state(true)
   let regions: forge.RegionInfo[] = $state([])
   let busy = $state(false)
 
@@ -131,11 +135,6 @@
 
   function toggleOpen() {
     open = !open
-    if (!open && rectDrawArmed) onArmRectDraw(false)
-  }
-
-  function toggleRectDraw() {
-    onArmRectDraw(!rectDrawArmed)
   }
 
   async function createNumeric() {
@@ -243,22 +242,21 @@
       <span class="region-title">Regions</span>
       <span class="region-count">{regions.length}</span>
       <button
-        class="rect-tool"
-        class:armed={rectDrawArmed}
-        title="Draw a region rectangle in the viewport"
-        onclick={toggleRectDraw}
+        class="overlay-toggle"
+        class:off={!overlayVisible}
+        title={overlayVisible ? 'Hide region outlines in the viewport' : 'Show region outlines in the viewport'}
+        aria-label={overlayVisible ? 'Hide regions in viewport' : 'Show regions in viewport'}
+        aria-pressed={!overlayVisible}
+        onclick={onToggleOverlay}
       >
-        <SquareDashedIcon size={14} />
-        <span>Draw</span>
+        {#if overlayVisible}<EyeIcon size={14} />{:else}<EyeOffIcon size={14} />{/if}
       </button>
     </div>
 
-    {#if rectDrawArmed}
-      <div class="region-armed">
-        <span class="dot"></span>
-        <span class="armed-text">Drag a rectangle on the map. <kbd>Esc</kbd> to cancel.</span>
-      </div>
-    {/if}
+    <div class="region-armed">
+      <span class="dot"></span>
+      <span class="armed-text">Drag on the map to draw a region. Click one to select it.</span>
+    </div>
 
     <!-- New region (numeric bounds) -->
     <div class="region-create">
@@ -346,10 +344,9 @@
 <style>
   .region-fab {
     position: absolute;
-    /* Offset right of the doodad/terrain FABs (which both sit at left:12px in
-       their respective modes) so the always-present region launcher never
-       overlaps them. */
-    left: 60px;
+    /* Region mode owns the bottom-left corner — the doodad/terrain FABs only
+       render in their own modes now, so nothing else occupies this slot. */
+    left: 12px;
     bottom: 12px;
     z-index: 40;
     width: 40px;
@@ -373,7 +370,7 @@
 
   .region-panel {
     position: absolute;
-    left: 60px;
+    left: 12px;
     bottom: 60px;
     z-index: 40;
     width: 320px;
@@ -403,23 +400,23 @@
     border-radius: 9999px;
     padding: 1px 7px;
   }
-  .rect-tool {
-    margin-left: auto;
+  .overlay-toggle {
+    margin-left: auto; /* push the eye toggle to the right edge of the header */
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    font-size: 0.6875rem;
-    padding: 3px 8px;
+    justify-content: center;
+    width: 26px;
+    height: 24px;
     border-radius: 6px;
     border: 1px solid var(--border);
     background: var(--secondary);
     color: var(--secondary-foreground);
     cursor: pointer;
   }
-  .rect-tool.armed {
-    background: var(--accent);
-    color: var(--accent-foreground);
-    border-color: var(--accent);
+  /* "off" = overlay hidden: dim the control so the state reads at a glance. */
+  .overlay-toggle.off {
+    background: var(--muted);
+    color: var(--muted-foreground);
   }
 
   .region-armed {
@@ -434,11 +431,6 @@
   .region-armed .dot {
     width: 8px; height: 8px; border-radius: 9999px;
     background: var(--accent); flex: none;
-  }
-  .region-armed kbd {
-    font-size: 0.625rem; padding: 0 4px;
-    border: 1px solid var(--border); border-radius: 3px;
-    background: var(--muted);
   }
 
   .region-create {

@@ -4,6 +4,38 @@ All notable changes to wc3-forge are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-06-01
+
+### Added
+
+- **Region mode.** Regions are now a first-class editor mode alongside Doodad
+  and Terrain (a 3-way switch in the top bar) instead of a panel floating over
+  whatever mode you were in. In Region mode the viewport is owned by region
+  editing: **drag to draw** a region rectangle (live preview), **click to
+  select** the one under the cursor, and `Esc` cancels a draw / clears the
+  selection. Entity selection and box-select are suppressed while in the mode,
+  so the draw gesture no longer fights the marquee.
+- **Show/hide regions toggle.** The Region panel has an eye toggle that hides
+  the region-rectangle overlay in the viewport, so the orange outlines can be
+  cleared out of the way without deleting the regions. Pure view preference —
+  the regions are untouched — persisted across reloads and re-applied on every
+  map load (same convention as the doodad-category visibility toggle).
+- **Tab cycles editor modes** (Doodad → Terrain → Region; Shift+Tab reverses),
+  skipping the cycle while a text field has focus.
+- The Terrain palette now **auto-opens on entering Terrain mode** (matching the
+  Region panel), instead of hiding behind its launcher.
+
+### Changed
+
+- The single Doodad/Terrain mode toggle is now a three-way Doodad / Terrain /
+  Region switch (Tab / Shift+Tab cycles). `view.set_mode` accepts `"region"`
+  in addition to `"doodad"` and `"terrain"`.
+
+### Removed
+
+- The old two-click "Draw" region tool (which fought the viewport's box-select);
+  superseded by Region mode's drag-to-draw.
+
 ## [1.0.0] - 2026-06-01
 
 Phase 0 — the data-integrity floor. 1.0 is the promise that your map survives a
