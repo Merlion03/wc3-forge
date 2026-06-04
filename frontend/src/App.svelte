@@ -12,6 +12,7 @@
     SetUnitInstanceField, SetUnitInstanceItemDrops,
     ListStartLocations, CreateStartLocation, MoveStartLocation, DeleteStartLocation,
     ListRegions, CreateRegion,
+    MapInfoGet,
     PaintTerrainTile, BrushTerrainHeight, BrushTerrainCliff, BrushTerrainRamp, BrushTerrainWater, WaterAddHeightAt, GetTerrainTile,
     BeginUndoGroup, EndUndoGroup,
     LaunchInWC3,
@@ -181,6 +182,18 @@
     try { localStorage.setItem(REGION_OVERLAY_LS_KEY, regionOverlayVisible ? '1' : '0') } catch {}
     scene?.setRegionOverlayVisible(regionOverlayVisible)
   }
+
+  // Whether the camera-bounds shadow is drawn in the viewport.
+  // Pure view preference, persisted so it survives reloads and re-applied to the
+  // scene after every map load via syncCameraBounds. Default ON so the playable
+  // edge is visible out of the box. Toggled from the View → Overlays menu.
+  const CAMERA_BOUNDS_LS_KEY = 'wc3-forge:showCameraBounds'
+  let cameraBoundsVisible: boolean = $state((() => {
+    try {
+      const raw = localStorage.getItem(CAMERA_BOUNDS_LS_KEY)
+      return raw === null ? true : raw === '1'
+    } catch { return true }
+  })())
 
   // Terrain-brush state. The Terrain Palette reports the armed brush here; we
   // mirror its size/shape to the scene's footprint cursor and put the scene in
@@ -852,6 +865,14 @@
       // scene + logger exist.
       scene.setDiagnosticsMode(diagnosticsOn)
       if (verboseLogging) setLogLevel('debug')
+      // If a map is already open at startup (e.g. --open), the MAP_EVENT that
+      // drives the overlay syncs can fire before this component's listener is
+      // registered. Push the camera-bounds overlay once here as well so it shows
+      // on first load; idempotent with the MAP_EVENT path.
+      try {
+        const st0 = await Status()
+        if (st0.loaded) { status = st0; await syncCameraBounds() }
+      } catch (e) { flogError('[camera-bounds] initial sync failed:', e) }
       // Pump-health provider — appears in both the overlay and diagnostics.get.
       registerDiag('pump', () => ({ ...pumpHealth }))
       // Event-subscription health provider. Pre-seed the events we subscribe to
@@ -947,6 +968,8 @@
         // Push the loaded map's regions into the viewport overlay + refresh the
         // panel (a new map may have a different region set).
         await syncRegionOverlay()
+        // Push the loaded map's camera bounds into the viewport overlay too.
+        await syncCameraBounds()
         regionRefreshToken++
       } else {
         units = []
@@ -974,6 +997,9 @@
         scene?.setRegionOverlay([])
         scene?.setSelectedRegion(null)
         regionRefreshToken++
+        // Map closed — clear the camera-bounds shadow so the just-closed map's
+        // bounds don't keep darkening the now-empty viewport.
+        scene?.setCameraBounds(null)
       }
     })
     EventsOn(DEV_ANIM_EVENT, (payload: { creation_number: number; anim_name: string }) => {
@@ -1852,6 +1878,35 @@
     }
   }
 
+  // Push the loaded map's camera bounds (war3map.w3i) into the viewport overlay.
+  // Called on every map load. Robust to corner ordering via min/max. Re-applies
+  // the persisted show/hide preference so the user's choice survives reloads.
+  async function syncCameraBounds() {
+    if (!scene) return
+    try {
+      if (!status.loaded) {
+        scene.setCameraBounds(null)
+        return
+      }
+      const info = await MapInfoGet()
+      const lb = info?.CameraLeftBottom
+      const rt = info?.CameraRightTop
+      if (lb && rt) {
+        scene.setCameraBounds({
+          minX: Math.min(lb.X, rt.X),
+          minY: Math.min(lb.Y, rt.Y),
+          maxX: Math.max(lb.X, rt.X),
+          maxY: Math.max(lb.Y, rt.Y),
+        })
+      } else {
+        scene.setCameraBounds(null)
+      }
+      scene.setCameraBoundsVisible(cameraBoundsVisible)
+    } catch (e) {
+      flogError('[camera-bounds] sync failed:', e)
+    }
+  }
+
   function onSelectRegion(cn: number | null) {
     selectedRegionCN = cn
     scene?.setSelectedRegion(cn)
@@ -2222,6 +2277,11 @@
     if (overlay === 'pathing') {
       pathingVisible = visible
       scene?.setPathingVisible(pathingVisible)
+    }
+    if (overlay === 'camerabounds') {
+      cameraBoundsVisible = visible
+      try { localStorage.setItem(CAMERA_BOUNDS_LS_KEY, cameraBoundsVisible ? '1' : '0') } catch {}
+      scene?.setCameraBoundsVisible(cameraBoundsVisible)
     }
   }
   // View → top-level "extras" dispatches `extra-toggle` events. Route per id
@@ -3010,7 +3070,7 @@
 
     <ViewMenu categories={doodadCategoriesPresent}
               visibility={doodadVisibility}
-              overlays={{ pathing: pathingVisible }}
+              overlays={{ pathing: pathingVisible, camerabounds: cameraBoundsVisible }}
               extras={[
                 { id: 'reforged', label: 'Reforged Graphics', checked: reforged, disabled: busy,
                   title: 'Toggle Reforged graphics. Reloads the current map without resetting the camera.' },

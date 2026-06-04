@@ -4,6 +4,28 @@ All notable changes to wc3-forge are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-06-03
+
+### Added
+
+- **Camera bounds overlay.** A new **Camera Bounds** overlay (View → Overlays)
+  darkens the unplayable border *outside* the map's camera bounds
+  (`war3map.w3i` `CameraLeftBottom`..`CameraRightTop`) — the way Warcraft III
+  masks it in-game — so the playable edge is obvious while editing. The shadow
+  has a soft, distance-feathered edge with evenly rounded corners (computed in a
+  fragment shader). On by default; the show/hide preference persists across
+  reloads and is re-applied on every map load (same convention as the pathing
+  and region-overlay toggles).
+
+## [1.0.2] - 2026-06-02
+
+### Fixed
+
+- **Object editor — Spell Book fields.** Spell Book ability fields
+  (`spb1`..`spb5`) are now keyed by their FourCC instead of collapsing onto a
+  single shared column, so custom spell books edit correctly again.
+- Viewport resize hardening.
+
 ## [1.0.1] - 2026-06-01
 
 ### Added

@@ -67,6 +67,7 @@
   // is the human-readable name. Extend as new overlays are added.
   const OVERLAYS: { id: string; label: string; title: string }[] = [
     { id: 'pathing', label: 'Pathing', title: 'Toggle the static pathing-map overlay (red=unwalkable, blue=unflyable, yellow=unbuildable).' },
+    { id: 'camerabounds', label: 'Camera Bounds', title: 'Toggle the camera-bounds shadow — darkens the area outside the map camera bounds (war3map.w3i), the way WC3 masks the unplayable border in-game.' },
   ]
 
   let allVisibleCount = $derived(categories.filter(c => visibility[c] !== false).length)

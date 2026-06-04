@@ -48,6 +48,7 @@ import {
 } from './sloc-markers'
 import { buildCellHighlight, type CellHighlight } from './cell-highlight'
 import { buildRegionOverlay, type RegionOverlay, type RegionRect } from './region-overlay'
+import { buildCameraBoundsOverlay, type CameraBoundsOverlay, type CameraBoundsRect } from './camera-bounds-overlay'
 import { buildBrushCursor, type BrushCursor } from './brush-cursor'
 import { buildInstanceOutline, type InstanceOutline } from './instance-outline'
 import { buildBoundsDebug, type BoundsDebug } from './bounds-debug'
@@ -743,6 +744,16 @@ export interface SceneAPI {
    */
   setRegionOverlayVisible(visible: boolean): void
   /**
+   * Set the camera-bounds rectangle (war3map.w3i playable/camera limits), or
+   * null to clear it. App.svelte pushes this from MapInfoGet on every map load.
+   */
+  setCameraBounds(bounds: CameraBoundsRect | null): void
+  /**
+   * Show or hide the camera-bounds outline in the viewport. Pure render state.
+   * App.svelte persists the preference to localStorage and re-applies it on load.
+   */
+  setCameraBoundsVisible(visible: boolean): void
+  /**
    * Enter/exit region edit mode. While active the viewport owns region editing:
    * drag = draw a new region rect, click = select the region under the cursor;
    * entity selection + box-select are suppressed.
@@ -1160,6 +1171,16 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
   } catch (e) {
     flog('[region-overlay] init failed:', e instanceof Error ? e.message : String(e))
   }
+  // Camera-bounds outline (war3map.w3i playable/camera limits). Built once per
+  // scene; bounds are pushed in via setCameraBounds on map load. Visibility is
+  // driven by App.svelte's persisted preference (setCameraBoundsVisible).
+  let cameraBoundsOverlay: CameraBoundsOverlay | null = null
+  let cameraBoundsVisible = false
+  try {
+    cameraBoundsOverlay = buildCameraBoundsOverlay((viewer as any).gl as WebGLRenderingContext)
+  } catch (e) {
+    flog('[camera-bounds-overlay] init failed:', e instanceof Error ? e.message : String(e))
+  }
   // Terrain-brush footprint ring (shown under the cursor while the Terrain
   // Palette is armed). Same overlay lifetime as cellHighlight; non-fatal build.
   let brushCursor: BrushCursor | null = null
@@ -1549,6 +1570,7 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         // of every other layer including water.
         if (cellHighlight) cellHighlight.draw(scene.camera.viewProjectionMatrix)
         if (regionOverlay && regionOverlayVisible) regionOverlay.draw(scene.camera.viewProjectionMatrix)
+        if (cameraBoundsOverlay && cameraBoundsVisible) cameraBoundsOverlay.draw(scene.camera.viewProjectionMatrix)
         // Terrain-brush footprint ring (only visible while the palette is armed
         // and the cursor is over the map). Same always-on-top overlay tier.
         if (brushCursor) brushCursor.draw(scene.camera.viewProjectionMatrix)
@@ -3796,6 +3818,10 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
         regionOverlay.dispose()
         regionOverlay = null
       }
+      if (cameraBoundsOverlay) {
+        cameraBoundsOverlay.dispose()
+        cameraBoundsOverlay = null
+      }
       if (brushCursor) {
         brushCursor.dispose()
         brushCursor = null
@@ -4158,6 +4184,12 @@ export function createScene(canvas: HTMLCanvasElement, reforged: boolean = false
     },
     setRegionOverlayVisible(visible: boolean) {
       regionOverlayVisible = visible
+    },
+    setCameraBounds(bounds: CameraBoundsRect | null) {
+      cameraBoundsOverlay?.setBounds(bounds)
+    },
+    setCameraBoundsVisible(visible: boolean) {
+      cameraBoundsVisible = visible
     },
     setRegionMode(active: boolean) {
       regionMode = active
