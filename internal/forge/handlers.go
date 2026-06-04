@@ -180,6 +180,9 @@ func RegisterAll(b *bridge.Bridge) {
 	// pairs via Session.ConvertObject's whitelist). Single MCP route since the
 	// shape is symmetric — caller names src/dst kinds in params.
 	reg("objects.convert", handleObjectsConvert)
+	// Cross-map object importer: copy objects (+ their dependency graph: buffs,
+	// summoned units, imported icons/models) from another map into this one.
+	reg("objects.import_from_map", handleObjectsImportFromMap)
 	// Trigger Editor (Phase 1a — read-only). Three handlers:
 	// triggers.tree (full hierarchy in one shot), triggers.get (full ECA +
 	// custom_text for one node), triggers.functions_meta (TriggerData.txt

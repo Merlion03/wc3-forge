@@ -503,6 +503,28 @@ export function registerTools(server: McpServer): void {
     wrap("objects.convert")
   );
 
+  // Cross-map object importer: faithfully copy objects + their dependency graph
+  // (referenced buffs, summoned units + their abilities, imported icons/models)
+  // from another map into the loaded map.
+  server.tool(
+    "objects_import_from_map",
+    "Faithfully copy objects from another WC3 map into the loaded map, following the dependency graph (an ability's buffs, the units it summons and their abilities, imported icon/model files). Custom objects keep their source FourCC; ids already present in the target are skipped. Undo-aware (one group). Returns { imported, skipped, missing, imported_files, failed } (each a list of 'kind:id').",
+    {
+      source_map_path: z
+        .string()
+        .describe("absolute path to the source .w3x/.w3m/.mpq archive or extracted map folder"),
+      objects: z
+        .array(
+          z.object({
+            kind: z.enum(OBJECT_KINDS).describe("object kind, e.g. 'abilities'"),
+            id: z.string().describe("4-char rawcode of the object in the source map"),
+          })
+        )
+        .describe("the objects to import (their dependencies are pulled in automatically)"),
+    },
+    wrap("objects.import_from_map")
+  );
+
   // --- model import ------------------------------------------------------
   server.tool(
     "models_import",

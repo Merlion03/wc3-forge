@@ -1121,6 +1121,56 @@
     "method": "objects.doodads.set_field"
   },
   {
+    "name": "objects_import_from_map",
+    "description": "Faithfully copy objects from another WC3 map into the loaded map, following the dependency graph (an ability's buffs, the units it summons and their abilities, imported icon/model files). Custom objects keep their source FourCC; ids already present in the target are skipped. Undo-aware (one group). Returns { imported, skipped, missing, imported_files, failed } (each a list of 'kind:id').",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source_map_path": {
+          "type": "string",
+          "description": "absolute path to the source .w3x/.w3m/.mpq archive or extracted map folder"
+        },
+        "objects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "units",
+                  "items",
+                  "abilities",
+                  "buffs",
+                  "destructables",
+                  "doodads",
+                  "upgrades"
+                ],
+                "description": "object kind, e.g. 'abilities'"
+              },
+              "id": {
+                "type": "string",
+                "description": "4-char rawcode of the object in the source map"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "description": "the objects to import (their dependencies are pulled in automatically)"
+        }
+      },
+      "required": [
+        "source_map_path",
+        "objects"
+      ],
+      "additionalProperties": false
+    },
+    "method": "objects.import_from_map"
+  },
+  {
     "name": "objects_items_create_custom",
     "description": "Create a new custom items definition cloned from a base object. Returns { id, detail } where id is the new custom's rawcode. Undo-aware.",
     "inputSchema": {
