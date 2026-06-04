@@ -521,6 +521,10 @@ export function registerTools(server: McpServer): void {
           })
         )
         .describe("the objects to import (their dependencies are pulled in automatically)"),
+      on_collision: z
+        .enum(["skip", "remap"])
+        .optional()
+        .describe("when a source FourCC is already present in the target: 'skip' (default, keep the existing object) or 'remap' (give the import a fresh id and rewrite references)"),
     },
     wrap("objects.import_from_map")
   );

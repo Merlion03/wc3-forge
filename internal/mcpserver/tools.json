@@ -1160,6 +1160,14 @@
             "additionalProperties": false
           },
           "description": "the objects to import (their dependencies are pulled in automatically)"
+        },
+        "on_collision": {
+          "type": "string",
+          "enum": [
+            "skip",
+            "remap"
+          ],
+          "description": "when a source FourCC is already present in the target: 'skip' (default, keep the existing object) or 'remap' (give the import a fresh id and rewrite references)"
         }
       },
       "required": [

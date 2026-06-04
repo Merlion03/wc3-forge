@@ -6,6 +6,12 @@ package forge
 // buffs, the units it summons, those units' abilities, and any imported icon/
 // model files. The source map is read through a standalone fileSource and never
 // loaded into the Session, so the active map is untouched until we mutate it.
+//
+// Three phases: (1) discover the full dependency graph read-only; (2) create
+// every object, choosing a final id per object — its source FourCC if free, or a
+// freshly-allocated one when onCollision=="remap" and the id is already taken;
+// (3) copy each object's fields, rewriting object-reference values through the
+// remap table so the copied graph stays internally consistent.
 
 import (
 	"errors"
@@ -26,14 +32,16 @@ type ImportRequest struct {
 
 // ImportObjectsResult reports the outcome.
 type ImportObjectsResult struct {
-	Imported      []string `json:"imported"`       // "kind:id" newly created
-	Skipped       []string `json:"skipped"`        // already present in the target
-	Missing       []string `json:"missing"`        // requested/referenced but not a custom in source
+	Imported      []string `json:"imported"`       // "kind:id" (or "kind:id->newid" when remapped)
+	Skipped       []string `json:"skipped"`        // already present, onCollision=="skip"
+	Missing       []string `json:"missing"`        // requested but not a custom in source
 	ImportedFiles []string `json:"imported_files"` // imported asset paths copied across
 	Failed        []string `json:"failed"`         // "kind:id: reason"
 }
 
 type objRef struct{ kind, id string }
+
+func (r objRef) key() string { return r.kind + ":" + r.id }
 
 // openSourceReader opens a read-only fileSource over a .w3x/.w3m/.mpq or an
 // extracted folder. Mirrors Session.Open's source selection without swapping
@@ -112,119 +120,186 @@ func kindForFieldType(t string) string {
 	return ""
 }
 
+// refKindsForField returns the object kind(s) a field's value references, or nil.
+func refKindsForField(fm *ObjectFieldMeta) []string {
+	if fm == nil {
+		return nil
+	}
+	if fm.Type == "techList" {
+		return []string{"units", "upgrades"} // requirements: mixed unit/upgrade list
+	}
+	if k := kindForFieldType(fm.Type); k != "" {
+		return []string{k}
+	}
+	return nil
+}
+
 // ImportObjectsFromMap copies the requested objects plus their custom-object and
-// imported-file dependencies from srcPath into the loaded map. Objects already
-// present in the target are left untouched (reported as skipped). The whole copy
-// is one undo group.
-func (s *Session) ImportObjectsFromMap(srcPath string, reqs []ImportRequest) (*ImportObjectsResult, error) {
+// imported-file dependencies from srcPath into the loaded map. onCollision is
+// "skip" (default — keep the source FourCC, skip if it's already present) or
+// "remap" (allocate a fresh id for any object whose source FourCC is taken, and
+// rewrite references to it). The whole copy is one undo group.
+func (s *Session) ImportObjectsFromMap(srcPath string, reqs []ImportRequest, onCollision string) (*ImportObjectsResult, error) {
 	if Current.Info() == nil {
 		return nil, errors.New("no map loaded")
 	}
+	remap := onCollision == "remap"
 	src, closeSrc, err := openSourceReader(srcPath)
 	if err != nil {
 		return nil, err
 	}
 	defer closeSrc()
 	so := loadSourceObjects(src)
-
 	res := &ImportObjectsResult{}
-	visited := map[string]bool{}
-	importedFiles := map[string]bool{}
 
+	// --- Phase 1: discover the dependency graph (read-only). ---
+	order := make([]objRef, 0, len(reqs))
+	inSet := map[string]bool{}
+	fileSet := map[string]bool{}
 	queue := make([]objRef, 0, len(reqs))
 	for _, r := range reqs {
 		queue = append(queue, objRef{r.Kind, r.ID})
+	}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if inSet[cur.key()] {
+			continue
+		}
+		c := so.custom(cur.kind, cur.id)
+		if c == nil {
+			continue // stock ref or absent; only requested-but-missing is reported below
+		}
+		inSet[cur.key()] = true
+		order = append(order, cur)
+		cfg := kindConfigFor(cur.kind)
+		if cfg == nil {
+			continue
+		}
+		_, meta, _ := loadObjectBase(cfg)
+		visit := func(fourCC, val string) {
+			if meta == nil {
+				return
+			}
+			fm := meta.ByID[fourCC]
+			if fm == nil {
+				return
+			}
+			if fm.Type == "icon" || fm.Type == "model" {
+				for _, p := range filePathCandidates(val) {
+					fileSet[p] = true
+				}
+				return
+			}
+			for _, k := range refKindsForField(fm) {
+				for _, tok := range splitFourCCs(val) {
+					if so.custom(k, tok) != nil {
+						queue = append(queue, objRef{k, tok})
+					}
+				}
+			}
+		}
+		for fourCC, val := range c.Overrides {
+			visit(fourCC, val)
+		}
+		for _, lv := range c.Levels {
+			visit(lv.FourCC, lv.Value)
+		}
+	}
+	for _, r := range reqs {
+		if so.custom(r.Kind, r.ID) == nil {
+			res.Missing = append(res.Missing, r.Kind+":"+r.ID)
+		}
 	}
 
 	s.BeginUndoGroup(fmt.Sprintf("Import %d objects from map", len(reqs)))
 	defer func() { _ = s.EndUndoGroup() }()
 
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		key := cur.kind + ":" + cur.id
-		if visited[key] {
+	// --- Phase 2: create objects, choosing final ids (remap collisions). ---
+	finalID := map[string]string{} // "kind:srcid" -> final id
+	created := make([]objRef, 0, len(order))
+	for _, ref := range order {
+		cfg := kindConfigFor(ref.kind)
+		c := so.custom(ref.kind, ref.id)
+		if objectExistsInTarget(s, cfg, ref.id) {
+			if !remap {
+				res.Skipped = append(res.Skipped, ref.key())
+				continue
+			}
+			newID, err := s.AddCustomObject(cfg, "", c.BaseID) // "" => allocate a fresh id
+			if err != nil {
+				res.Failed = append(res.Failed, ref.key()+": "+err.Error())
+				continue
+			}
+			finalID[ref.key()] = newID
+			created = append(created, ref)
 			continue
 		}
-		visited[key] = true
+		if _, err := s.AddCustomObject(cfg, ref.id, c.BaseID); err != nil {
+			res.Failed = append(res.Failed, ref.key()+": "+err.Error())
+			continue
+		}
+		finalID[ref.key()] = ref.id
+		created = append(created, ref)
+	}
 
-		cfg := kindConfigFor(cur.kind)
-		if cfg == nil {
-			res.Failed = append(res.Failed, key+": unknown kind")
-			continue
-		}
-		c := so.custom(cur.kind, cur.id)
-		if c == nil {
-			// Not custom in source: either a stock id (already in our base) or
-			// genuinely absent. Either way nothing to copy.
-			res.Missing = append(res.Missing, key)
-			continue
-		}
-		if objectExistsInTarget(s, cfg, cur.id) {
-			res.Skipped = append(res.Skipped, key)
-			continue
-		}
-		if _, err := s.AddCustomObject(cfg, cur.id, c.BaseID); err != nil {
-			res.Failed = append(res.Failed, key+": "+err.Error())
-			continue
-		}
+	// --- Phase 3: copy fields, rewriting references through finalID. ---
+	for _, ref := range created {
+		cfg := kindConfigFor(ref.kind)
+		c := so.custom(ref.kind, ref.id)
+		fid := finalID[ref.key()]
 		_, meta, _ := loadObjectBase(cfg)
-
 		for fourCC, val := range c.Overrides {
-			_ = s.SetObjectField(cfg, cur.id, fourCC, val)
-			collectDeps(s, so, meta, src, fourCC, val, &queue, importedFiles, res)
+			_ = s.SetObjectField(cfg, fid, fourCC, rewriteRefs(meta, finalID, fourCC, val))
 		}
 		for _, lv := range c.Levels {
-			_ = s.SetObjectFieldLevel(cfg, cur.id, lv.FourCC, lv.Level, lv.Value)
-			collectDeps(s, so, meta, src, lv.FourCC, lv.Value, &queue, importedFiles, res)
+			_ = s.SetObjectFieldLevel(cfg, fid, lv.FourCC, lv.Level, rewriteRefs(meta, finalID, lv.FourCC, lv.Value))
 		}
-		res.Imported = append(res.Imported, key)
+		if fid != ref.id {
+			res.Imported = append(res.Imported, ref.key()+"->"+fid)
+		} else {
+			res.Imported = append(res.Imported, ref.key())
+		}
+	}
+
+	// --- Copy referenced imported files (custom assets present in the source). ---
+	for p := range fileSet {
+		if b, ok, _ := src.read(p); ok && len(b) > 0 {
+			if _, err := s.AddImportFile(p, b); err == nil {
+				res.ImportedFiles = append(res.ImportedFiles, p)
+			}
+		}
 	}
 	return res, nil
 }
 
-// collectDeps inspects one (field, value) pair: queues referenced custom objects
-// and copies referenced imported files.
-func collectDeps(s *Session, so *sourceObjects, meta *ObjectMetadata, src fileSource,
-	fourCC, val string, queue *[]objRef, importedFiles map[string]bool, res *ImportObjectsResult) {
+// rewriteRefs rewrites object-reference tokens in a list-type field value through
+// the remap table, so a copied object points at the (possibly remapped) ids of
+// its dependencies. Non-reference fields pass through unchanged.
+func rewriteRefs(meta *ObjectMetadata, finalID map[string]string, fourCC, val string) string {
 	if meta == nil {
-		return
+		return val
 	}
-	fm := meta.ByID[fourCC]
-	if fm == nil {
-		return
+	kinds := refKindsForField(meta.ByID[fourCC])
+	if len(kinds) == 0 {
+		return val
 	}
-	switch fm.Type {
-	case "icon", "model":
-		for _, p := range filePathCandidates(val) {
-			if importedFiles[p] {
-				continue
-			}
-			if b, ok, _ := src.read(p); ok && len(b) > 0 {
-				if _, err := s.AddImportFile(p, b); err == nil {
-					importedFiles[p] = true
-					res.ImportedFiles = append(res.ImportedFiles, p)
-				}
-			}
-		}
-	case "techList":
-		// requirements: a mixed unit/upgrade FourCC list.
-		for _, tok := range splitFourCCs(val) {
-			for _, k := range []string{"units", "upgrades"} {
-				if so.custom(k, tok) != nil {
-					*queue = append(*queue, objRef{k, tok})
-				}
-			}
-		}
-	default:
-		if k := kindForFieldType(fm.Type); k != "" {
-			for _, tok := range splitFourCCs(val) {
-				if so.custom(k, tok) != nil {
-					*queue = append(*queue, objRef{k, tok})
-				}
+	toks := strings.Split(val, ",")
+	changed := false
+	for i, t := range toks {
+		tt := strings.TrimSpace(t)
+		for _, k := range kinds {
+			if nf, ok := finalID[k+":"+tt]; ok && nf != tt {
+				toks[i] = nf
+				changed = true
+				break
 			}
 		}
 	}
+	if !changed {
+		return val
+	}
+	return strings.Join(toks, ",")
 }
 
 func objectExistsInTarget(s *Session, cfg *KindConfig, id string) bool {
@@ -235,11 +310,9 @@ func objectExistsInTarget(s *Session, cfg *KindConfig, id string) bool {
 			}
 		}
 	}
-	if base, _, _ := loadObjectBase(cfg); base != nil {
-		if base.Rows != nil {
-			if _, ok := base.Rows[id]; ok {
-				return true
-			}
+	if base, _, _ := loadObjectBase(cfg); base != nil && base.Rows != nil {
+		if _, ok := base.Rows[id]; ok {
+			return true
 		}
 	}
 	return false

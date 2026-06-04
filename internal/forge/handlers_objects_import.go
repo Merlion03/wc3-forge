@@ -10,6 +10,7 @@ import (
 type objectsImportFromMapParams struct {
 	SourceMapPath string          `json:"source_map_path"`
 	Objects       []ImportRequest `json:"objects"`
+	OnCollision   string          `json:"on_collision"` // "skip" (default) | "remap"
 }
 
 // handleObjectsImportFromMap copies objects (+ their dependencies) from a source
@@ -30,5 +31,8 @@ func handleObjectsImportFromMap(params json.RawMessage) (any, error) {
 			return nil, fmt.Errorf("objects[%d]: kind and id are required", i)
 		}
 	}
-	return Current.ImportObjectsFromMap(p.SourceMapPath, p.Objects)
+	if p.OnCollision != "" && p.OnCollision != "skip" && p.OnCollision != "remap" {
+		return nil, errors.New("on_collision must be 'skip' or 'remap'")
+	}
+	return Current.ImportObjectsFromMap(p.SourceMapPath, p.Objects, p.OnCollision)
 }
