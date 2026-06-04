@@ -4,6 +4,21 @@ All notable changes to wc3-forge are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-06-04
+
+### Added
+
+- **Cross-map object importer** (`objects.import_from_map`). Faithfully copy
+  objects — abilities, units, items, buffs, upgrades, destructables, doodads —
+  from another WC3 map into the loaded map, following the full **dependency
+  graph**: an ability's referenced buffs, the units it summons and their
+  abilities, and any imported icon/model files (copied to the exact paths the
+  objects reference). The source map is read through a standalone reader, so the
+  active map is untouched until mutation, and the whole copy is one undo group.
+  Custom objects keep their source FourCC by default; pass `on_collision:
+  "remap"` to give an import a fresh id (rewriting references) when a FourCC is
+  already taken, so nothing is lost to cross-map id collisions.
+
 ## [1.0.3] - 2026-06-03
 
 ### Added
