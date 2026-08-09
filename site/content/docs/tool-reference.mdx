@@ -3,7 +3,7 @@ title: MCP tool reference
 description: Everything Claude Code can do in wc3-forge today, grouped by surface.
 ---
 
-wc3-forge exposes **153 MCP tools**. All entity tools speak **game coordinates**
+wc3-forge exposes **155 MCP tools**. All entity tools speak **game coordinates**
 (origin at map center, units = WC3 world units). All mutations flow through the
 same history stack the GUI uses, so `Ctrl+Z` in the editor undoes Claude's edits
 and vice versa.
@@ -26,7 +26,9 @@ and vice versa.
 and the Lua flag. On a localized map these fields are TRIGSTR-backed; edits
 update the referenced `war3map.wts` entry instead of orphaning it.
 
-## Semantic scene query
+## Agent Intelligence
+
+### Semantic scene query
 
 `scene_query` is the high-level read-only query layer for AI workflows. It can
 search placed **units**, **doodads/destructibles**, **regions**, and **start
@@ -35,6 +37,32 @@ locations** in one call, with attribute filters, circle/rectangle filters,
 projection. Regions participate spatially as rectangles (distance is measured
 to the nearest rectangle edge, not merely to the center). Start locations are
 surfaced as their own semantic kind rather than duplicated as `sloc` units.
+
+### Atomic map patches
+
+`map_apply_patch` batches many edits into one transaction and one undo step.
+Use `dry_run: true` first to validate operation schemas, resolve targets in
+sequence, predict creation numbers for creates, and estimate affected entities
+without mutating the map. Apply mode runs only after the complete patch
+preflights. If an operation then fails at runtime, all prior operations are
+reverted and the prior dirty/history state is restored. A patch is capped at
+500 operations so one agent request cannot monopolize the editor indefinitely.
+
+Initial patch operations cover ordinary placed units, doodads, regions,
+single-corner and brush terrain edits, and Map Info updates. Start locations
+remain on the dedicated `start_locations_*` surface; raw `sloc` markers are
+deliberately rejected by `units.*` patch operations. Save/import/model/test-map operations
+are intentionally excluded because they cross non-undoable filesystem or game
+process boundaries.
+
+### Map Doctor
+
+`map_validate` is a read-only structural validator. It reports stable diagnostic
+codes for malformed terrain/palette references, invalid FourCCs, duplicate
+creation numbers, duplicate start-location indices, invalid region bounds,
+duplicate custom-object IDs, and entities placed completely outside terrain
+bounds. Errors make `valid: false`; placement warnings remain warnings so
+intentional off-map staging does not block a workflow.
 
 ## Placed units
 
