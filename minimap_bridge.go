@@ -30,9 +30,12 @@ import (
 //     {ok, ext:"png", bytes_base64, width, height, png_path, persisted, blp_path?}
 
 // registerMinimapBridge wires minimap.bake onto the bridge. Called from main()
-// after forge.RegisterAll (which owns the rest of the catalog).
+// after forge.RegisterAll (which owns the upstream catalog). The fork-specific
+// agent handlers piggyback on this existing post-RegisterAll hook so upstream's
+// large RegisterAll body stays untouched and easy to sync.
 func registerMinimapBridge(b *bridge.Bridge) {
 	b.Register("minimap.bake", handleMinimapBake)
+	forge.RegisterAgentHandlers(b)
 }
 
 type minimapBakeParams struct {
