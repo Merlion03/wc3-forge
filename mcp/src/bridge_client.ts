@@ -17,6 +17,12 @@ interface JsonRpcResponse {
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
+// All SessionPool instances in this process intentionally share the selected
+// wc3-forge PID. The upstream tool registry and the fork-owned agent registry
+// use separate pools (and therefore separate TCP connection caches), but a
+// session_select call must route BOTH registries to the same editor instance.
+let sharedSelectedPid: number | null = null;
+
 /** A live TCP connection to one wc3-forge bridge. Owned by the SessionPool. */
 class BridgeConnection {
   private socket: Socket | null = null;
@@ -132,16 +138,16 @@ class BridgeConnection {
 }
 
 /**
- * Pool of bridge connections, one per running wc3-forge. Keeps a "selected"
- * pid that all tool calls route to. When no pid is selected, calls route to
- * the oldest running instance.
+ * Pool of bridge connections, one per running wc3-forge. All pools share the
+ * process-wide selected PID so independently-registered tool groups obey the
+ * same session_select choice. When no pid is selected, calls route to the
+ * oldest running instance.
  */
 export class SessionPool {
   private connections = new Map<number, BridgeConnection>();
-  private selectedPid: number | null = null;
 
   async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-    const lock = await findSession(this.selectedPid ?? undefined);
+    const lock = await findSession(sharedSelectedPid ?? undefined);
     let conn = this.connections.get(lock.pid);
     if (!conn) {
       conn = new BridgeConnection(lock);
@@ -150,18 +156,18 @@ export class SessionPool {
     return conn.call(method, params);
   }
 
-  /** Select a specific wc3-forge instance by pid for all subsequent calls. */
+  /** Select a specific wc3-forge instance for every SessionPool in this process. */
   select(pid: number): void {
-    this.selectedPid = pid;
+    sharedSelectedPid = pid;
   }
 
-  /** Reset selection — next call routes to the oldest running instance. */
+  /** Reset selection process-wide — subsequent calls auto-route to the oldest instance. */
   clearSelection(): void {
-    this.selectedPid = null;
+    sharedSelectedPid = null;
   }
 
   selected(): number | null {
-    return this.selectedPid;
+    return sharedSelectedPid;
   }
 
   closeAll(): void {

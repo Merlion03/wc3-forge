@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerTools } from "./tools.js";
+import { registerAgentTools } from "./agent_tools.js";
 
 async function main(): Promise<void> {
   const server = new McpServer({
@@ -10,6 +11,7 @@ async function main(): Promise<void> {
   });
 
   registerTools(server);
+  registerAgentTools(server);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

@@ -1,5 +1,224 @@
 [
   {
+    "name": "map_apply_patch",
+    "description": "Preflight and optionally apply a batch of WC3 map edits as one atomic undo step. Set dry_run=true to validate schemas, resolve sequential create/delete targets, predict creation numbers, and estimate affected entities without mutating anything. Apply mode runs only after the whole patch preflights; if any runtime operation fails, all earlier operations are rolled back and history/dirty state are restored. Each operation is decoded against a strict op-specific schema, so fields irrelevant to that op are rejected by the server.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "human-readable label for the single undo entry"
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "preflight only; never mutate the map"
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "units.move",
+                  "units.rotate",
+                  "units.scale",
+                  "units.set_field",
+                  "units.create",
+                  "units.delete",
+                  "doodads.move",
+                  "doodads.rotate",
+                  "doodads.scale",
+                  "doodads.create",
+                  "doodads.delete",
+                  "regions.create",
+                  "regions.move",
+                  "regions.resize",
+                  "regions.rename",
+                  "regions.delete",
+                  "terrain.set_tile",
+                  "terrain.set_height",
+                  "terrain.paint_tile",
+                  "terrain.brush_height",
+                  "map.info_set"
+                ]
+              },
+              "creation_number": {
+                "type": "integer"
+              },
+              "type_id": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 4
+              },
+              "player": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              },
+              "rotation": {
+                "type": "number"
+              },
+              "scale": {
+                "type": "number"
+              },
+              "sx": {
+                "type": "number"
+              },
+              "sy": {
+                "type": "number"
+              },
+              "sz": {
+                "type": "number"
+              },
+              "field": {
+                "type": "string"
+              },
+              "value": {
+                "type": "number"
+              },
+              "item_drops": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "item_id": {
+                      "type": "string",
+                      "minLength": 4,
+                      "maxLength": 4
+                    },
+                    "chance": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "item_id",
+                    "chance"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "variation": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "name": {
+                "type": "string"
+              },
+              "min_x": {
+                "type": "number"
+              },
+              "min_y": {
+                "type": "number"
+              },
+              "max_x": {
+                "type": "number"
+              },
+              "max_y": {
+                "type": "number"
+              },
+              "weather_id": {
+                "type": "string"
+              },
+              "ambient_id": {
+                "type": "string"
+              },
+              "color": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "dx": {
+                "type": "number"
+              },
+              "dy": {
+                "type": "number"
+              },
+              "col": {
+                "type": "integer"
+              },
+              "row": {
+                "type": "integer"
+              },
+              "ground_tile_id": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 4
+              },
+              "height": {
+                "type": "number"
+              },
+              "radius": {
+                "type": "number",
+                "minimum": 0
+              },
+              "shape": {
+                "type": "string",
+                "enum": [
+                  "circle",
+                  "square"
+                ]
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "raise",
+                  "lower",
+                  "flatten",
+                  "smooth"
+                ]
+              },
+              "strength": {
+                "type": "number"
+              },
+              "target": {
+                "type": "number"
+              },
+              "updates": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "required": [
+              "op"
+            ],
+            "additionalProperties": false
+          },
+          "description": "ordered operations; targets are resolved sequentially so later operations can reference predicted IDs from earlier creates; max 500 operations per patch",
+          "maxItems": 500
+        }
+      },
+      "required": [
+        "operations"
+      ],
+      "additionalProperties": false
+    },
+    "method": "map.apply_patch"
+  },
+  {
+    "name": "map_validate",
+    "description": "Run the read-only Map Doctor over the loaded map. Returns stable error/warning codes for concrete structural problems: missing/malformed terrain, invalid palette indices/FourCCs, duplicate creation numbers, duplicate start-location indices, invalid region bounds/weather ids, duplicate/invalid custom object ids, and placements completely outside terrain bounds. Warnings do not make valid=false.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "method": "map.validate"
+  },
+  {
     "name": "scene_query",
     "description": "High-level read-only query across placed units, doodads/destructibles, regions, and start locations. Use this instead of pulling whole per-kind lists when you need spatial or semantic selection. Attribute and spatial filters are ANDed. `nearest_to` computes true point-to-rectangle distance for regions and sorts by distance by default. `id` means creation_number for unit/doodad/region and start-location index for start_location. Results are paginated (default 100, max 500); kind+id are always returned even when `fields` projects the payload.",
     "inputSchema": {
