@@ -1,0 +1,112 @@
+[
+  {
+    "name": "map_diff",
+    "description": "Preview the final structural diff for a map patch without mutating the live editor session. Uses the same strict operation schemas, sequential target resolution, predicted creation numbers, and runtime mutation path as map_apply_patch, but executes only on deep in-memory clones. Returns created/modified/deleted entities, before/after payloads, per-change world bounds, a global affected bounding box, and truncation metadata.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "human-readable patch label included in the preview result"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000,
+          "description": "maximum detailed changes returned; totals and global bounds still cover the complete diff"
+        },
+        "operations": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "units.move",
+                  "units.rotate",
+                  "units.scale",
+                  "units.set_field",
+                  "units.create",
+                  "units.delete",
+                  "doodads.move",
+                  "doodads.rotate",
+                  "doodads.scale",
+                  "doodads.create",
+                  "doodads.delete",
+                  "regions.create",
+                  "regions.move",
+                  "regions.resize",
+                  "regions.rename",
+                  "regions.delete",
+                  "terrain.set_tile",
+                  "terrain.set_height",
+                  "terrain.paint_tile",
+                  "terrain.brush_height",
+                  "map.info_set"
+                ]
+              },
+              "creation_number": { "type": "integer" },
+              "type_id": { "type": "string", "minLength": 4, "maxLength": 4 },
+              "player": { "type": "integer", "minimum": 0 },
+              "x": { "type": "number" },
+              "y": { "type": "number" },
+              "z": { "type": "number" },
+              "rotation": { "type": "number" },
+              "scale": { "type": "number" },
+              "sx": { "type": "number" },
+              "sy": { "type": "number" },
+              "sz": { "type": "number" },
+              "field": { "type": "string" },
+              "value": { "type": "number" },
+              "item_drops": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "item_id": { "type": "string", "minLength": 4, "maxLength": 4 },
+                    "chance": { "type": "integer", "minimum": 0 }
+                  },
+                  "required": ["item_id", "chance"],
+                  "additionalProperties": false
+                }
+              },
+              "variation": { "type": "integer", "minimum": 0 },
+              "name": { "type": "string" },
+              "min_x": { "type": "number" },
+              "min_y": { "type": "number" },
+              "max_x": { "type": "number" },
+              "max_y": { "type": "number" },
+              "weather_id": { "type": "string" },
+              "ambient_id": { "type": "string" },
+              "color": {
+                "type": "array",
+                "items": { "type": "integer" },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "dx": { "type": "number" },
+              "dy": { "type": "number" },
+              "col": { "type": "integer" },
+              "row": { "type": "integer" },
+              "ground_tile_id": { "type": "string", "minLength": 4, "maxLength": 4 },
+              "height": { "type": "number" },
+              "radius": { "type": "number", "minimum": 0 },
+              "shape": { "type": "string", "enum": ["circle", "square"] },
+              "mode": { "type": "string", "enum": ["raise", "lower", "flatten", "smooth"] },
+              "strength": { "type": "number" },
+              "target": { "type": "number" },
+              "updates": { "type": "object", "additionalProperties": true }
+            },
+            "required": ["op"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["operations"],
+      "additionalProperties": false
+    },
+    "method": "map.diff"
+  }
+]
