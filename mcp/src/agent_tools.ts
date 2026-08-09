@@ -30,8 +30,6 @@ const wrap = (method: string) => {
       return errorResponse(err);
     }
   };
-  // Mirror tools.ts: useful for catalog/debug tooling even though the fork's
-  // agent catalog is committed separately from upstream tools.json.
   (handler as unknown as { __bridgeMethod?: string }).__bridgeMethod = method;
   return handler;
 };
@@ -160,6 +158,17 @@ export function registerAgentTools(server: McpServer): void {
         .optional(),
     },
     wrap("scene.query")
+  );
+
+  server.tool(
+    "map_diff",
+    "Preview the final structural diff for a map patch without mutating the live editor session. Uses the same strict operation schemas, sequential target resolution, predicted creation numbers, and runtime mutation path as map_apply_patch, but executes only on deep in-memory clones. Returns created/modified/deleted entities, before/after payloads, per-change world bounds, a global affected bounding box, and truncation metadata.",
+    {
+      label: z.string().optional(),
+      operations: z.array(PATCH_OPERATION).max(500),
+      limit: z.number().int().min(1).max(2000).optional(),
+    },
+    wrap("map.diff")
   );
 
   server.tool(

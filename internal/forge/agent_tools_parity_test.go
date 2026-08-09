@@ -28,6 +28,28 @@ func readToolCatalogForTest(t *testing.T, name string) []agentToolCatalogEntry {
 	return tools
 }
 
+func readAgentToolCatalogsForTest(t *testing.T) []agentToolCatalogEntry {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join("..", "mcpserver", "agent_tools*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(paths)
+	var tools []agentToolCatalogEntry
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		var part []agentToolCatalogEntry
+		if err := json.Unmarshal(raw, &part); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		tools = append(tools, part...)
+	}
+	return tools
+}
+
 func TestAgentToolsCatalogParity(t *testing.T) {
 	b := bridge.New()
 	RegisterAgentHandlers(b)
@@ -36,9 +58,9 @@ func TestAgentToolsCatalogParity(t *testing.T) {
 		registered[method] = true
 	}
 
-	tools := readToolCatalogForTest(t, "agent_tools.json")
+	tools := readAgentToolCatalogsForTest(t)
 	if len(tools) == 0 {
-		t.Fatal("agent_tools.json must not be empty")
+		t.Fatal("agent tool catalogs must not be empty")
 	}
 
 	seenNames := map[string]bool{}
@@ -68,10 +90,10 @@ func TestAgentToolsCatalogParity(t *testing.T) {
 	}
 	sort.Strings(missingCatalog)
 	if len(missingCatalog) > 0 {
-		t.Errorf("registered agent methods missing from agent_tools.json: %v", missingCatalog)
+		t.Errorf("registered agent methods missing from agent tool catalogs: %v", missingCatalog)
 	}
 
-	// The additive catalog is merged into the upstream generated catalog at
+	// The additive catalogs are merged into the upstream generated catalog at
 	// startup. A duplicate MCP tool name would make tools/list ambiguous even
 	// if the bridge methods differed, so guard the namespace explicitly.
 	for _, tool := range readToolCatalogForTest(t, "tools.json") {
