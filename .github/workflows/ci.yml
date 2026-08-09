@@ -44,7 +44,7 @@ jobs:
         run: |
           set -eo pipefail
           cd mcp && npm ci && npm run gen:tools && cd ..
-          if ! git diff --exit-status internal/mcpserver/tools.json; then
+          if ! git diff --exit-code -- internal/mcpserver/tools.json; then
             echo "::error::internal/mcpserver/tools.json is out of sync with mcp/src/tools.ts. Run 'cd mcp && npm run gen:tools' and commit the result."
             exit 1
           fi

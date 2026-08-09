@@ -70,7 +70,11 @@ var ErrMPQRepackFailed = errors.New("MPQ archive repack failed")
 type folderSource struct{ root string }
 
 func (f folderSource) read(name string) ([]byte, bool, error) {
-	b, err := os.ReadFile(filepath.Join(f.root, name))
+	src, err := f.resolve(name)
+	if err != nil {
+		return nil, false, err
+	}
+	b, err := os.ReadFile(src)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, false, nil
@@ -117,11 +121,11 @@ func (f folderSource) write(name string, data []byte) error {
 // absent — callers (Convert-to-Lua) treat the operation as idempotent.
 // Same path-traversal defense as write.
 func (f folderSource) delete(name string) error {
-	clean := filepath.Clean(name)
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, string(filepath.Separator)+"..") {
-		return fmt.Errorf("delete %q: unsafe path", name)
+	dst, err := f.resolve(name)
+	if err != nil {
+		return err
 	}
-	err := os.Remove(filepath.Join(f.root, clean))
+	err = os.Remove(dst)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -267,9 +271,9 @@ type Session struct {
 	// preserves it verbatim via lossless copy-through. Mirrors the per-kind
 	// dirty* booleans, kept as a map because the storage above is a map.
 	dirtySkinMods map[string]bool
-	shadowMap      *shd.File   // war3map.shd
-	pathingMap     *wpm.File   // war3map.wpm
-	strings        wts.Strings // war3map.wts, for TRIGSTR_<n> resolution
+	shadowMap     *shd.File   // war3map.shd
+	pathingMap    *wpm.File   // war3map.wpm
+	strings       wts.Strings // war3map.wts, for TRIGSTR_<n> resolution
 	// infoTokens maps a Map Info Description field key ("name"/"author"/
 	// "description"/"suggestedPlayers") to its ORIGINAL "TRIGSTR_<n>" token,
 	// captured at Open before ResolveStrings resolved the field to its display
