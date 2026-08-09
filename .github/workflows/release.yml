@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.1.0). Must already exist.'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+      - name: Install NSIS (for Wails -nsis installer step)
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          "C:\\Program Files (x86)\\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+      - name: Build (binary + NSIS installer)
+        run: wails build -platform windows/amd64 -nsis -clean -ldflags "-s -w -X main.AppVersion=${{ steps.ver.outputs.version }}"
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $zip = "wc3-forge-${{ steps.ver.outputs.tag }}-windows-amd64.zip"
+          $staging = "staging"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Get-ChildItem build/bin -File |
+            Where-Object { $_.Name -notmatch '-installer\\.exe$' } |
+            Copy-Item -Destination $staging
+          Compress-Archive -Path "$staging/*" -DestinationPath $zip -Force
+          Get-ChildItem $zip | Select-Object Name, Length
+      - name: Compute checksums (SHA256SUMS)
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
+          $files = @("build/bin/wc3-forge-amd64-installer.exe", "wc3-forge-$tag-windows-amd64.zip")
+          $lines = foreach ($f in $files) {
+            $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash.ToLower()
+            "$h  $(Split-Path -Leaf $f)"
+          }
+          Set-Content -Path SHA256SUMS -Value $lines -Encoding ascii
+          Write-Host "--- SHA256SUMS ---"; Get-Content SHA256SUMS
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            wc3-forge-${{ steps.ver.outputs.tag }}-windows-amd64.zip
+            build/bin/wc3-forge-amd64-installer.exe
+            SHA256SUMS
