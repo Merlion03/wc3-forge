@@ -1,0 +1,182 @@
+[
+  {
+    "name": "scene_query",
+    "description": "High-level read-only query across placed units, doodads/destructibles, regions, and start locations. Use this instead of pulling whole per-kind lists when you need spatial or semantic selection. Attribute and spatial filters are ANDed. `nearest_to` computes true point-to-rectangle distance for regions and sorts by distance by default. `id` means creation_number for unit/doodad/region and start-location index for start_location. Results are paginated (default 100, max 500); kind+id are always returned even when `fields` projects the payload.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "unit",
+              "doodad",
+              "region",
+              "start_location"
+            ]
+          },
+          "description": "entity kinds to search; omit for all four kinds"
+        },
+        "where": {
+          "type": "object",
+          "properties": {
+            "type_id": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 4,
+              "description": "exact 4-char rawcode; applies to units/doodads"
+            },
+            "player": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "exact owning player slot; applies to units"
+            },
+            "name_contains": {
+              "type": "string",
+              "description": "case-insensitive substring; applies to regions"
+            },
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "description": "unified ids: creation_number except start_location uses its index"
+            }
+          },
+          "additionalProperties": false
+        },
+        "spatial": {
+          "type": "object",
+          "properties": {
+            "radius": {
+              "type": "object",
+              "properties": {
+                "x": {
+                  "type": "number"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "radius": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "x",
+                "y",
+                "radius"
+              ],
+              "additionalProperties": false,
+              "description": "circle in WC3 world coordinates; regions match on rectangle intersection"
+            },
+            "rect": {
+              "type": "object",
+              "properties": {
+                "min_x": {
+                  "type": "number"
+                },
+                "min_y": {
+                  "type": "number"
+                },
+                "max_x": {
+                  "type": "number"
+                },
+                "max_y": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "min_x",
+                "min_y",
+                "max_x",
+                "max_y"
+              ],
+              "additionalProperties": false,
+              "description": "inclusive world-coordinate rectangle; regions match on rectangle intersection"
+            },
+            "within_region": {
+              "type": "integer",
+              "description": "region creation_number whose rectangle becomes an additional spatial filter"
+            }
+          },
+          "additionalProperties": false
+        },
+        "nearest_to": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ],
+          "additionalProperties": false,
+          "description": "compute distance from this point; defaults sorting to nearest first"
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "distance",
+            "kind",
+            "id",
+            "x",
+            "y",
+            "type_id"
+          ],
+          "description": "sort key; distance requires nearest_to; defaults to distance with nearest_to, otherwise kind"
+        },
+        "order": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "description": "page size; default 100, hard max 500"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "zero-based result offset"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "kind",
+              "id",
+              "creation_number",
+              "index",
+              "type_id",
+              "name",
+              "player",
+              "position",
+              "bounds",
+              "rotation",
+              "scale",
+              "variation",
+              "life",
+              "flags",
+              "distance"
+            ]
+          },
+          "description": "optional payload projection; kind and id are always included; distance requires nearest_to"
+        }
+      },
+      "additionalProperties": false
+    },
+    "method": "scene.query"
+  }
+]

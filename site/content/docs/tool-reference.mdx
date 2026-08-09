@@ -3,7 +3,7 @@ title: MCP tool reference
 description: Everything Claude Code can do in wc3-forge today, grouped by surface.
 ---
 
-wc3-forge exposes **152 MCP tools**. All entity tools speak **game coordinates**
+wc3-forge exposes **153 MCP tools**. All entity tools speak **game coordinates**
 (origin at map center, units = WC3 world units). All mutations flow through the
 same history stack the GUI uses, so `Ctrl+Z` in the editor undoes Claude's edits
 and vice versa.
@@ -25,6 +25,16 @@ and vice versa.
 `map_info_get`, `map_info_set` — name, author, description, suggested players,
 and the Lua flag. On a localized map these fields are TRIGSTR-backed; edits
 update the referenced `war3map.wts` entry instead of orphaning it.
+
+## Semantic scene query
+
+`scene_query` is the high-level read-only query layer for AI workflows. It can
+search placed **units**, **doodads/destructibles**, **regions**, and **start
+locations** in one call, with attribute filters, circle/rectangle filters,
+`within_region`, nearest-neighbor sorting, pagination, and response-field
+projection. Regions participate spatially as rectangles (distance is measured
+to the nearest rectangle edge, not merely to the center). Start locations are
+surfaced as their own semantic kind rather than duplicated as `sloc` units.
 
 ## Placed units
 
